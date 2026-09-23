@@ -189,8 +189,10 @@ def test_real_log_smoke():
     check(max(c["shield_max"] for c in cur.values() if c["shield_max"] is not None) == 530.0,
           "场2：靶子盾满值 530（外部事实）", max(c["shield_max"] for c in cur.values()))
     st = bl_metrics.shots_to_break(ev)
-    check(len(st) == 20 and all(v["shots"] is None for v in st.values()),
-          "场2：全员未破盾 ⇒ shots 全为 None（外部事实）", len(st))
+    broken2 = sorted(a for a, v in st.items() if v["shots"] is not None)
+    check(len(st) == 20, "场2：20 个 agent 有盾记录（外部事实）", len(st))
+    check(len(broken2) == 4,
+          "场2：4 个 agent 的盾被打掉（独立统计：盾记录结束后仍被命中；旧「归零」判据漏报）", broken2)
     check(sum(bl_metrics.arrow_hits(ev).values()) == 153,
           "场2：箭类命中合计 153 次（145 Arrow 打靶 + 8 Javelin 打弓手，外部事实）",
           sum(bl_metrics.arrow_hits(ev).values()))
@@ -222,6 +224,38 @@ def test_shield_curves_reversals():
           "单调下降 ⇒ reversals 为 0", bl_metrics.shield_curves(shield_sample())[7].get("reversals"))
 
 
+def vanish_sample():
+    """盾 100 → 60 → 10 后被打破：此后命中不再带 shieldHp（引擎移除盾，而不是写 0）。"""
+    return [
+        {"t": "hit", "time": 1.0, "defender": 1, "isMissile": True, "shieldHp": 100.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 2.0, "defender": 1, "isMissile": False, "shieldHp": 60.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 3.0, "defender": 1, "isMissile": True, "shieldHp": 10.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 4.0, "defender": 1, "isMissile": True, "dmg": 40.0},
+        {"t": "hit", "time": 5.0, "defender": 1, "isMissile": False, "dmg": 30.0},
+    ]
+
+
+def test_shield_vanished():
+    c = bl_metrics.shield_curves(vanish_sample())[1]
+    check(c.get("vanished") is True, "vanished = 盾记录结束后仍被命中（实测的破盾表现）", c.get("vanished"))
+    check(c.get("unshielded_after") == 2, "盾消失后仍有 2 次命中", c.get("unshielded_after"))
+    check(c.get("vanish_time") == 4.0, "vanish_time = 第一条不带 shieldHp 的命中时刻", c.get("vanish_time"))
+    check(c.get("broken") is True, "broken 成立", c.get("broken"))
+    check(c.get("break_time") == 4.0, "break_time 指向盾消失时刻", c.get("break_time"))
+    check(c.get("zero_hp") is False, "zero_hp=False（引擎从不写 0）", c.get("zero_hp"))
+    old = bl_metrics.shield_curves(shield_sample())[7]
+    check(old.get("broken") is True and old.get("zero_hp") is True, "旧样例仍算破盾（靠 zero_hp 分支）", old.get("broken"))
+    check(old.get("vanished") is False, "旧样例没有「消失」证据 ⇒ vanished=False", old.get("vanished"))
+    check(old.get("break_time") == 4.0, "旧样例 break_time 仍指向归零时刻（向后兼容）", old.get("break_time"))
+
+
+def test_shots_to_break_after_vanish():
+    r = bl_metrics.shots_to_break(vanish_sample())
+    check(r.get(1, {}).get("shots") == 3,
+          "破盾箭数按「到盾消失时刻（含）」数：t1/t3/t4 共 3 箭（t2 近战不计）", r.get(1))
+    check(r.get(1, {}).get("break_time") == 4.0, "break_time 随新判据", r.get(1))
+
+
 def main():
     print("=" * 88)
     print("bl_metrics 自测（合成事件 + 手算期望）")
@@ -234,6 +268,8 @@ def main():
     test_ai_param_groups()
     test_real_log_smoke()
     test_shield_curves_reversals()
+    test_shield_vanished()
+    test_shots_to_break_after_vanish()
     print("-" * 88)
     if FAIL:
         print("结果: %d 项失败" % len(FAIL))

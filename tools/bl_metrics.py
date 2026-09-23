@@ -24,46 +24,67 @@ def _hits(events):
 
 
 def shield_curves(events):
-    """盾 HP 轨迹（只收带 ``shieldHp`` 字段的 hit 事件）。
+    """盾 HP 轨迹 + 破盾判定。
 
-    返回 {agent_id: {"shield_max": float|None, "points": [(time, hp), ...],
-                    "hits": int, "first": float, "last": float,
-                    "broken": bool, "break_time": float|None}}
+    返回 {agent_id: {"shield_max", "points": [(time, hp), ...], "hits", "first", "last",
+                    "reversals", "zero_hp", "vanished", "unshielded_after",
+                    "vanish_time", "broken", "break_time"}}。
 
-    ``shieldHp`` 由引擎直给（命中后的盾剩余血量）；该字段只在这记命中确实
-    落在盾上时才有 —— 所以「有没有这个字段」本身就是「有没有打中盾」的判据
-    （见知识库 bannerlord-battle-telemetry-semantics §六）。
+    **破盾怎么判（2026-09-24 实测修正）**：源码注释原本设想"从 shieldHp 序列归零即可得
+    几箭破盾"，但四场 0.7.9 日志实测 ``shieldHp`` **归零条数为 0**（最小值 16/5/1/1）——
+    引擎在盾耐久耗尽时是把盾**移除**，而不是留下一条 0 记录。真正的破盾表现是
+    ``TryGetShield`` 再也取不到盾 ⇒ 此后的命中事件**不再带 shieldHp 字段**。因此：
+
+      * ``vanished`` = 该 agent 的盾记录结束之后，它**仍被命中**（且不再带 shieldHp）。
+        这是实测站得住的破盾判据（要求"之后还有命中"，避免把"战斗刚结束"误判成破盾）；
+      * ``zero_hp`` = 是否见过 ``shieldHp <= 0``（实测恒为 False，保留作对照）；
+      * ``broken`` = ``vanished or zero_hp``；
+      * ``reversals`` = 盾值回升次数（盾槽/盾身份变过的信号，见 TryGetShield 口径）。
     """
-    out = {}
+    state = {}
     for e in _hits(events):
-        if "shieldHp" not in e:
-            continue
         d = e.get("defender")
         if d is None:
             continue
-        rec = out.setdefault(d, {
+        rec = state.setdefault(d, {
             "shield_max": None, "points": [], "hits": 0,
-            "first": None, "last": None, "broken": False, "break_time": None,
-            "reversals": 0,
+            "first": None, "last": None, "reversals": 0,
+            "zero_hp": False, "vanished": False, "unshielded_after": 0,
+            "vanish_time": None, "broken": False, "break_time": None,
+            "_last_shield_time": None, "_zero_time": None,
         })
-        hp = float(e.get("shieldHp") or 0.0)
-        t = float(e.get("time") or 0.0)
-        if rec["shield_max"] is None and "shieldMax" in e:
-            rec["shield_max"] = float(e.get("shieldMax") or 0.0)
-        rec["points"].append((t, hp))
-        rec["hits"] += 1
-        if rec["first"] is None:
-            rec["first"] = hp
-        rec["last"] = hp
-        if hp <= 0.0 and not rec["broken"]:
-            rec["broken"] = True
-            rec["break_time"] = t
-    for rec in out.values():
+        if "shieldHp" in e:
+            hp = float(e.get("shieldHp") or 0.0)
+            t = float(e.get("time") or 0.0)
+            if rec["shield_max"] is None and "shieldMax" in e:
+                rec["shield_max"] = float(e.get("shieldMax") or 0.0)
+            rec["points"].append((t, hp))
+            rec["hits"] += 1
+            if rec["first"] is None:
+                rec["first"] = hp
+            rec["last"] = hp
+            rec["_last_shield_time"] = t
+            if hp <= 0.0:
+                if not rec["zero_hp"]:
+                    rec["_zero_time"] = t
+                rec["zero_hp"] = True
+        elif rec["_last_shield_time"] is not None:
+            rec["unshielded_after"] += 1
+            if rec["vanish_time"] is None:
+                rec["vanish_time"] = float(e.get("time") or 0.0)
+    out = {}
+    for d, rec in state.items():
+        if rec["hits"] == 0:
+            continue          # 从来没有过盾记录的 agent 不输出
         rec["points"].sort(key=lambda p: p[0])
-        # 盾值回升 = 该 agent 的盾槽/盾身份发生过变化（TryGetShield 取的是"第一个盾"，
-        # TelemetryBehavior.cs:253-278）⇒ 此时「归零=破盾」的口径不成立，必须让读者看见。
         rec["reversals"] = sum(1 for i in range(1, len(rec["points"]))
                                if rec["points"][i][1] > rec["points"][i - 1][1])
+        rec["vanished"] = rec["unshielded_after"] > 0
+        rec["broken"] = bool(rec["vanished"] or rec["zero_hp"])
+        rec["break_time"] = rec["vanish_time"] if rec["vanished"] else rec["_zero_time"]
+        rec.pop("_last_shield_time", None)
+        rec.pop("_zero_time", None)
+        out[d] = rec
     return out
 
 def shots_to_break(events):
