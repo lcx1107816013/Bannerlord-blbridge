@@ -1,0 +1,69 @@
+﻿# BlBridge 进度列表
+
+> **最后核实：2026-09-24 01:36**（本文件由 Reasonix 会话建立并维护）
+> 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
+> 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
+> 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
+
+## 一、现状核实（本次实测，非引用旧结论）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v0.7.9** |
+| 是否已部署 | ✅ `G:\...\Mount & Blade II Bannerlord\Modules\BlBridge\bin\Win64_Shipping_Client\BlBridge.dll`，58368 B，sha256 `70111C2D5F4A529F…`，与项目 `out\BlBridge.dll` **逐字节一致**（2026-09-24 01:09:12） |
+| 是否在游戏内跑过 | ❌ **没有**。`bridge_status.json` 仍是 0.7.8 那次会话（`state: exited`、`statusWrittenUtc 2026-09-24T00:46:02Z`）；最近一份战斗日志 `battle_20260924_004234_718.jsonl` 是 0.7.8 时代产物 |
+| 版本控制 | ✅ 本轮建立：git 基线 `7d3aadf`（分支 `main`，**无远端**，`core.autocrlf=false`） |
+| 部署目录 `BlBridge.dll.bak_*` | 保留（`build.ps1:190-207` 的**有意机制**：每次部署留备份、只保留最近 3 个）—— 不是残留，勿清 |
+
+## 二、进度列表
+
+状态图例：`[ ]` 未做 · `[~]` 进行中 · `[x]` 完成 · `[!]` 被阻塞
+
+### [ ] ① 0.7.9 六组遥测的游戏内验证
+- **为什么**：0.7.9 的六组遥测只做过"编译通过 + 反编译静态核对"，**没有跑过真实战斗**。不验证就等于所有新数据不可信。
+- **做什么**：启动游戏 → 跑一场靶场/批量 → 核对落盘。
+- **验收标准**：
+  1. `bridge_status.json` 的 `version` 变为 `0.7.9`（当前为 `0.7.8`），`build.fileChangedSinceLoad = false`；
+  2. 新事件类型 `shot` / `state` / `ai` 均出现在 JSONL 中，且关键字段非空（`shot.velocity`、`state.MaxSpeedMultiplier`、`ai` 的 26 个参数）；
+  3. `hit` 新字段（`attackDir` / `speedMod` / `atkStun`·`defStun` / `shieldHp`·`shieldMax`）有非默认值出现；
+  4. 无异常/崩溃，战斗正常结束（`dummy_end` / `end` 事件存在）。
+- **⚠️ 阻塞**：需要**人手启动游戏**（无人值守启动路线已在 `handoff §6` 排除）。
+
+### [ ] ② 分析器扩展（纯 Python，无需游戏）
+- **做什么**（6 项）：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速对账 / 装弹时长 / AI 参数分组。
+- **落点**：`tools/bl_analyze.py`、`tools/bl_dummy_analyze.py`（必要时新增）。
+- **依赖**：形态上不依赖 ①，但**真实验证**依赖 ① （现有样本不含新事件）。
+- **可立即动工**：✅
+
+### [ ] ③ 立项三个模型结论校验 —— 项目存在的理由
+- **待校验结论**：
+  1. "T6 挨 8 箭"
+  2. "护甲回默认后 T4+ 中位 5 箭"
+  3. "材质差异 7%"
+- **🔴 至今一个都没测。**
+- **依赖**：①②（要新遥测 + 要分析器）。
+
+### [ ] ④ 阶段 2④ 报告器补「换边双跑」交叉验证块
+- **问题**：当前报告会把两个**不同兵种**的"A 侧"直接相减，语义误导。
+- **落点**：`tools/bl_compare.py` / `bl_batch.py` 的报告段。
+- **可立即动工**：✅
+
+### [x] ⑤ 卫生：git 基线 + 清残留
+- `7d3aadf` 基线（41 文件；**刻意包含** 4 个 `*.bak_probe` 以便删除可回退）
+- `d92798e` 清理 `src/*.bak_probe`(4) + `tools/__pycache__`（已核实：不被 `build.ps1` 编译、全项目 0 引用）
+- `.gitignore`：`/out/`、`__pycache__/`、`*.pyc`、`*.bak_probe`、本机运行时配置
+- **未处置**：项目仍**无远端仓库**（如需备份/多机协作，需你决定远端方案）
+
+## 三、已排除的路线（别再重走，详见交接快照 §6）
+
+主菜单直接开战 · `Bannerlord.BLSE.Standalone.exe` 无人值守 · 引擎自带 `CombatLogManager`（AI 对局不产出）· 给靶子无限盾耐久（那是被测对象本身）。
+
+## 四、关键路径
+
+| 内容 | 路径 |
+|---|---|
+| 项目本体 | `C:\Users\LCGX\CodeBuddy\20260923171333\BlBridge\` |
+| 构建 | `powershell -ExecutionPolicy Bypass -File .\build.ps1 [-Deploy]` |
+| 战斗日志 | `%USERPROFILE%\Documents\Mount and Blade II Bannerlord\BlBridge\battles\` |
+| 运行时状态 | 同上目录 `bridge_status.json` |
+| 靶场工作区原型 | `%APPDATA%\reasonix\global-workspace\blbridge-dummy-range\` |
