@@ -470,3 +470,59 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+def death_arrow_stats(events):
+    """每个**阵亡者**的挨箭画像 —— 回答「挨几箭才死」。
+
+    返回 {agent_id: {"troop", "maxHp", "death_time", "arrow_hits", "arrow_damaging",
+                    "arrow_damage", "arrow_blocked", "melee_hits",
+                    "killed_by_weapon", "killed_by_missile"}}。
+
+    **两个口径都报**（实测差异极大，只报一个会得出相反结论）：
+      * ``arrow_hits`` = 到死为止承受的**全部**箭类命中（含被盾挡下的）；
+      * ``arrow_damaging`` = 其中**真正扣血**（``damagedHp > 0``）的箭数；``arrow_damage`` = 累计扣血。
+    实测（T6 弓手 40 vs T5 军团兵 5）：``arrow_hits`` 15~35，而 ``arrow_damaging`` 只有 0~6；
+    其中一个挨了 35 箭、累计扣血 **0** 却阵亡 ⇒ 死因是近战（``killed_by_missile`` = False）。
+    不看死因，就会把它算成"被箭射死"。
+    """
+    units = {}
+    kills = {}
+    for e in events:
+        t = e.get("t")
+        if t == "unit":
+            units[e.get("agent")] = e
+        elif t == "kill":
+            kills[e.get("victim")] = e
+    out = {}
+    for a, k in kills.items():
+        u = units.get(a, {})
+        out[a] = {
+            "troop": u.get("troop") or k.get("victimTroop") or "",
+            "maxHp": float(u.get("maxHp") or 0.0),
+            "death_time": float(k.get("time") or 0.0),
+            "arrow_hits": 0, "arrow_damaging": 0, "arrow_damage": 0.0, "arrow_blocked": 0,
+            "melee_hits": 0,
+            "killed_by_weapon": k.get("weaponClass") or "",
+            "killed_by_missile": bool(k.get("isMissile")),
+        }
+    for e in events:
+        if e.get("t") != "hit":
+            continue
+        a = e.get("defender")
+        rec = out.get(a)
+        if rec is None:
+            continue
+        t = float(e.get("time") or 0.0)
+        if rec["death_time"] > 0.0 and t > rec["death_time"]:
+            continue          # 死亡之后的命中不计（异常数据保护）
+        if e.get("isMissile"):
+            rec["arrow_hits"] += 1
+            dh = float(e.get("damagedHp") or 0.0)
+            if dh > 0.0:
+                rec["arrow_damaging"] += 1
+                rec["arrow_damage"] += dh
+            if e.get("blocked"):
+                rec["arrow_blocked"] += 1
+        else:
+            rec["melee_hits"] += 1
+    return out

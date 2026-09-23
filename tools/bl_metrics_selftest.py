@@ -273,6 +273,33 @@ def test_shield_blocks():
           "blocks = 盾耐久真正下降的次数（打中身体不降）—— 这才是「打中盾」", c.get("blocks"))
 
 
+def death_sample():
+    """agent 1（maxHp 100）挨 2 箭（其中 1 箭被盾挡下）+ 1 次近战，最后被近战砍死。"""
+    return [
+        {"t": "unit", "agent": 1, "troop": "t_x", "maxHp": 100.0},
+        {"t": "hit", "time": 1.0, "defender": 1, "isMissile": True, "damagedHp": 30.0, "weaponClass": "Arrow"},
+        {"t": "hit", "time": 2.0, "defender": 1, "isMissile": True, "damagedHp": 0.0, "blocked": True,
+         "weaponClass": "Arrow", "shieldHp": 60.0},
+        {"t": "hit", "time": 3.0, "defender": 1, "isMissile": False, "damagedHp": 20.0, "weaponClass": "OneHandedSword"},
+        {"t": "kill", "time": 4.0, "victim": 1, "killer": 9, "state": "Killed",
+         "victimTroop": "t_x", "weaponClass": "OneHandedSword", "isMissile": False},
+    ]
+
+
+def test_death_arrow_stats():
+    r = bl_metrics.death_arrow_stats(death_sample())
+    d = r.get(1, {})
+    check(d.get("arrow_hits") == 2, "arrow_hits = 全部箭命中（含被挡下的）", d.get("arrow_hits"))
+    check(d.get("arrow_damaging") == 1, "arrow_damaging = 真正扣血的箭只有 1 支", d.get("arrow_damaging"))
+    check(d.get("arrow_damage") == 30.0, "arrow_damage = 30.0", d.get("arrow_damage"))
+    check(d.get("arrow_blocked") == 1, "arrow_blocked = 1", d.get("arrow_blocked"))
+    check(d.get("melee_hits") == 1, "melee_hits = 1", d.get("melee_hits"))
+    check(d.get("troop") == "t_x" and d.get("maxHp") == 100.0, "带出兵种与满血", (d.get("troop"), d.get("maxHp")))
+    check(d.get("killed_by_missile") is False, "killed_by_missile=False ⇒ 死于近战", d.get("killed_by_missile"))
+    check(bl_metrics.death_arrow_stats([{"t": "meta"}]) == {}, "没有 kill 事件 ⇒ 空结果",
+          bl_metrics.death_arrow_stats([{"t": "meta"}]))
+
+
 def main():
     print("=" * 88)
     print("bl_metrics 自测（合成事件 + 手算期望）")
@@ -288,6 +315,7 @@ def main():
     test_shield_vanished()
     test_shots_to_break_after_vanish()
     test_shield_blocks()
+    test_death_arrow_stats()
     print("-" * 88)
     if FAIL:
         print("结果: %d 项失败" % len(FAIL))
