@@ -39,7 +39,13 @@ def shield_curves(events):
         这是实测站得住的破盾判据（要求"之后还有命中"，避免把"战斗刚结束"误判成破盾）；
       * ``zero_hp`` = 是否见过 ``shieldHp <= 0``（实测恒为 False，保留作对照）；
       * ``broken`` = ``vanished or zero_hp``；
-      * ``reversals`` = 盾值回升次数（盾槽/盾身份变过的信号，见 TryGetShield 口径）。
+      * ``reversals`` = 盾值回升次数（盾槽/盾身份变过的信号，见 TryGetShield 口径）；
+      * ``hits`` / ``blocks`` —— **`shieldHp` 字段存在只代表"该次命中时防守方有盾"**（`TryGetShield`
+        成功即写字段），**不代表这一箭打中了盾**！打中盾的判据是**盾耐久下降**（源码：
+        "打中盾 → 这个值下降；打中身体 → 它不变"，`TelemetryBehavior.cs:250-251`）。
+        所以 ``hits`` = 有盾时的命中次数，``blocks`` = 盾真正挡下的次数。
+        实测（弓手 40 vs 军团兵 5）：到死挨 15~35 箭，其中 ``blocks`` 占绝大多数、
+        **真正扣血的只有 0~6 箭** ⇒ 只报 ``hits`` 会严重高估"挨了几箭"。
     """
     state = {}
     for e in _hits(events):
@@ -50,7 +56,7 @@ def shield_curves(events):
             "shield_max": None, "points": [], "hits": 0,
             "first": None, "last": None, "reversals": 0,
             "zero_hp": False, "vanished": False, "unshielded_after": 0,
-            "vanish_time": None, "broken": False, "break_time": None,
+            "vanish_time": None, "broken": False, "break_time": None, "blocks": 0,
             "_last_shield_time": None, "_zero_time": None,
         })
         if "shieldHp" in e:
@@ -79,6 +85,9 @@ def shield_curves(events):
         rec["points"].sort(key=lambda p: p[0])
         rec["reversals"] = sum(1 for i in range(1, len(rec["points"]))
                                if rec["points"][i][1] > rec["points"][i - 1][1])
+        # 「打中盾」= 盾耐久**下降**（源码注释原意）。字段存在只代表"该次命中时防守方有盾"。
+        rec["blocks"] = sum(1 for i in range(1, len(rec["points"]))
+                            if rec["points"][i][1] < rec["points"][i - 1][1])
         rec["vanished"] = rec["unshielded_after"] > 0
         rec["broken"] = bool(rec["vanished"] or rec["zero_hp"])
         rec["break_time"] = rec["vanish_time"] if rec["vanished"] else rec["_zero_time"]

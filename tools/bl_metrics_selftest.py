@@ -256,6 +256,23 @@ def test_shots_to_break_after_vanish():
     check(r.get(1, {}).get("break_time") == 4.0, "break_time 随新判据", r.get(1))
 
 
+def block_sample():
+    """盾 100 → 100（打身体，不变）→ 60（打中盾）→ 60：只有 1 次真的被盾挡下。"""
+    return [
+        {"t": "hit", "time": 1.0, "defender": 1, "isMissile": True, "shieldHp": 100.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 2.0, "defender": 1, "isMissile": True, "shieldHp": 100.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 3.0, "defender": 1, "isMissile": True, "shieldHp": 60.0, "shieldMax": 100.0},
+        {"t": "hit", "time": 4.0, "defender": 1, "isMissile": True, "shieldHp": 60.0, "shieldMax": 100.0},
+    ]
+
+
+def test_shield_blocks():
+    c = bl_metrics.shield_curves(block_sample())[1]
+    check(c.get("hits") == 4, "hits = 有盾时的命中次数（字段存在口径）", c.get("hits"))
+    check(c.get("blocks") == 1,
+          "blocks = 盾耐久真正下降的次数（打中身体不降）—— 这才是「打中盾」", c.get("blocks"))
+
+
 def main():
     print("=" * 88)
     print("bl_metrics 自测（合成事件 + 手算期望）")
@@ -270,6 +287,7 @@ def main():
     test_shield_curves_reversals()
     test_shield_vanished()
     test_shots_to_break_after_vanish()
+    test_shield_blocks()
     print("-" * 88)
     if FAIL:
         print("结果: %d 项失败" % len(FAIL))
