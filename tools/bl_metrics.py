@@ -20,16 +20,38 @@ seam（被测接缝）：每个函数都是「事件流 list[dict] -> 普通 dic
 """
 
 
-import io
-import json
 import math
 import os
+
+import bl_common
 import statistics
 import sys
 
 
 def _hits(events):
     return [e for e in events if e.get("t") == "hit"]
+
+
+def _by_agent(events, kind="state", require=None):
+    """把某类事件按 agent 分组，每组内按 ``time`` 升序。
+
+    code-review（2026-09-24）指出 speed_selfcheck 与 reload_durations 各写了一份
+    同样的「过滤 → 按 agent 分组 → 排序」样板，这里收拢成一处。``require`` 用于
+    只收带某字段的事件（如 reload_durations 只关心带 ``reloading`` 的采样）。
+    """
+    groups = {}
+    for e in events:
+        if e.get("t") != kind:
+            continue
+        if require and require not in e:
+            continue
+        a = e.get("agent")
+        if a is None:
+            continue
+        groups.setdefault(a, []).append(e)
+    for evs in groups.values():
+        evs.sort(key=lambda x: float(x.get("time") or 0.0))
+    return groups
 
 
 def shield_curves(events):
@@ -148,24 +170,20 @@ def arrow_hits(events):
     return out
 
 def speed_selfcheck(events, min_dt=1e-6):
-    """移速对账之一：用同一 agent 相邻两条 ``state`` 的**位置差分**反算速度，
-    与引擎直给的 ``state.speed`` 对账（验证位置与 speed 两个字段自洽）。
+    """移速对账之一：位置差分速度必须落在两端引擎 ``state.speed`` 之间。
 
-    返回 {agent_id: {"n": 对账点数, "max_abs_err": float, "mean_abs_err": float,
-                    "worst": (time, v_from_position, v_from_field, err)}}。
+    返回 {agent_id: {"n", "max_outside", "mean_outside",
+                    "worst": (time, v_from_position, lo, hi, outside)}}。
     只含至少两个可用采样点的 agent。
+
+    **为什么是"区间外距离"而不是"与均值的差"**：相邻两个采样点之间引擎可能真的在加减速，
+    用 ``(speed_p + speed_q) / 2`` 当期望值，会把**真实加减速**误报成"字段不同步"
+    （2026-09-24 code-review 指出）。改为：``v_pos`` 落在 ``[min(speed_p, speed_q),
+    max(speed_p, speed_q)]`` 内记 0，落到区间外才记差多少 —— 这样非零值才真的是
+    位置与速度两个字段互相矛盾。
     """
-    by_agent = {}
-    for e in events:
-        if e.get("t") != "state":
-            continue
-        a = e.get("agent")
-        if a is None:
-            continue
-        by_agent.setdefault(a, []).append(e)
     out = {}
-    for a, evs in by_agent.items():
-        evs = sorted(evs, key=lambda x: float(x.get("time") or 0.0))
+    for a, evs in _by_agent(events).items():
         errs = []
         worst = None
         for p, q in zip(evs, evs[1:]):
@@ -176,14 +194,17 @@ def speed_selfcheck(events, min_dt=1e-6):
             dy = float(q.get("py") or 0.0) - float(p.get("py") or 0.0)
             dz = float(q.get("pz") or 0.0) - float(p.get("pz") or 0.0)
             v_pos = math.sqrt(dx * dx + dy * dy + dz * dz) / dt
-            v_field = (float(p.get("speed") or 0.0) + float(q.get("speed") or 0.0)) / 2.0
-            err = abs(v_pos - v_field)
-            errs.append(err)
-            if worst is None or err > worst[3]:
-                worst = (float(q.get("time") or 0.0), v_pos, v_field, err)
+            sp = float(p.get("speed") or 0.0)
+            sq = float(q.get("speed") or 0.0)
+            lo, hi = min(sp, sq), max(sp, sq)
+            # 落在端点速度区间内 ⇒ 0（可由真实加减速解释）；落在外才记距离。
+            outside = 0.0 if lo <= v_pos <= hi else min(abs(v_pos - lo), abs(v_pos - hi))
+            errs.append(outside)
+            if worst is None or outside > worst[4]:
+                worst = (float(q.get("time") or 0.0), v_pos, lo, hi, outside)
         if errs:
-            out[a] = {"n": len(errs), "max_abs_err": max(errs),
-                      "mean_abs_err": sum(errs) / len(errs), "worst": worst}
+            out[a] = {"n": len(errs), "max_outside": max(errs),
+                      "mean_outside": sum(errs) / len(errs), "worst": worst}
     return out
 
 def speed_vs_cap(events):
@@ -236,17 +257,8 @@ def reload_durations(events, sample_interval=2.0):
 
     返回 {agent_id: {"episodes", "durations", "median", "truncated", "resolution"}}。
     """
-    by_agent = {}
-    for e in events:
-        if e.get("t") != "state" or "reloading" not in e:
-            continue
-        a = e.get("agent")
-        if a is None:
-            continue
-        by_agent.setdefault(a, []).append(e)
     out = {}
-    for a, evs in by_agent.items():
-        evs = sorted(evs, key=lambda x: float(x.get("time") or 0.0))
+    for a, evs in _by_agent(events, require="reloading").items():
         durations = []
         truncated = 0
         i, n = 0, len(evs)
@@ -311,24 +323,9 @@ def ai_param_groups(events):
 
 # ── I/O 与渲染层（不属于被测接缝）─────────────────────────────────────
 
-def load_events(path):
-    """读 JSONL 事件流。"""
-    ev = []
-    with io.open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev.append(json.loads(line))
-            except ValueError:
-                continue
-    return ev
-
-
-def default_battles_dir():
-    return os.path.join(os.path.expanduser("~"), "Documents",
-                        "Mount and Blade II Bannerlord", "BlBridge", "battles")
+# I/O 与格式化收拢在 bl_common（code-review 2026-09-24：消除 Duplicated Code）。
+# 用别名而不是 import from，是为了保住既有公开名（bl_death_compare / 自测都在用）。
+load_events = bl_common.load_events
 
 
 def analyze_metrics(events):
@@ -348,12 +345,7 @@ def analyze_metrics(events):
     }
 
 
-def _fmt(v, nd=1):
-    if v is None:
-        return "-"
-    if isinstance(v, float):
-        return ("%." + str(nd) + "f") % v
-    return str(v)
+_fmt = bl_common.fmt
 
 
 def _bar(count, peak, width=36):
@@ -413,12 +405,12 @@ def render(events, top=8):
     ss = res["speed_self"]
     L.append("④ 移速对账")
     if ss:
-        worst = max(ss.items(), key=lambda kv: kv[1]["max_abs_err"])
-        L.append("   位置差分 vs 引擎 speed：%d 个 agent、%d 个对账点；"
-                 "平均误差 %.3f、最大误差 %.3f（最差 agent %s）" % (
+        worst = max(ss.items(), key=lambda kv: kv[1]["max_outside"])
+        L.append("   位置差分 vs 引擎 speed（区间外距离，0=自洽）：%d 个 agent、%d 个对账点；"
+                 "平均 %.3f、最大 %.3f（最差 agent %s）" % (
                      len(ss), sum(v["n"] for v in ss.values()),
-                     sum(v["mean_abs_err"] for v in ss.values()) / len(ss),
-                     worst[1]["max_abs_err"], worst[0]))
+                     sum(v["mean_outside"] for v in ss.values()) / len(ss),
+                     worst[1]["max_outside"], worst[0]))
     else:
         L.append("   位置差分 vs 引擎 speed：无样本")
     cap = res["speed_cap"]
@@ -467,20 +459,17 @@ def _safe_streams():
 
 
 def main(argv=None):
+    """用法：python bl_metrics.py [battle.jsonl | 目录]（缺省分析最新一场）。"""
     _safe_streams()
-    argv = list(sys.argv[1:] if argv is None else argv)
-    as_json = "--json" in argv
-    argv = [a for a in argv if not a.startswith("--")]
+    argv = [a for a in (sys.argv[1:] if argv is None else argv) if not a.startswith("--")]
     path = argv[0] if argv else None
     if path is None:
-        d = default_battles_dir()
-        files = [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(".jsonl")] if os.path.isdir(d) else []
-        if not files:
+        path = bl_common.latest_battle()
+        if path is None:
             print("没有战斗日志，也没给路径。")
             return 2
-        path = max(files, key=os.path.getmtime)
     if os.path.isdir(path):
-        files = sorted(os.path.join(path, f) for f in os.listdir(path) if f.lower().endswith(".jsonl"))
+        files = bl_common.list_battle_files(path)
     else:
         files = [path]
     for f in files:
@@ -489,12 +478,8 @@ def main(argv=None):
         except OSError as exc:
             print("读不了 %s: %s" % (f, exc))
             continue
-        if as_json:
-            out = {"file": f, "metrics": analyze_metrics(ev)}
-            print(json.dumps(out, ensure_ascii=False, indent=1, default=str))
-        else:
-            print(render(ev))
-            print()
+        print(render(ev))
+        print()
     return 0
 
 

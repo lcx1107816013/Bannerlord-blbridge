@@ -54,16 +54,18 @@
 - **📌 磁盘预算**：单场 2.1–2.4 MB（上轮 0.48 MB，×4–5），大头是 `state`（每 2 秒 × 40 agent ≈ 4586 条/场）⇒ 批量跑前先算容量。
 
 ### [x] ② 分析器扩展 —— ✅ 已完成（2026-09-24，TDD 8 片红绿循环）
-- **落点**：新建 `tools/bl_metrics.py`（8 个纯函数 seam + 薄渲染/CLI）与 `tools/bl_metrics_selftest.py`（74 项断言）。
+- **落点**：新建 `tools/bl_metrics.py`（8 个纯函数 seam + 薄渲染/CLI）与 `tools/bl_metrics_selftest.py`（75 项断言）。
   **未改动** `bl_analyze.py` / `bl_dummy_analyze.py` / `bl_mcp.py` ⇒ 零回归。
 - **seam（已与你确认）**：`events: list[dict] -> dict/list` 的纯函数，可直接喂合成事件做**手算**断言：
   `shield_curves` / `shots_to_break` / `arrow_hits` / `speed_selfcheck` / `speed_vs_cap` / `reload_durations` / `ai_param_groups` / `death_arrow_stats`
-- **验收**：`python tools/bl_metrics_selftest.py` → 74/74 通过（含真实日志 smoke）；
+- **验收**：`python tools/bl_metrics_selftest.py` → 75/75 通过（含真实日志 smoke）；
   对两场真实 0.7.9 日志 `python tools/bl_metrics.py <jsonl>` 均出报告。
 - **实测结论（两场）**：
   - 挨箭分布：场 1 中位 11 箭/人、场 2 中位 4 箭/人（场 2 合计 153 箭，与独立解析一致）
-  - 移速自洽：位置差分 vs 引擎 `speed`，平均误差 0.098~0.144、最大 1.5~2.1
-    ⇒ **非零**：位置与速度两个字段并不完全自洽，值得追（可能是采样时刻与速度不同步）
+  - 移速自洽（口径已修正，见 §六）：位置差分 vs 引擎 `speed` 的**区间外距离** ——
+    最近 20 场 / 869 个 agent 中 **69.9% 完全自洽（区间外距离 = 0）**，中位 0.0000、最大 2.93。
+    ⇒ 结论由旧口径的"普遍不同步"更正为"**大多数自洽，约 30% 的 agent 有区间外偏离**"
+    （大概是采样跨过了速度突变时刻）；旧数字 0.098~0.144 建立在一个有偏的近似上，已废。
   - 装弹：中位 **2.00 秒 = 恰好一个采样间隔** ⇒ 分辨率不足，该指标目前只能当**上界**
   - AI 参数：每兵种 30 个参数，两场各 2 兵种 × 20 agent
 - **⚠️ 本轮纠错（我自己写错的，已修）**：初版 `speed_vs_cap` 用 `speed > maxSpeed` 判"超上限"，
@@ -175,3 +177,20 @@
 `--json` 当前无消费者（Speculative Generality，且接线会违反"不改 bl_mcp.py"的裁定）。
 **一条子代理误报**：其称 `render` 取 `meta.file` 恒空 —— 实测 `meta` 事件**带** `file` 字段，不成立。
 **方法学限制**：两个审查子代理**没有 shell 工具**，无法实跑 `git diff`；其"未改动 bl_analyze.py/bl_mcp.py"等结论由主代理用 git 复核确认。
+
+**② 后续「全部处理」（2026-09-24，同一轮）** —— 把审查中留作判断项的 5 条也做了：
+
+| # | 项 | 处理 |
+|---|---|---|
+| 5 | `speed_selfcheck` 用"与区间均值的差"当误差，会把**真实加减速**误报成字段不同步 | 改为**区间外距离**（v_pos 落在两端 speed 之间即 0）；结论数字随之更正（见 ② 段） |
+| 6 | 指标函数重复「过滤 → 按 agent 分组 → 按 time 排序」样板 | 抽出 `_by_agent()` 供 `speed_selfcheck` / `reload_durations` 共用 |
+| 7 | `load_events` / `_fmt` / 「列 battles」在三个文件里逐字重复 | 新建 `tools/bl_common.py` 收拢；`bl_analyze.py` / `bl_metrics.py` / `bl_death_compare.py` 共用（`bl_analyze` 的公开名保留 ⇒ `bl_mcp.py` 无需改，契约未动） |
+| 8 | `--json` 当前无消费者（Speculative Generality） | 删掉；等真有消费者再加，避免"一接线就得违反不改 bl_mcp.py 的裁定" |
+| 9 | 新指标不在主回归链（改坏了也无人发现） | `bl_selftest.py` 新增 ⑨ 分节调用 `bl_metrics_selftest.main()`，失败并入其 FAIL 汇总 |
+
+顺带修掉两处小问题：`bl_death_compare.py --dir` 原先直接 `os.listdir`（无 isdir 保护）→ 改用 `bl_common.list_battle_files()`；
+`bl_metrics.py` 去掉已无人使用的 `io` / `json` 导入。
+
+**⚠️ 本轮踩坑（记以免再犯）**：用 pwsh 的 `Get-Content -Raw` + `Set-Content` 去改 `bl_analyze.py`，
+把文件里的中文**写坏**（`SyntaxError: unterminated string literal` + 满屏乱码），只能 `git checkout` 还原。
+**教训：改含非 ASCII 的源文件不要走 pwsh 的文本读写，用 Python（显式 `encoding="utf-8"` + `newline=""`）。**

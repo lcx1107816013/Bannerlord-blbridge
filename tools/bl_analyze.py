@@ -13,63 +13,15 @@ BlBridge 遥测分析器（仅标准库）。
   python bl_analyze.py --all                # 分析目录里全部战斗，汇总
   python bl_analyze.py --json               # 输出 JSON（给 MCP 用）
 """
-import io
 import json
 import os
 import statistics
 import sys
 
 
-def default_log_dir():
-    return os.path.join(os.path.expanduser("~"), "Documents",
-                        "Mount and Blade II Bannerlord", "BlBridge")
-
-
-def battles_dir(log_dir=None):
-    return os.path.join(log_dir or default_log_dir(), "battles")
-
-
-def latest_battle(log_dir=None):
-    d = battles_dir(log_dir)
-    if not os.path.isdir(d):
-        return None
-    files = [os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith(".jsonl")]
-    if not files:
-        return None
-    files.sort(key=lambda p: os.path.getmtime(p))
-    return files[-1]
-
-
-def list_battles(log_dir=None):
-    d = battles_dir(log_dir)
-    out = []
-    if not os.path.isdir(d):
-        return out
-    for f in sorted(os.listdir(d)):
-        if not f.lower().endswith(".jsonl"):
-            continue
-        p = os.path.join(d, f)
-        try:
-            st = os.stat(p)
-        except OSError:
-            continue
-        out.append({"file": p, "name": f, "size": st.st_size, "mtime": st.st_mtime})
-    out.sort(key=lambda x: x["mtime"])
-    return out
-
-
-def load_events(path):
-    ev = []
-    with io.open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev.append(json.loads(line))
-            except ValueError:
-                continue
-    return ev
+# I/O 与目录扫描收拢在 bl_common（code-review 2026-09-24：三处重复合并成一处）。
+# 这里保留同名的公开入口 —— bl_mcp.py 与 bl_selftest.py 一直在用它们。
+from bl_common import battles_dir, default_log_dir, latest_battle, list_battles, load_events  # noqa: E402,F401
 
 
 def _pct(vals, q):

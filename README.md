@@ -49,7 +49,7 @@ BlBridge/
   tools/bl_cmd.py                 命令行：status / start / wait / batch / compare / buildcheck / fastforward / speed
   tools/bl_selftest.py            自测（合成数据 + MCP 协议 + 控制通道 + 假游戏端 + 构建链 + 配置 + 崩溃判定）
   tools/bl_metrics.py             0.7.9 遥测指标分析器（8 个纯函数 seam：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速自洽与倍率 / 装弹时长 / AI 参数分组 / 阵亡挨箭画像）
-  tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，74 项断言）
+  tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
   tools/plan.example.json         跑批计划示例（换边双跑）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）

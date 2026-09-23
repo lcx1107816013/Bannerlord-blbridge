@@ -90,13 +90,24 @@ def speed_sample():
     ]
 
 
+def outside_sample():
+    """agent 2：1 秒走了 1.5 距离，但两端引擎 speed 都是 1.0 ⇒ 区间外 0.5。"""
+    return [
+        {"t": "state", "time": 0.0, "agent": 2, "px": 0.0, "py": 0.0, "pz": 0.0, "speed": 1.0},
+        {"t": "state", "time": 1.0, "agent": 2, "px": 1.5, "py": 0.0, "pz": 0.0, "speed": 1.0},
+    ]
+
+
 def test_speed_selfcheck():
     r = bl_metrics.speed_selfcheck(speed_sample())
     check(1 in r, "agent 1 出现", sorted(r))
     check(r.get(1, {}).get("n") == 2, "两段相邻采样 = 2 个对账点", r.get(1))
-    check(abs(r.get(1, {}).get("max_abs_err", -1) - 0.25) < 1e-9,
-          "手算：段1 |2.0-(2.0+2.5)/2|=0.25；段2 |3.0-(2.5+3.0)/2|=0.25", r.get(1))
-    one = bl_metrics.speed_selfcheck([{"t": "state", "time": 0.0, "agent": 2, "px": 0.0, "speed": 1.0}])
+    check(r.get(1, {}).get("max_outside", -1) == 0.0,
+          "位置差分速度落在两端 speed 之间 ⇒ 区间外距离 0（真实加减速不算不同步）", r.get(1))
+    o = bl_metrics.speed_selfcheck(outside_sample())
+    check(abs(o.get(2, {}).get("max_outside", -1) - 0.5) < 1e-9,
+          "手算：v_pos=1.5 而两端 speed=1.0 ⇒ 区间外 0.5", o.get(2))
+    one = bl_metrics.speed_selfcheck([{"t": "state", "time": 0.0, "agent": 9, "px": 0.0, "speed": 1.0}])
     check(one == {}, "只有单个采样点的 agent 不算（无从差分）", one)
 
 

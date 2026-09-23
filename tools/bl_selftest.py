@@ -474,6 +474,16 @@ def main():
 
     shutil.rmtree(tmp, ignore_errors=True)
     print()
+    # ── ⑨ bl_metrics 指标断言（独立模块，纳入主回归链）──────────────
+    # code-review 2026-09-24 指出：新指标不在主回归链，等于没人跑。
+    print()
+    print("=" * 90)
+    print("⑨ bl_metrics 指标断言（合成事件手算 + 真实日志 smoke）")
+    print("=" * 90)
+    import bl_metrics_selftest
+    if bl_metrics_selftest.main() != 0:
+        FAIL.append("bl_metrics_selftest（详见上方输出）")
+
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))
         return 1

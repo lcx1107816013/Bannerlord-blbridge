@@ -15,6 +15,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 import bl_metrics  # noqa: E402
 
 
@@ -35,10 +36,9 @@ def main():
     args = ap.parse_args()
     files = list(args.files)
     if args.dir:
-        files += [os.path.join(args.dir, n) for n in sorted(os.listdir(args.dir)) if n.endswith(".jsonl")]
+        files += bl_common.list_battle_files(args.dir)
     if not files:
-        d = bl_metrics.default_battles_dir()
-        files = [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(".jsonl")]
+        files = bl_common.list_battle_files()
     if not files:
         print("没有 JSONL 可分析。")
         return 2
