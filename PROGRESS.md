@@ -137,9 +137,22 @@
   `bl_compare` 原先从 `bl_dummy_analyze` 取的 `load` 也改为复用 `bl_common.load_events`。
 - **补测试覆盖缺口**：原先只测纯函数，`main()` 接入层改了 `stats` 结构却漏改一处解包
   （纯函数测试全绿、CLI 直接崩）⇒ 新增端到端测试（subprocess + GBK 环境 + 临时 manifest）。
-- **⚠️ 数值边界（诚实标注）**：交叉验证的**数学**用构造 manifest + 真实日志验过（自洽），
-  但**真正有意义的数值需要一次真实换边双跑**（`bl_batch.py --plan plan.json`，plan 里两个 config 的
-  attacker/defender 对调）—— 本轮没有跑，所以报告里的位置效应数字尚未取得真实样本。
+- **▶ 真实数值（2026-09-24，6 场换边双跑：`imperial_legionary` vs `battanian_wildling` 各 20 人 × 3 局）**
+  复现：`python tools/bl_batch.py --plan tools/plan.example.json --out runs.json`
+  → `python tools/bl_compare.py --manifest runs.json`
+
+  | 兵种 | 当攻方（满编占比） | 当守方 | 攻 − 守 |
+  |---|---|---|---|
+  | `imperial_legionary` | 25.3% | 28.7% | **−3.4** |
+  | `battanian_wildling` | 71.3% | 74.7% | **−3.4** |
+
+  - **位置效应 = −1.7 个百分点**（极小）⇒ v0.7.3 的"对称化"确实把攻守位偏差压到了接近零 ✓
+  - **兵种差异 = −46.0 个百分点**（巨大）⇒ 满编窗口里 `wildling` 的输出效率约为 `legionary` 的 2.8 倍
+  - 对称性核对：两组攻方占比之和 96.6%（偏离 −3.4 = 2 × 位置效应）✓ 数学自洽
+  - **⚠️ 反直觉、且对实验设计重要**：`legionary` 满编输出效率低得多，**但最终 5 胜 1 负**
+    （`wildling` 1 胜 5 负）⇒ **满编窗口占比是"输出效率"，不是"胜负预测器"**。
+    另外两组的「满编 → 全程」占比**方向完全相反**（25.3%→49.8% 与 71.3%→39.0%），
+    这正是"全程口径被幸存者偏差污染"的对称证据（赢的一方活更久 ⇒ 全程占比被抬高）。
 
 ### [x] ⑤ 卫生：git 基线 + 清残留
 - `7d3aadf` 基线（41 文件；**刻意包含** 4 个 `*.bak_probe` 以便删除可回退）
