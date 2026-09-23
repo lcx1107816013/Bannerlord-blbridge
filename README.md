@@ -290,11 +290,15 @@ manifest_missing         旧版部署，没有清单
 |---|---|
 | `meta` | schema / mod / version / startedUtc |
 | `unit` | agent, side, troop, level, isHero, isMounted, maxHp |
-| `hit` | attacker, defender, aSide, dSide, aTroop, dTroop, weaponClass, isMissile, damageType, bodyPart, **dmg**, magnitude, absorbedByArmor, strikeType, hpAfter, hpMax, mounted |
+| `hit` | attacker, defender, aSide, dSide, aTroop, dTroop, weaponClass, isMissile, damageType, bodyPart, **dmg**, magnitude, absorbedByArmor, strikeType, hpAfter, hpMax, mounted；**v0.7.9 起**另带 `blocked`、**`damagedHp`**（引擎直给的实际扣血）、`hitDistance`、`shotDifficulty`、`attackDir`、`attackType`、`speedMod`、`atkStun`、`defStun`、`dmgPct`、`blowFlags`（逗号组合串）、`shieldHp`、`shieldMax` |
+| `shot` | **v0.7.9 起**：shooter, side, troop, weaponSlot, weaponClass, px/py/pz（位置）, vx/vy/vz（速度向量）, speed |
+| `state` | **v0.7.9 起**：每 2 秒 × agent：agent, side, troop, px/py/pz, vx/vy, speed, maxSpeed, combatSpeed, armorEnc, weapEnc, morale, aiState, reloading, reloadPhase, reloadCount, ammo, ammoMax（末 5 项在取不到武器时会缺） |
+| `ai` | **v0.7.9 起**：每 agent 一条，30 个 AI / 精度参数（格挡能力、射击频率、瞄准误差、提前量误差…）；**v0.8.0 起**另带 `armorHead` / `armorTorso` / `armorLegs` / `armorArms`（四部位护甲值，用于验证护甲覆盖是否生效） |
 | `kill` | victim, killer, victimTroop, killerTroop, vSide, state, dmg, damageType, bodyPart, isMissile, weaponClass |
 | `flee` / `panic` | agent, side, troop |
 | `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp |
-| `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError** |
+| `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
+| `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch |
 
 ---
 

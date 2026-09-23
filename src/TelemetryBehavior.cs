@@ -519,6 +519,12 @@ namespace BlBridge
                 sb.Append(",\"maxSpeed\":").Append(Jw.N(DP(a, DrivenProperty.MaxSpeedMultiplier)));
                 sb.Append(",\"combatSpeed\":").Append(Jw.N(DP(a, DrivenProperty.CombatMaxSpeedMultiplier)));
                 sb.Append(",\"armorEnc\":").Append(Jw.N(DP(a, DrivenProperty.ArmorEncumbrance)));
+            // 四部位护甲值：既是"护甲覆盖是否生效"的判据，也是护甲对照实验的自变量读数。
+            // 部位名照引擎真名（ArmorTorso / ArmorLegs / ArmorArms，不是 Body / Arm / Leg）。
+            sb.Append(",\"armorHead\":").Append(Jw.N(DP(a, DrivenProperty.ArmorHead)));
+            sb.Append(",\"armorTorso\":").Append(Jw.N(DP(a, DrivenProperty.ArmorTorso)));
+            sb.Append(",\"armorLegs\":").Append(Jw.N(DP(a, DrivenProperty.ArmorLegs)));
+            sb.Append(",\"armorArms\":").Append(Jw.N(DP(a, DrivenProperty.ArmorArms)));
                 sb.Append(",\"weapEnc\":").Append(Jw.N(DP(a, DrivenProperty.WeaponsEncumbrance)));
                 // 攻击/格挡倾向（AI 战斗参数）
                 sb.Append(",\"blockAbility\":").Append(Jw.N(DP(a, DrivenProperty.AIBlockOnDecideAbility)));

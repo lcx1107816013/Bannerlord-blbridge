@@ -175,6 +175,11 @@ namespace BlBridge
             bool freezeDummies = Jmini.Str(raw, "freezeDummies", "false") == "true";
             // v0.7.9：给射手补满弹药（靶子的弹药不补 —— 它是被测对象）
             bool unlimitedAmmo = Jmini.Str(raw, "unlimitedAmmo", "false") == "true";
+            // 靶子护甲数值覆盖（-1 = 该部位不动）；只作用于靶子，每帧重申（零 Harmony）
+            double armorHead = Jmini.Num(raw, "dummyArmorHead", -1.0);
+            double armorTorso = Jmini.Num(raw, "dummyArmorTorso", -1.0);
+            double armorLegs = Jmini.Num(raw, "dummyArmorLegs", -1.0);
+            double armorArms = Jmini.Num(raw, "dummyArmorArms", -1.0);
 
             // 1) 必须处于自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）
             string stateName = "";
@@ -248,6 +253,10 @@ namespace BlBridge
                                             : BattleSideEnum.None;
                 DummyRangeBehavior.FreezeDummies = freezeDummies;
                 DummyRangeBehavior.UnlimitedAmmoForShooters = unlimitedAmmo;
+                DummyRangeBehavior.ArmorHead = (float)armorHead;
+                DummyRangeBehavior.ArmorTorso = (float)armorTorso;
+                DummyRangeBehavior.ArmorLegs = (float)armorLegs;
+                DummyRangeBehavior.ArmorArms = (float)armorArms;
 
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;

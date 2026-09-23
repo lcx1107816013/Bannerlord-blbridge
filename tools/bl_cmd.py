@@ -59,6 +59,9 @@ def main(argv):
                    help="靶场模式下属实冻结靶子的 AI（不还手；默认关闭，冻结会改变 AI 行为）")
     p.add_argument("--unlimited-ammo", action="store_true",
                    help="给射手补满弹药（长测不中断；靶子的弹药不补，它是被测对象）")
+    p.add_argument("--dummy-armor", default=None,
+                   help="靶子护甲数值覆盖，如 head=45,torso=35,legs=20,arms=25"
+                        "（只作用于靶子；未写的部位不动；每帧重申，零 Harmony）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -112,6 +115,16 @@ def main(argv):
             "freezeDummies": "true" if args.freeze_dummies else "false",
             "unlimitedAmmo": "true" if args.unlimited_ammo else "false",
             }
+        if getattr(args, "dummy_armor", None):
+            part_keys = {"head": "dummyArmorHead", "torso": "dummyArmorTorso",
+                         "legs": "dummyArmorLegs", "arms": "dummyArmorArms"}
+            for part in args.dummy_armor.split(","):
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                key = part_keys.get(k.strip().lower())
+                if key:
+                    params[key] = v.strip()
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

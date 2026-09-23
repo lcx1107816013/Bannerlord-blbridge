@@ -68,6 +68,19 @@ namespace BlBridge
         /// </summary>
         internal static bool UnlimitedAmmoForShooters = false;
 
+        /// <summary>
+        /// v0.7.9+：靶子护甲数值覆盖（-1 = 不覆盖），每帧重申。
+        /// 不用 Harmony patch SandboxAgentStatCalculateModel.UpdateHumanStats（第三方编辑器
+        /// KunKunEditor 的做法）：本项目"删掉模块即完全回退"的性质要求**零 patch**；
+        /// 每帧重申与 ApplyDummyToughness 同因 —— AgentDrivenProperties 是引擎每次重算
+        /// 属性时重写的对象，只设一次会被覆盖。
+        /// 部位名照引擎真名（不是 Body / Arm）：Head / Torso / Legs / Arms。
+        /// </summary>
+        internal static float ArmorHead = -1f;
+        internal static float ArmorTorso = -1f;
+        internal static float ArmorLegs = -1f;
+        internal static float ArmorArms = -1f;
+
         private float _elapsed;
         private int _seq;
         private int _restored;
@@ -97,6 +110,7 @@ namespace BlBridge
                 {
                     WriteMetaOnce();
                     ApplyDummyToughness();
+                    ApplyArmorOverride();
                     if (FreezeDummies && !_frozen)
                     {
                         FreezeAll();
@@ -222,6 +236,9 @@ namespace BlBridge
                 //   而手动战斗根本不走 start_battle，没有别的地方会清它。
                 DummySide = BattleSideEnum.None;
                 FreezeDummies = false;
+                // 顺手补上原先漏掉的两项（static 字段残留会污染玩家之后的手动战斗）
+                UnlimitedAmmoForShooters = false;
+                ArmorHead = ArmorTorso = ArmorLegs = ArmorArms = -1f;
             }
         }
 
@@ -234,6 +251,10 @@ namespace BlBridge
             StringBuilder sb = new StringBuilder();
             sb.Append("{\"t\":\"dummy_meta\",\"dummySide\":\"").Append(DummySide.ToString()).Append('"');
             sb.Append(",\"freeze\":").Append(Jw.B(FreezeDummies));
+            sb.Append(",\"armor\":{\"head\":").Append(Jw.N(ArmorHead))
+              .Append(",\"torso\":").Append(Jw.N(ArmorTorso))
+              .Append(",\"legs\":").Append(Jw.N(ArmorLegs))
+              .Append(",\"arms\":").Append(Jw.N(ArmorArms)).Append('}');
             sb.Append(",\"note\":\"Mortal + OnScoreHit 内回血；applied 取自引擎 damagedHp\"}");
             Jw.Write(sb.ToString());
         }
@@ -307,6 +328,35 @@ namespace BlBridge
                 {
                     a.Health = a.HealthLimit;
                     _restored++;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 把靶子的四个部位护甲设成指定值（每帧重申）。零 Harmony —— 见静态字段处的说明。
+        /// </summary>
+        private void ApplyArmorOverride()
+        {
+            if (ArmorHead < 0f & ArmorTorso < 0f & ArmorLegs < 0f & ArmorArms < 0f) return;
+            Mission m = Mission.Current;
+            if (m == null) return;
+            foreach (Agent a in m.Agents)
+            {
+                if (a == null) continue;
+                if (!a.IsActive()) continue;
+                if (!a.IsHuman) continue;
+                if (!IsDummy(a)) continue;
+                try
+                {
+                    AgentDrivenProperties props = a.AgentDrivenProperties;
+                    if (props == null) continue;
+                    if (ArmorHead >= 0f) props.ArmorHead = ArmorHead;
+                    if (ArmorTorso >= 0f) props.ArmorTorso = ArmorTorso;
+                    if (ArmorLegs >= 0f) props.ArmorLegs = ArmorLegs;
+                    if (ArmorArms >= 0f) props.ArmorArms = ArmorArms;
+                }
+                catch
+                {
                 }
             }
         }

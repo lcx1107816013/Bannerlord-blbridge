@@ -220,3 +220,31 @@
 **⚠️ 本轮踩坑（记以免再犯）**：用 pwsh 的 `Get-Content -Raw` + `Set-Content` 去改 `bl_analyze.py`，
 把文件里的中文**写坏**（`SyntaxError: unterminated string literal` + 满屏乱码），只能 `git checkout` 还原。
 **教训：改含非 ASCII 的源文件不要走 pwsh 的文本读写，用 Python（显式 `encoding="utf-8"` + `newline=""`）。**
+
+## 七、靶子护甲数值覆盖（v0.8.0，**未游戏内验证**）
+
+**目的**：回答立项里的旋钮问题（"护甲 ×1.15"这类改动到底值不值），并给"材质/护甲对照"打第一层地基。
+
+**实现（零 Harmony）**：`DummyRangeBehavior` 新增 `ArmorHead` / `ArmorTorso` / `ArmorLegs` / `ArmorArms`
+（`-1` = 该部位不覆盖），在 `OnMissionTick` 里**每帧重申**到靶子；
+CLI：`python tools/bl_cmd.py start ... --dummy-armor head=45,torso=35,legs=20,arms=25`。
+
+- **为什么不用 Harmony patch**：第三方编辑器 `KunKunEditor`（已反编译对照）走的是
+  `[HarmonyPatch(typeof(SandboxAgentStatCalculateModel), "UpdateHumanStats")]` + 直接改 `AgentDrivenProperties`。
+  本项目"删掉模块即完全回退"的性质要求**零 patch**，所以改用每帧重申 —— 与既有 `ApplyDummyToughness`
+  同因：`AgentDrivenProperties` 是引擎每次重算属性时**重写的对象**，只设一次会被覆盖。
+- **部位名照引擎真名**：`ArmorHead` / **`ArmorTorso`** / **`ArmorLegs`** / **`ArmorArms`** ——
+  不是控制台命令里那种 `set_body_armor` / `set_arm_armor` 的 Body / Arm 命名。
+  **编译器已替我们验证**这四个 `DrivenProperty` 项存在（编译通过即证据）。
+- **新增遥测（可验证性的前提）**：`ai` 事件补 `armorHead` / `armorTorso` / `armorLegs` / `armorArms`
+  —— 没有它就**无法证明覆盖生效**。
+- **顺手修的既有缺陷**：`OnRemoveBehavior` 原先只复位 `DummySide` / `FreezeDummies`，漏了
+  `UnlimitedAmmoForShooters` 与新的护甲字段（static 残留会污染玩家之后的手动战斗），已补齐。
+
+**验证状态**：编译通过（58 KB、`0.8.0`）；**尚未部署、未游戏内验证**（`build.ps1 -Deploy` 要求先关闭游戏）。
+**待验证判据**：① `dummy_meta.armor` 与 `ai` 事件的四部位护甲值等于指定值；
+② 同一场里覆盖前后 `hit.damagedHp` 分布发生变化。
+
+**另一条已勘察的路线（未实施）**：真"换装备/材质" —— 参照 `CharacterReload`（本机，Vortex 部署）的姿势：
+`Equipment.Clone(false)` + 槽位赋值 + `CalculateEquipmentCode()`，或 `Equipment.AddEquipmentToSlotWithoutAgent`；
+作用于**开战前**的靶子 `CharacterObject`，同样零 Harmony。它才是"材质差异 7%"要的路。
