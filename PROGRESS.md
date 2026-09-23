@@ -13,6 +13,8 @@
 | 是否已部署 | ✅ `G:\...\Mount & Blade II Bannerlord\Modules\BlBridge\bin\Win64_Shipping_Client\BlBridge.dll`，58368 B，sha256 `70111C2D5F4A529F…`，与项目 `out\BlBridge.dll` **逐字节一致**（2026-09-24 01:09:12） |
 | 是否在游戏内跑过 | ❌ **没有**。`bridge_status.json` 仍是 0.7.8 那次会话（`state: exited`、`statusWrittenUtc 2026-09-24T00:46:02Z`）；最近一份战斗日志 `battle_20260924_004234_718.jsonl` 是 0.7.8 时代产物 |
 | 版本控制 | ✅ 本轮建立：git 基线 `7d3aadf`（分支 `main`，**无远端**，`core.autocrlf=false`） |
+| 源码 ↔ 部署 一致性 | ✅ `bl_cmd.py buildcheck` 判 **文件链条一致**（`builtVersion 0.7.9`、`builtUtc 01:09:12` 本地、`deployedSha256 70111c2d…`）⇒ 游戏里的 0.7.9 **确实由当前 src 构建**，① 的验证对象有效 |
+| 离线自测 | ✅ `bl_selftest.py` **全部通过**（清理残留后回归） |
 | 部署目录 `BlBridge.dll.bak_*` | 保留（`build.ps1:190-207` 的**有意机制**：每次部署留备份、只保留最近 3 个）—— 不是残留，勿清 |
 
 ## 二、进度列表
@@ -54,11 +56,24 @@
 - `.gitignore`：`/out/`、`__pycache__/`、`*.pyc`、`*.bak_probe`、本机运行时配置
 - **未处置**：项目仍**无远端仓库**（如需备份/多机协作，需你决定远端方案）
 
-## 三、已排除的路线（别再重走，详见交接快照 §6）
+## 三、构建与一致性判据（2026-09-24 实测，易踩）
+
+- **构建不是字节可复现的**：源码一字未改（git 工作区干净）的情况下重建 ``out\BlBridge.dll``，
+  sha256 从部署副本的 ``70111C2D…`` 变成 ``43ADB178…``。
+  ⇒ **不要用 dll sha256 跨次比对**来判断"跑的是不是我以为的版本"。
+- **一致性的真正判据**是 ``bl_build_check`` 的口径（``tools/bl_mcp.py:331-375``）：
+  1. 拿**模块目录内**的 ``build_manifest.json`` 与**同目录**的 dll 比对 sha256；
+  2. 再拿清单里的 ``sources{}`` 逐文件 sha256 与 ``src\*.cs`` 比对。
+  它**不读 ``out\``** —— 所以只要 ``build.ps1 -Deploy`` 把 dll 与 manifest **成对**拷贝，
+  检查就自洽；手工只拷 dll 会误报 ``stale_deploy``。
+- 另有 ``bridge_status.json`` 的进程内检查（``loadedSha256`` vs ``currentFileSha256``，同一个文件），
+  用于发现"运行中被换掉的 DLL"。
+
+## 四、已排除的路线（别再重走，详见交接快照 §6）
 
 主菜单直接开战 · `Bannerlord.BLSE.Standalone.exe` 无人值守 · 引擎自带 `CombatLogManager`（AI 对局不产出）· 给靶子无限盾耐久（那是被测对象本身）。
 
-## 四、关键路径
+## 五、关键路径
 
 | 内容 | 路径 |
 |---|---|
