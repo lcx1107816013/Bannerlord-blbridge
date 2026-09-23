@@ -300,6 +300,32 @@ def test_death_arrow_stats():
           bl_metrics.death_arrow_stats([{"t": "meta"}]))
 
 
+def test_cli_survives_gbk_console():
+    """默认中文 Windows 控制台（locale=gbk）下，CLI 不能因输出字符而崩溃。
+
+    2026-09-24 复现：不设 PYTHONIOENCODING 时 Python 用 gbk 写 stdout，
+    render() 输出里的 ``⇒``（U+21D2）抛 UnicodeEncodeError ⇒ 整个 CLI exit 1。
+    既有工具如 bl_dummy_analyze.py 在同样条件下 exit 0，所以这是本模块引入的回归。
+    """
+    import json
+    import subprocess
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".jsonl")
+    os.close(fd)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for e in shield_sample():
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "gbk"
+        r = subprocess.run([sys.executable, os.path.join(HERE, "bl_metrics.py"), tmp],
+                           capture_output=True, env=env, cwd=HERE)
+        check(r.returncode == 0, "GBK stdout 下 CLI exit 0（默认中文 Windows 控制台）",
+              r.stderr.decode("utf-8", "replace")[-150:])
+    finally:
+        os.unlink(tmp)
+
+
 def main():
     print("=" * 88)
     print("bl_metrics 自测（合成事件 + 手算期望）")
@@ -316,6 +342,7 @@ def main():
     test_shots_to_break_after_vanish()
     test_shield_blocks()
     test_death_arrow_stats()
+    test_cli_survives_gbk_console()
     print("-" * 88)
     if FAIL:
         print("结果: %d 项失败" % len(FAIL))

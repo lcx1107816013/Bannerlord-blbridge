@@ -1,4 +1,4 @@
-﻿# BlBridge 进度列表
+# BlBridge 进度列表
 
 > **最后核实：2026-09-24 02:04**（本文件由 Reasonix 会话建立并维护；① 游戏内验证执行于 2026-09-24 01:40–01:41）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
@@ -54,11 +54,11 @@
 - **📌 磁盘预算**：单场 2.1–2.4 MB（上轮 0.48 MB，×4–5），大头是 `state`（每 2 秒 × 40 agent ≈ 4586 条/场）⇒ 批量跑前先算容量。
 
 ### [x] ② 分析器扩展 —— ✅ 已完成（2026-09-24，TDD 8 片红绿循环）
-- **落点**：新建 `tools/bl_metrics.py`（6 个纯函数 seam + 薄渲染/CLI）与 `tools/bl_metrics_selftest.py`（49 项断言）。
+- **落点**：新建 `tools/bl_metrics.py`（8 个纯函数 seam + 薄渲染/CLI）与 `tools/bl_metrics_selftest.py`（74 项断言）。
   **未改动** `bl_analyze.py` / `bl_dummy_analyze.py` / `bl_mcp.py` ⇒ 零回归。
 - **seam（已与你确认）**：`events: list[dict] -> dict/list` 的纯函数，可直接喂合成事件做**手算**断言：
-  `shield_curves` / `shots_to_break` / `arrow_hits` / `speed_selfcheck` / `speed_vs_cap` / `reload_durations` / `ai_param_groups`
-- **验收**：`python tools/bl_metrics_selftest.py` → 49/49 通过（含真实日志 smoke）；
+  `shield_curves` / `shots_to_break` / `arrow_hits` / `speed_selfcheck` / `speed_vs_cap` / `reload_durations` / `ai_param_groups` / `death_arrow_stats`
+- **验收**：`python tools/bl_metrics_selftest.py` → 74/74 通过（含真实日志 smoke）；
   对两场真实 0.7.9 日志 `python tools/bl_metrics.py <jsonl>` 均出报告。
 - **实测结论（两场）**：
   - 挨箭分布：场 1 中位 11 箭/人、场 2 中位 4 箭/人（场 2 合计 153 箭，与独立解析一致）
@@ -158,3 +158,20 @@
 | 战斗日志 | `%USERPROFILE%\Documents\Mount and Blade II Bannerlord\BlBridge\battles\` |
 | 运行时状态 | 同上目录 `bridge_status.json` |
 | 靶场工作区原型 | `%APPDATA%\reasonix\global-workspace\blbridge-dummy-range\` |
+
+## 六、code-review（`7d3aadf..HEAD`，2026-09-24）—— 已修缺陷
+
+双轴只读审查（Standards = 仓库既有惯例 + Fowler 坏味道基线；Spec = 本文件的 ②/③ 条目）发现并已修：
+
+| # | 缺陷 | 性质 | 修法 |
+|---|---|---|---|
+| 1 | `bl_metrics.py` 的 `if __name__ == "__main__"` 块排在 `death_arrow_stats` **之前** | 结构错误（脚本模式下该函数永不定义） | 移回文件末尾 → 557 行 |
+| 2 | **默认中文 Windows 控制台（GBK）下 CLI exit 1**：`render()` 输出里的 `⇒`/`⚠️` 抛 `UnicodeEncodeError` | 可用性回归（既有工具同条件不崩） | 新增 `_safe_streams()`：`reconfigure(errors="replace")`，中文保真、编不出的字符降级；补 GBK 回归测试 |
+| 3 | README §二 未登记 3 个新工具 | 硬违规（仓库惯例：每个 `tools/*.py` 一行职责） | 补 3 行登记 |
+| 4 | 文档漂移：`shots_to_break` 仍写"盾首次归零"（判据已改成"盾消失"）、`analyze_metrics` 称"6 个指标"、模块 docstring 只列 1 个函数 | 判断项 | 三处同步；并把 `death_arrow_stats` 接入 `analyze_metrics` |
+
+**审查中未采纳/待议**（判断项，记录备查）：`load_events`/`_fmt` 与 `bl_analyze.py` 逐字重复（自包含 vs DRY 的取舍）、
+四个指标函数重复"过滤→按 agent 分组→按 time 排序"样板、`bl_death_compare.py` 自建 unit 索引取 `side`（Feature Envy）、
+`--json` 当前无消费者（Speculative Generality，且接线会违反"不改 bl_mcp.py"的裁定）。
+**一条子代理误报**：其称 `render` 取 `meta.file` 恒空 —— 实测 `meta` 事件**带** `file` 字段，不成立。
+**方法学限制**：两个审查子代理**没有 shell 工具**，无法实跑 `git diff`；其"未改动 bl_analyze.py/bl_mcp.py"等结论由主代理用 git 复核确认。

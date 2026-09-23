@@ -5,9 +5,18 @@
 seam（被测接缝）：每个函数都是「事件流 list[dict] -> 普通 dict/list」的纯函数，
 可直接喂合成事件做手算断言（见 bl_metrics_selftest.py）。渲染与 CLI 不属于接缝。
 
-指标一览：
-  shield_curves(events)     每个被击中 agent 的盾 HP 轨迹与破盾点
-  其它指标随 TDD 切片逐个加入本模块
+被测接缝共 8 个（前 6 项对应「分析器扩展」的 6 项需求，其中「移速对账」按要求拆成两个函数）：
+
+  shield_curves(events)      每个被击中 agent 的盾 HP 轨迹与破盾判定
+  shots_to_break(events)     破盾箭数（到盾消失为止的箭类命中数）
+  arrow_hits(events)         挨箭分布（每个 agent 被箭命中次数）
+  speed_selfcheck(events)    移速自洽核验（位置差分 vs 引擎 speed）
+  speed_vs_cap(events)       速度与倍率按兵种分组（不做上限判定，见函数文档）
+  reload_durations(events)   装弹时长（受 state 采样间隔限制，是上界）
+  ai_param_groups(events)    AI / 精度参数按兵种分组
+  death_arrow_stats(events)  阵亡者的挨箭画像（两个口径都报 + 死因）
+
+渲染与 CLI（analyze_metrics / render / main）不属于被测接缝。
 """
 
 
@@ -97,7 +106,10 @@ def shield_curves(events):
     return out
 
 def shots_to_break(events):
-    """破盾箭数：盾首次归零那一刻（含该次）之前，该 agent 承受的**箭类**命中次数。
+    """破盾箭数：盾**消失**那一刻（含该次）之前，该 agent 承受的**箭类**命中次数。
+
+    判据见 shield_curves —— 实测引擎从不把盾耐久写成 0，破盾表现为 shieldHp
+    字段消失（``vanished``），所以这里是"到盾消失为止"，不是"到归零为止"。
 
     返回 {agent_id: {"shots": int|None, "shield_max": float|None, "break_time": float|None}}。
     未破盾的 agent 仍保留在结果里（``shots`` = None）—— 报告要能说「未破盾」，
@@ -320,9 +332,9 @@ def default_battles_dir():
 
 
 def analyze_metrics(events):
-    """便利入口：6 个指标一次算齐（供渲染 / MCP 用）。
+    """便利入口：所有指标一次算齐（供渲染 / 下游消费者用）。
 
-    ⚠️ 它**不是**被测接缝 —— 接缝是上面 6 个各自独立的纯函数，这里只做拼装。
+    它**不是**被测接缝 —— 接缝是上面 8 个各自独立的纯函数，这里只做拼装。
     """
     return {
         "shields": shield_curves(events),
@@ -332,6 +344,7 @@ def analyze_metrics(events):
         "speed_cap": speed_vs_cap(events),
         "reload": reload_durations(events),
         "ai": ai_param_groups(events),
+        "deaths": death_arrow_stats(events),
     }
 
 
@@ -437,7 +450,24 @@ def render(events, top=8):
     return "\n".join(L)
 
 
+def _safe_streams():
+    """让 stdout/stderr 在 GBK 控制台下不因无法编码的字符而崩溃。
+
+    2026-09-24 实测：默认中文 Windows 控制台（locale=gbk）下，render() 输出里的
+    箭头符号与警告符号会抛 UnicodeEncodeError，整个 CLI exit 1（既有工具如
+    bl_dummy_analyze.py 在同样条件下 exit 0 ⇒ 这是本模块引入的回归）。
+    只改 errors 不改 encoding：中文照常可读，编不出的字符降级成问号。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None):
+    _safe_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in argv
     argv = [a for a in argv if not a.startswith("--")]
@@ -467,9 +497,6 @@ def main(argv=None):
             print()
     return 0
 
-
-if __name__ == "__main__":
-    sys.exit(main())
 
 def death_arrow_stats(events):
     """每个**阵亡者**的挨箭画像 —— 回答「挨几箭才死」。
@@ -526,3 +553,6 @@ def death_arrow_stats(events):
         else:
             rec["melee_hits"] += 1
     return out
+
+if __name__ == "__main__":
+    sys.exit(main())
