@@ -1,0 +1,17 @@
+{
+  "_note": "游戏端配置：复制到「我的文档\\Mount and Blade II Bannerlord\\BlBridge\\blbridge_game.json」生效。",
+  "_restart": "只在模块加载时读一次 —— 改完**必须重启游戏**（与游戏读 config.xml 的语义一致）。",
+  "_validate": "加载即校验：越界/类型错的项逐项忽略并记录原因（见 bridge_status.json 的 config.errors），不会让整份配置失效。",
+
+  "enabled": true,
+  "_enabled": "总开关。false = 不记录任何遥测（但命令通道与加速仍可用）",
+
+  "sampleIntervalSeconds": 10,
+  "_sampleIntervalSeconds": "1~600 秒。战斗内每隔多久写一条 sample（存活人数/血量）",
+
+  "flushEveryLine": true,
+  "_flushEveryLine": "true = 每行落盘（崩溃不丢数据，代价是 I/O 更多）",
+
+  "maxRequestAgeSeconds": 120,
+  "_maxRequestAgeSeconds": "5~3600 秒。过期请求阈值：超过这个年龄的请求直接作废，避免游戏后启动时执行旧请求（幽灵战斗）"
+}

@@ -1,0 +1,27 @@
+{
+  "created": "2026-09-23T23:59:00",
+  "plan": "demo-manifest",
+  "runsPerConfig": 3,
+  "protocol": "固定 playerSide=attacker；兵种换边双跑；每配置 >=3 局",
+  "configs": [
+    {
+      "label": "A_v0.7.3镜像",
+      "attacker": "imperial_legionary",
+      "defender": "imperial_legionary",
+      "runs": [
+        {"file": "C:\\Users\\LCGX\\Documents\\Mount and Blade II Bannerlord\\BlBridge\\battles\\battle_20260923_224603_125.jsonl"},
+        {"file": "C:\\Users\\LCGX\\Documents\\Mount and Blade II Bannerlord\\BlBridge\\battles\\battle_20260923_224649_290.jsonl"},
+        {"file": "C:\\Users\\LCGX\\Documents\\Mount and Blade II Bannerlord\\BlBridge\\battles\\battle_20260923_225854_044.jsonl"}
+      ]
+    },
+    {
+      "label": "B_混合兵种",
+      "attacker": "imperial_legionary",
+      "defender": "battanian_wildling",
+      "runs": [
+        {"file": "C:\\Users\\LCGX\\Documents\\Mount and Blade II Bannerlord\\BlBridge\\battles\\battle_20260923_225556_429.jsonl"},
+        {"file": "C:\\Users\\LCGX\\Documents\\Mount and Blade II Bannerlord\\BlBridge\\battles\\battle_20260923_225638_448.jsonl"}
+      ]
+    }
+  ]
+}

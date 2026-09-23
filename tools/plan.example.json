@@ -1,0 +1,24 @@
+{
+  "label": "legionary_vs_wildling_换边双跑",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 600,
+  "configs": [
+    {
+      "label": "A_legionary_as_attacker",
+      "attacker": "imperial_legionary",
+      "a": 20,
+      "defender": "battanian_wildling",
+      "d": 20
+    },
+    {
+      "label": "B_wildling_as_attacker",
+      "attacker": "battanian_wildling",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 20
+    }
+  ]
+}
