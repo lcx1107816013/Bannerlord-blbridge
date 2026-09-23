@@ -173,7 +173,88 @@ def start_fake_game(logdir, token):
     return stop
 
 
+def test_mirror_cross_check():
+    """换边双跑交叉验证（④）：位置效应与兵种差异必须可分离，非镜像不许硬算。"""
+    import bl_compare
+    cfg_a = {"label": "A_X_att", "attacker": "t_x", "defender": "t_y", "a": 20, "d": 20}
+    cfg_b = {"label": "B_Y_att", "attacker": "t_y", "defender": "t_x", "a": 20, "d": 20}
+    r = bl_compare.mirror_cross_check(cfg_a, cfg_b, [48.2, 48.2, 48.2], [49.6, 49.6, 49.6])
+    check(r.get("is_mirror") is True, "识别出镜像双跑", r.get("reason"))
+    check(abs(r.get("position_effect", -99) - (-1.1)) < 1e-9,
+          "手算位置效应 =(48.2+49.6)/2-50 = -1.1", r.get("position_effect"))
+    check(abs(r.get("troop_diff", -99) - (-1.4)) < 1e-9,
+          "手算兵种差异 =48.2-49.6 = -1.4", r.get("troop_diff"))
+    rows = dict((x["troop"], x) for x in r.get("rows", []))
+    check(len(rows) == 2, "两个兵种各一行", list(rows))
+    check(abs(rows.get("t_x", {}).get("as_attacker", -99) - 48.2) < 1e-9,
+          "t_x 当攻方 = 组A 攻方占比", rows.get("t_x"))
+    check(abs(rows.get("t_x", {}).get("as_defender", -99) - 50.4) < 1e-9,
+          "t_x 当守方 = 100 - 组B 攻方占比 = 50.4", rows.get("t_x"))
+    check(abs(rows.get("t_x", {}).get("diff", -99) - (-2.2)) < 1e-9,
+          "t_x 攻-守 = -2.2（= 2x 位置效应）", rows.get("t_x"))
+    check(abs(rows.get("t_y", {}).get("diff", -99) - (-2.2)) < 1e-9,
+          "t_y 攻-守 必然与 t_x 相等（镜像设计的数学结果）", rows.get("t_y"))
+
+    r2 = bl_compare.mirror_cross_check(
+        {"label": "C", "attacker": "t_x", "defender": "t_y", "a": 20, "d": 20},
+        {"label": "D", "attacker": "t_x", "defender": "t_z", "a": 20, "d": 20}, [50.0], [50.0])
+    check(r2.get("is_mirror") is False, "非镜像被识别出来（旧报告正是在这里硬减）", r2.get("reason"))
+    check(r2.get("position_effect") is None, "非镜像不给位置效应", r2.get("position_effect"))
+
+    r3 = bl_compare.mirror_cross_check(
+        cfg_a, {"label": "E", "attacker": "t_y", "defender": "t_x", "a": 20, "d": 5}, [50.0], [50.0])
+    check(r3.get("is_mirror") is True and bool(r3.get("warning")),
+          "兵种互换了但人数没换 ⇒ 仍识别为镜像但给警告", r3.get("warning"))
+
+    r4 = bl_compare.mirror_cross_check({"label": "F"}, {"label": "G"}, [50.0], [50.0])
+    check(r4.get("is_mirror") is False, "缺兵种信息 ⇒ 非镜像", r4.get("reason"))
+
+
+def test_compare_manifest_runs():
+    """bl_compare 的**接入层**必须跑得通，且在默认中文控制台（GBK）下也不能崩。
+
+    2026-09-24 踩坑：只测纯函数 mirror_cross_check 远远不够 —— main() 里
+    `stats` 结构改了（多了 cfg）却漏改一处解包，纯函数测试全绿而 CLI 直接崩。
+    """
+    import json
+    import subprocess
+    import tempfile
+    bb = os.path.join(os.path.expanduser("~"), "Documents",
+                      "Mount and Blade II Bannerlord", "BlBridge", "battles")
+    real = os.path.join(bb, "battle_20260924_014004_626.jsonl")
+    if not os.path.isfile(real):
+        print("  [skip] 本机没有可用于对比的日志")
+        return
+    man = {"plan": "selftest-mirror", "runsPerConfig": 1, "configs": [
+        {"label": "A_x_att", "attacker": "imperial_legionary", "defender": "battanian_wildling",
+         "a": 20, "d": 20, "runs": [{"file": real}]},
+        {"label": "B_y_att", "attacker": "battanian_wildling", "defender": "imperial_legionary",
+         "a": 20, "d": 20, "runs": [{"file": real}]},
+    ]}
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        with io.open(path, "w", encoding="utf-8") as fh:
+            json.dump(man, fh, ensure_ascii=False)
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "gbk"          # 默认中文 Windows 控制台
+        # 子进程带着 PYTHONIOENCODING=gbk ⇒ 它的输出是 **GBK 字节**，必须按 gbk 解码；
+        # 按 utf-8 解码会让中文全成乱码、断言假失败（2026-09-24 自己踩过）。
+        r = subprocess.run([sys.executable, os.path.join(HERE, "bl_compare.py"), "--manifest", path],
+                           capture_output=True, env=env, cwd=HERE)
+        err = r.stderr.decode("gbk", "replace")[-200:]
+        check(r.returncode == 0, "bl_compare --manifest 在 GBK 控制台下 exit 0", err)
+        out = r.stdout.decode("gbk", "replace")
+        check("换边双跑交叉验证" in out, "输出含交叉验证小节")
+        check("识别为镜像双跑" in out, "两组互换攻守 ⇒ 识别为镜像双跑")
+        check("位置效应" in out and "兵种差异" in out, "位置效应与兵种差异都被分离出来")
+    finally:
+        os.unlink(path)
+
+
 def main():
+
+
     tmp = tempfile.mkdtemp(prefix="blbridge_selftest_")
     logdir = os.path.join(tmp, "logs")
     os.makedirs(os.path.join(logdir, "battles"))
@@ -483,6 +564,14 @@ def main():
     import bl_metrics_selftest
     if bl_metrics_selftest.main() != 0:
         FAIL.append("bl_metrics_selftest（详见上方输出）")
+
+    # ── ⑩ 换边双跑交叉验证（④：位置效应 vs 兵种差异必须分离）──────────
+    print()
+    print("=" * 90)
+    print("⑩ bl_compare：换边双跑交叉验证")
+    print("=" * 90)
+    test_mirror_cross_check()
+    test_compare_manifest_runs()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))

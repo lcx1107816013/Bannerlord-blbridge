@@ -12,6 +12,7 @@ bl_analyze.py、bl_metrics.py、bl_death_compare.py 里各写一份
 import io
 import json
 import os
+import sys
 
 
 def default_log_dir():
@@ -72,3 +73,18 @@ def fmt(v, nd=1, dash="-"):
     if isinstance(v, float):
         return ("%." + str(nd) + "f") % v
     return str(v)
+
+def safe_streams():
+    """让 stdout/stderr 在 GBK 控制台下不因无法编码的字符而崩溃。
+
+    默认中文 Windows 控制台（locale=gbk）下，输出里的 ⚠️ / ✅ / 箭头符号会抛
+    UnicodeEncodeError，整个 CLI exit 1（2026-09-24 实测：bl_metrics.py 与
+    bl_compare.py 都中过）。只改 errors 不改 encoding：中文照常可读，
+    编不出的字符降级成问号。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass

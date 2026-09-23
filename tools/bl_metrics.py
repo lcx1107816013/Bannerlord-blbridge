@@ -442,25 +442,9 @@ def render(events, top=8):
     return "\n".join(L)
 
 
-def _safe_streams():
-    """让 stdout/stderr 在 GBK 控制台下不因无法编码的字符而崩溃。
-
-    2026-09-24 实测：默认中文 Windows 控制台（locale=gbk）下，render() 输出里的
-    箭头符号与警告符号会抛 UnicodeEncodeError，整个 CLI exit 1（既有工具如
-    bl_dummy_analyze.py 在同样条件下 exit 0 ⇒ 这是本模块引入的回归）。
-    只改 errors 不改 encoding：中文照常可读，编不出的字符降级成问号。
-    """
-    for name in ("stdout", "stderr"):
-        stream = getattr(sys, name, None)
-        try:
-            stream.reconfigure(errors="replace")
-        except Exception:
-            pass
-
-
 def main(argv=None):
     """用法：python bl_metrics.py [battle.jsonl | 目录]（缺省分析最新一场）。"""
-    _safe_streams()
+    bl_common.safe_streams()
     argv = [a for a in (sys.argv[1:] if argv is None else argv) if not a.startswith("--")]
     path = argv[0] if argv else None
     if path is None:

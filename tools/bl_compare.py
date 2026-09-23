@@ -23,9 +23,10 @@ import os
 import statistics
 import sys
 
-# 复用 2① 分析器的口径实现（同一目录）
+# 同目录共享工具（code-review 2026-09-24：load 原先重复取自 bl_dummy_analyze）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bl_dummy_analyze import load  # noqa: E402
+import bl_common  # noqa: E402
+from bl_common import load_events as load  # noqa: E402
 
 MIN_RUNS_FOR_VERDICT = 3  # 低于此局数不出结论（实测单场方差可让镜像局打出 8:0）
 
@@ -126,6 +127,56 @@ def fmt(v, p=2):
 
 # ── 报告 ────────────────────────────────────────────────────────────────
 
+def mirror_cross_check(cfg_a, cfg_b, shares_a, shares_b):
+    """「换边双跑」交叉验证：把两组各自的**攻方**占比拆成位置效应与兵种差异。
+
+    镜像双跑（A 组：X 攻 / Y 守；B 组：Y 攻 / X 守）下，任何一组的"攻方占比"都被
+    **攻守位偏差**污染。本函数给出：
+
+      * ``position_effect`` = (组A攻方占比均值 + 组B攻方占比均值) / 2 - 50
+        —— **攻守位本身**的系统性偏差（百分点，>0 = 攻方占优）；
+      * ``troop_diff`` = 组A均值 - 组B均值 —— 镜像下**恰好只含兵种因素**
+        （位置效应被 B 组的互换抵消）；
+      * ``rows``：每兵种的 ``as_attacker`` / ``as_defender`` / ``diff``。两个兵种的
+        ``diff`` **必然相等**（= 2 x position_effect，镜像设计的数学结果），可用来
+        核对数据自洽。
+
+    非镜像（兵种没互换）时 ``is_mirror`` 为 False 且不给上述数字 —— 那时"把两组攻方
+    占比相减"没有可比性，这正是旧报告语义误导的来源。
+    """
+    out = {"is_mirror": False, "reason": "", "warning": "",
+           "position_effect": None, "troop_diff": None, "rows": []}
+    ta, da = cfg_a.get("attacker"), cfg_a.get("defender")
+    tb, db = cfg_b.get("attacker"), cfg_b.get("defender")
+    if not (ta and da and tb and db):
+        out["reason"] = "缺 attacker/defender 信息，无法判断是不是换边双跑"
+        return out
+    if not (ta == db and da == tb):
+        out["reason"] = ("两组不是互换攻守的镜像（A: %s 攻 vs %s 守；B: %s 攻 vs %s 守）"
+                         % (ta, da, tb, db))
+        return out
+    out["is_mirror"] = True
+    if not shares_a or not shares_b:
+        out["reason"] = "缺占比样本"
+        return out
+    aa, dd, ba, bd = cfg_a.get("a"), cfg_a.get("d"), cfg_b.get("a"), cfg_b.get("d")
+    if None not in (aa, dd, ba, bd) and (aa, dd) != (bd, ba):
+        out["warning"] = ("兵种互换了，但人数没互换（A: %s 攻 / %s 守；B: %s 攻 / %s 守）"
+                          " => 镜像不完整，位置效应可能被人数差污染" % (aa, dd, ba, bd))
+    ma = statistics.fmean(shares_a)
+    mb = statistics.fmean(shares_b)
+    out["position_effect"] = (ma + mb) / 2.0 - 50.0
+    out["troop_diff"] = ma - mb
+    x_def, y_def = 100.0 - mb, 100.0 - ma
+    out["rows"] = [
+        {"troop": ta, "as_attacker": ma, "as_defender": x_def, "diff": ma - x_def},
+        {"troop": da, "as_attacker": mb, "as_defender": y_def, "diff": mb - y_def},
+    ]
+    out["swapped_sum"] = ma + mb
+    out["n_a"], out["n_b"] = len(shares_a), len(shares_b)
+    return out
+
+
 def group_metrics(paths):
     runs = []
     for p in paths:
@@ -172,6 +223,7 @@ def report_group(label, runs, out):
 
 
 def main():
+    bl_common.safe_streams()      # GBK 控制台下不因 ⚠️/✅ 崩（同 bl_metrics 的修复）
     ap = argparse.ArgumentParser()
     ap.add_argument("--a", help="A 组：文件 / 目录 / 逗号分隔")
     ap.add_argument("--b", help="B 组：同上")
@@ -186,7 +238,7 @@ def main():
         man = json.load(open(args.manifest, encoding="utf-8"))
         for cfg in man.get("configs", []):
             paths = [r["file"] for r in cfg.get("runs", []) if r.get("file")]
-            groups.append((cfg.get("label", "?"), paths))
+            groups.append((cfg.get("label", "?"), paths, cfg))
     else:
         for spec, label in ((args.a, args.label_a), (args.b, args.label_b)):
             if not spec:
@@ -198,7 +250,7 @@ def main():
                     paths += sorted(glob.glob(os.path.join(part, "*.jsonl")))
                 elif os.path.isfile(part):
                     paths.append(part)
-            groups.append((label, paths))
+            groups.append((label, paths, {}))
 
     if not groups:
         print("没有输入。用 --a/--b 或 --manifest。")
@@ -212,17 +264,17 @@ def main():
     out.append("")
 
     stats = []
-    for label, paths in groups:
+    for label, paths, cfg in groups:
         if not paths:
             out.append("### %s：无输入" % label)
             out.append("")
             continue
-        stats.append((label, report_group(label, group_metrics(paths), out)))
+        stats.append((label, report_group(label, group_metrics(paths), out), cfg))
 
     # 两组对比
     if len(stats) == 2 and stats[0][1][0] and stats[1][1][0]:
-        la, (ea, _) = stats[0]
-        lb, (eb, _) = stats[1]
+        la, (ea, _), _cfg_a = stats[0]
+        lb, (eb, _), _cfg_b = stats[1]
         out.append("## 对比：%s vs %s（满编窗口）" % (la, lb))
         out.append("")
         ma, sda, loa, hia = ci95(ea)
@@ -250,6 +302,45 @@ def main():
             out.append("> ⚠️ 两组 95%% 置信区间**重叠** —— 现有样本量下，差异与噪声不可区分。"
                        "**不要据此下结论**，应增加局数或改进实验设计。")
         out.append("")
+
+    # ── 换边双跑交叉验证（④）────────────────────────────────────────────
+    if len(stats) == 2 and stats[0][1][0] and stats[1][1][0]:
+        (la, (ea, _), ca), (lb, (eb, _), cb) = stats
+        cc = mirror_cross_check(ca, cb, ea, eb)
+        out.append("## 换边双跑交叉验证")
+        out.append("")
+        if not cc["is_mirror"]:
+            out.append("> ⚠️ **不构成换边双跑**：%s" % cc["reason"])
+            out.append("> ⇒ 上面那个「差值」不能解释成兵种差异，它只是两组各自攻方占比之差。")
+            out.append("")
+        else:
+            ta = cc["rows"][0]["troop"]
+            tb = cc["rows"][1]["troop"]
+            out.append("识别为镜像双跑：`%s`（%s 攻 / %s 守）与 `%s`（攻守互换）。" % (la, ta, tb, lb))
+            out.append("")
+            if cc.get("warning"):
+                out.append("> ⚠️ %s" % cc["warning"])
+                out.append("")
+            out.append("| 兵种 | 当攻方 | 当守方 | 攻 - 守 |")
+            out.append("|---|---|---|---|")
+            for r in cc["rows"]:
+                out.append("| `%s` | %s%% | %s%% | %s |"
+                           % (r["troop"], fmt(r["as_attacker"], 1), fmt(r["as_defender"], 1),
+                              fmt(r["diff"], 1)))
+            out.append("")
+            out.append("- **位置效应（攻守位本身）** = **%s 个百分点**"
+                       "（= 两组攻方占比均值之和的一半 - 50）" % fmt(cc["position_effect"], 1))
+            out.append("  两个兵种的「攻 - 守」按镜像设计**必然相等** ⇒ 它量的是位置效应，不是兵种强弱。")
+            out.append("- **兵种差异（位置效应已抵消）**：`%s` - `%s` = **%s 个百分点**"
+                       % (ta, tb, fmt(cc["troop_diff"], 1)))
+            out.append("- **对称性核对**：两组攻方占比之和 = %s%%（理想 100%%）"
+                       "⇒ 偏离 %s 个百分点 = 2 x 位置效应"
+                       % (fmt(cc["swapped_sum"], 1), fmt(cc["swapped_sum"] - 100.0, 1)))
+            n_min2 = min(cc.get("n_a", 0), cc.get("n_b", 0))
+            if n_min2 < MIN_RUNS_FOR_VERDICT:
+                out.append("- ⚠️ 每组只有 %d 局（要求 ≥%d）—— 以上数字**都还不可信**。"
+                           % (n_min2, MIN_RUNS_FOR_VERDICT))
+            out.append("")
 
     text = "\n".join(out)
     print(text)

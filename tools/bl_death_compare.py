@@ -30,6 +30,7 @@ def collect(files):
 
 
 def main():
+    bl_common.safe_streams()
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="*")
     ap.add_argument("--dir", default=None)
