@@ -53,11 +53,30 @@
 
 - **📌 磁盘预算**：单场 2.1–2.4 MB（上轮 0.48 MB，×4–5），大头是 `state`（每 2 秒 × 40 agent ≈ 4586 条/场）⇒ 批量跑前先算容量。
 
-### [ ] ② 分析器扩展（纯 Python，无需游戏）
-- **做什么**（6 项）：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速对账 / 装弹时长 / AI 参数分组。
-- **落点**：`tools/bl_analyze.py`、`tools/bl_dummy_analyze.py`（必要时新增）。
-- **依赖**：形态上不依赖 ①，但**真实验证**依赖 ① （现有样本不含新事件）。
-- **可立即动工**：✅
+### [x] ② 分析器扩展 —— ✅ 已完成（2026-09-24，TDD 8 片红绿循环）
+- **落点**：新建 `tools/bl_metrics.py`（6 个纯函数 seam + 薄渲染/CLI）与 `tools/bl_metrics_selftest.py`（49 项断言）。
+  **未改动** `bl_analyze.py` / `bl_dummy_analyze.py` / `bl_mcp.py` ⇒ 零回归。
+- **seam（已与你确认）**：`events: list[dict] -> dict/list` 的纯函数，可直接喂合成事件做**手算**断言：
+  `shield_curves` / `shots_to_break` / `arrow_hits` / `speed_selfcheck` / `speed_vs_cap` / `reload_durations` / `ai_param_groups`
+- **验收**：`python tools/bl_metrics_selftest.py` → 49/49 通过（含真实日志 smoke）；
+  对两场真实 0.7.9 日志 `python tools/bl_metrics.py <jsonl>` 均出报告。
+- **实测结论（两场）**：
+  - 挨箭分布：场 1 中位 11 箭/人、场 2 中位 4 箭/人（场 2 合计 153 箭，与独立解析一致）
+  - 移速自洽：位置差分 vs 引擎 `speed`，平均误差 0.098~0.144、最大 1.5~2.1
+    ⇒ **非零**：位置与速度两个字段并不完全自洽，值得追（可能是采样时刻与速度不同步）
+  - 装弹：中位 **2.00 秒 = 恰好一个采样间隔** ⇒ 分辨率不足，该指标目前只能当**上界**
+  - AI 参数：每兵种 30 个参数，两场各 2 兵种 × 20 agent
+- **⚠️ 本轮纠错（我自己写错的，已修）**：初版 `speed_vs_cap` 用 `speed > maxSpeed` 判"超上限"，
+  得出**"91% 超上限"的假结论**。源码取证：`maxSpeed` = `DrivenProperty.MaxSpeedMultiplier`、
+  `combatSpeed` = `CombatMaxSpeedMultiplier`（**倍率**，`TelemetryBehavior.cs:476-477`），
+  与世界单位速度量纲不同 ⇒ 该指标已删除，改为如实呈现并标注"两者不可直接比较"。
+
+### [ ] ②-附 分析器暴露的新遥测缺口（做 ③ 前值得先补）
+1. **真正的速度上限没采**：只有倍率，没有 max speed ⇒ "上限是否生效"判不了（源码 `:476`）。
+2. **盾槽身份没采**：`shieldHp` 取自 `TryGetShield` 遍历到的**第一个盾槽**（`TelemetryBehavior.cs:253-278`）。
+   场 1 有多个 agent 盾值**回升**（477 → 530）⇒ 盾槽/盾身份变过，此时"归零=破盾"不成立。
+   分析器已把 `reversals` 当可疑信号报出，但遥测侧应补"盾槽索引 / 盾唯一 id"。
+3. `attackType` 恒为 `Standard`（① 遗留）；`blowFlags` 需 split；弓的 `weaponSlot` 取到 `WeaponItemBeginSlot` 枚举边界值。
 
 ### [ ] ③ 立项三个模型结论校验 —— 项目存在的理由
 - **待校验结论**：
@@ -65,7 +84,7 @@
   2. "护甲回默认后 T4+ 中位 5 箭"
   3. "材质差异 7%"
 - **🔴 至今一个都没测。**
-- **依赖**：①②（要新遥测 + 要分析器）。
+- **依赖**：①②（② 已完成；① 已通过）。**但破盾箭数仍需一场长测样本**（现有两场无人破盾）。
 
 ### [ ] ④ 阶段 2④ 报告器补「换边双跑」交叉验证块
 - **问题**：当前报告会把两个**不同兵种**的"A 侧"直接相减，语义误导。
