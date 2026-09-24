@@ -59,6 +59,7 @@ BlBridge/
   tools/plan.swap_sides.example.json 跑批计划示例（多轮攻守互换：rounds 2 + roundSwap，每轮一个文件）
   tools/plan.mirror.example.json   跑批计划示例（镜像双跑：两个 config 互换攻守，供 bl_compare 分解位置效应）
   tools/plan.mirror2.example.json  跑批计划示例（同上，第二对兵种：cataphract vs fian_champion）
+  tools/plan.multitroop.example.json 跑批计划示例（多兵种/战术组：attackerGroups/defenderGroups DSL，含 hold 与 charge 两组）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json
@@ -296,7 +297,7 @@ manifest_missing         旧版部署，没有清单
 | t | 字段 |
 |---|---|
 | `meta` | schema / mod / version / startedUtc / file；**v0.8.3 起**另带 `mission`（`bridge`=BlBridge 自建靶场 / `game`=其它，含玩家在战役沙盒里的实战）；**v0.8.4 起**另带 `randomSeed`（-1 = 未指定）；**v0.8.5 起**另带 `round`（多轮连续实验的轮次） |
-| `unit` | agent, side, troop, level, isHero, isMounted, maxHp |
+| `unit` | agent, side, troop, level, isHero, isMounted, maxHp；**v0.8.8 起**另带 `formation`（该 agent 的**实际**编队名，见下注） |
 | `hit` | attacker, defender, aSide, dSide, aTroop, dTroop, weaponClass, isMissile, damageType, bodyPart, **dmg**, magnitude, absorbedByArmor, strikeType, hpAfter, hpMax, mounted；**v0.7.9 起**另带 `blocked`、**`damagedHp`**（引擎直给的实际扣血）、`hitDistance`、`shotDifficulty`、`attackDir`、`attackType`、`speedMod`、`atkStun`、`defStun`、`dmgPct`、`blowFlags`（逗号组合串）、`shieldHp`、`shieldMax`；**v0.8.1 起**另带 `bodyPartName`（部位直名）、`shieldSlot`、`shieldItem`（盾的槽位与物品 id，用于区分"换了盾"与"盾被修复"） |
 | `shot` | **v0.7.9 起**：shooter, side, troop, weaponSlot, weaponClass, px/py/pz（位置）, vx/vy/vz（速度向量）, speed；**v0.8.1 起**另带 `weaponSlotName`（槽位直名） |
 | `state` | **v0.7.9 起**：每 2 秒 × agent：agent, side, troop, px/py/pz, vx/vy, speed, maxSpeed, combatSpeed, armorEnc, weapEnc, morale, aiState, reloading, reloadPhase, reloadCount, ammo, ammoMax（末 5 项在取不到武器时会缺） |
@@ -304,6 +305,7 @@ manifest_missing         旧版部署，没有清单
 | `kill` | victim, killer, victimTroop, killerTroop, vSide, state, dmg, damageType, bodyPart, isMissile, weaponClass；**v0.8.1 起**另带 `bodyPartName` |
 | `flee` / `panic` | agent, side, troop |
 | `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp |
+| `squad` | **v0.8.8** 多兵种/战术组：每组一行，**仅当该方给了 `attackerGroups`/`defenderGroups` 时才出现**（旧 plan 不产生）。字段 `t / round / side / group / troop / count / formation / movement / spawned / source`；`round` 是 1 基轮次、`group` 是 **0 基**组下标、`formation` 是该组的**实际**编队（**不是** DSL 里写的那个）、`movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量（`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）|
 | `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
 | `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName`；**v0.8.2 起** `dummy_meta` 另带 `bodyItem`（请求替换的身甲物品 id） |
 | `dummy_swap` | **v0.8.2**：靶子身甲被替换时的一条记录 —— item, **material**（实际生效的材质，可观测落点）, armorBody, agents；找不到物品时 `agents=0` 且带 `error` |
@@ -320,6 +322,16 @@ manifest_missing         旧版部署，没有清单
 > `AgentStatCalculateModel` 也没有 `GetMaximumSpeed`（2026-09-24 反编译核实）。
 > 所以"上限是否生效"只能用**统计口径**间接判断：同一兵种/状态下「实测速度峰值 ÷ 倍率」是否恒定；
 > 新加的 `topSpeedReach` 是加速模型的直接读数。
+>
+> **`unit.formation` 与 `squad`（v0.8.8，多兵种混编 + 战术组）**：
+> - `unit` 事件新增字段 **`formation`** = 该 agent 的**实际编队名**（`FormationClass` 真名；空编队写 `"Unset"`）。
+>   这是**新增字段**：既有字段名/顺序/取值域不变；**旧日志没有该字段**，分析侧按既有“缺字段兜底”策略处理。
+> - 新增事件 **`squad`**（**每组一行**，**仅当该方给了 `attackerGroups`/`defenderGroups` 时才出现**；旧 plan 不产生）：
+>   字段 `t / round / side / group / troop / count / formation / movement / spawned / source`。
+>   其中 `round` 是 1 基轮次、`group` 是 **0 基**组下标、`formation` 是该组的**实际**编队（**不是** DSL 里写的那个）、
+>   `movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量
+>   （`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）。
+> - 原则：**schema 1 内的新增字段/事件，旧日志仍可解析**（GC2）。
 
 ---
 
