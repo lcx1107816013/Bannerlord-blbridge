@@ -411,7 +411,7 @@ namespace BlBridge
                 if (_swapReported == null)
                 {
                     _swapReported = "missing";
-                    WriteSwap(-1, "", 0, "item_not_found");
+                    WriteSwap(-1, "", 0, "item_not_found", "");
                 }
                 return;
             }
@@ -448,24 +448,49 @@ namespace BlBridge
             {
                 _swapReported = BodyItemId;
                 int bodyArmor = -1;
-                string mat = "";
                 try
                 {
                     ArmorComponent ac = item.ArmorComponent;
-                    if (ac != null)
+                    if (ac != null) bodyArmor = ac.BodyArmor;      // 请求物品的名义值（供对照）
+                }
+                catch
+                {
+                }
+                // ★ 记录**实际生效**的物品与材质：从 agent 身上读回，而不是"我们请求的"。
+                // 换装若被引擎拒绝 / FillFrom 未生效，只看请求值会得到"以为换了"的假象
+                // （2026-09-24 实测踩到：材质对照 Δ 中位 = 0.0，很可能就是这个假象）。
+                string mat = "";
+                string actualItem = "";
+                try
+                {
+                    Mission m2 = Mission.Current;
+                    if (m2 != null)
                     {
-                        bodyArmor = ac.BodyArmor;
-                        mat = ac.MaterialType.ToString();
+                        foreach (Agent a in m2.Agents)
+                        {
+                            if (a == null || !a.IsActive() || !a.IsHuman) continue;
+                            if (!IsDummy(a)) continue;
+                            MissionWeapon w = a.Equipment[EquipmentIndex.Body];
+                            if (w.Item == null)
+                            {
+                                actualItem = "(empty)";
+                                break;
+                            }
+                            actualItem = w.Item.StringId;
+                            ArmorComponent ac2 = w.Item.ArmorComponent;
+                            mat = ac2 != null ? ac2.MaterialType.ToString() : "(noArmorComponent)";
+                            break;
+                        }
                     }
                 }
                 catch
                 {
                 }
-                WriteSwap(bodyArmor, mat, n, "");
+                WriteSwap(bodyArmor, mat, n, "", actualItem);
             }
         }
 
-        private void WriteSwap(int bodyArmor, string material, int agents, string error)
+        private void WriteSwap(int bodyArmor, string material, int agents, string error, string actualItem)
         {
             try
             {
@@ -473,6 +498,8 @@ namespace BlBridge
                 sb.Append("{\"t\":\"dummy_swap\",\"time\":").Append(Jw.N(_elapsed));
                 sb.Append(",\"item\":\"").Append(Jw.Esc(BodyItemId)).Append('"');
                 sb.Append(",\"material\":\"").Append(Jw.Esc(material)).Append('"');
+                // ★ 从 agent 读回的**实际**身甲物品 id —— 与上面的 item（请求值）不一致就是"换装没生效"
+                sb.Append(",\"actualItem\":\"").Append(Jw.Esc(actualItem)).Append('"');
                 sb.Append(",\"armorBody\":").Append(Jw.N(bodyArmor));
                 sb.Append(",\"agents\":").Append(Jw.N(agents));
                 if (!string.IsNullOrEmpty(error))

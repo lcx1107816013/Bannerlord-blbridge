@@ -85,12 +85,13 @@ namespace BlBridge
                 sb.Append("\",\"startedUtc\":\"").Append(Jw.UtcNow());
                 // v0.8.3：来源标记 —— BlBridge 自建靶场为 "bridge"，玩家在战役/沙盒里打的仗为 "game"。
                 // 没有它，battles/ 目录里"靶场实验"与"玩家实战"混在一起，事后无法分辨。
-                sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin));
-                // v0.8.4：随机种子（-1 = 未指定）。同种子两场逐值可复现 ⇒ 重放可行（见 PROGRESS §十）
-                sb.Append("\",\"randomSeed\":").Append(Jw.N(SubModule.PendingRandomSeed));
-                // v0.8.5：轮次（多轮连续实验时 > 1；每轮一个独立文件）
-                sb.Append("\",\"round\":").Append(Jw.N(_round));
-                sb.Append("\",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
+                // ⚠️ 这一段原是"值不闭合、由下一行补引号"的拼接写法；**数字字段不能吃 `\"` 前缀** ——
+                // v0.8.4~0.8.5 因此产出过非法 JSON（`"randomSeed":777"`），meta 被 load_events 静默跳过。
+                // 现在每行自闭合，不再依赖下一行。
+                sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin)).Append('"');
+                sb.Append(",\"randomSeed\":").Append(Jw.N(SubModule.PendingRandomSeed));
+                sb.Append(",\"round\":").Append(Jw.N(_round));
+                sb.Append(",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
                 Jw.Write(sb.ToString());
             }
             catch (Exception ex)

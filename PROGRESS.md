@@ -530,3 +530,47 @@ ARMS `191459_538` / `191534_790` / `191610_398`
 3. 末轮结束有 `round_all_done`，mission 正常结束（不卡死）；
 4. `--round-swap` ⇒ 第 2 轮攻守兵种与第 1 轮**对调**；
 5. **补刀死的样本**落在 `round_cleanup` 之后 —— 分析必须排除（与「死因偏差」同类）
+
+## 十二、首批实测结果（2026-09-24 20:20–20:27，10 场）
+
+### ① 随机种子 / 同种子重放 —— ❌ **不成立**
+
+| 对比 | hit 序列逐值相同率 |
+|---|---|
+| A(seed 11111) vs B(seed 11111) | **0.3%** |
+| A(seed 11111) vs C(seed 22222) | 0.3% |
+
+同种子与异种子的相同率**一样低** ⇒ 种子没能约束战斗演化。原始证据（同为 seed 11111）：
+```
+A: time=2.0206  px=586.9586  py=762.0095  vy=2.1136
+B: time=2.0027  px=586.6436  py=762.2758  vy=1.9847
+```
+**连开局部署位置都不同**。根因（反编译核实）：
+- `MBRandom.SetSeed` 本身有效、也没被别处覆盖（全项目只有一处实现；`Game.RandomGenerator` 只在构造时设），
+  **但随机源不止它** —— `Formation` 里有**独立 RNG**
+  （`MBFastRandomSelector<Agent>(1024)` / `MBFastRandomSelector<IFormationUnit>(1024)`，`MountAndBlade:140842`），
+  再加 native 层的伤害掷点与 AI ⇒ **"设一个全局种子"管不住全局**。
+- ⇒ **重放路线放弃**，回到统计路线（多跑 + 控制变量）；§十一 的多轮功能提供了"同一环境"的折中。
+
+### ② 材质差异 7%（换身甲）—— ⚠️ **未验到，且暴露了我自己的观测缺陷**
+
+`dummy_swap` 显示材质请求生效（Cloth/armorBody=4 vs Plate/armorBody=60，各 10 个靶子），
+但**躯干类部位（身甲覆盖）的近战扣血中位：CLOTH 43.0 vs PLATE 43.0，Δ = 0.0** ✗
+
+- **我写错的地方**：`dummy_swap` 记的是**请求的物品**材质，不是 agent 身上**实际穿的**——
+  换装若被拒绝 / `FillFrom` 未生效，只看请求值就会得到"以为换了"的假象（本轮的假象很可能正是它）。
+  v0.8.6 已补 `actualItem`（从 agent 读回），**换装是否真生效待重测**。
+- 另一层可能（设计）：Warbandlord 的护甲是 **5 层串行**（头→披风→手套→腿→身甲，每层重跑③~⑦），
+  只换**身甲**一层时效应会被稀释。
+
+### ③ 多轮连续实验 —— ✅ **成功**（判据 1/2/3/4 全过）
+
+`--rounds 3 --round-swap --random-seed 777` 产出 **3 个独立文件**，各带 `meta.round` = 1/2/3；
+交界处 `round_cleanup`(cleanedUp=2) + `round_start`(cleanedUp=2)；末轮 `round_all_done`；
+**第 2 轮出现 `side:"Attacker", troop:"imperial_legionary"`** ⇒ 攻守互换生效 ✓
+
+### 顺带修掉的两个真 bug（v0.8.6）
+
+1. **`meta` 产出非法 JSON**（v0.8.4 引入）：拼接式组装里"数字字段不能吃 `\"` 前缀"，
+   产出 `"randomSeed":777"` ⇒ meta 被 `load_events` **静默跳过**。已改为每行自闭合。
+2. **`dummy_swap` 只记请求值**（见 ②）：已补 `actualItem`（从 agent 读回实际身甲）。
