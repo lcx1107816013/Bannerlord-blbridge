@@ -122,7 +122,9 @@ $genVersion = Join-Path $outDir 'GeneratedVersion.cs'
     'using System.Reflection;'
     ('[assembly: AssemblyVersion("{0}")]' -f $asmVersion)
     ('[assembly: AssemblyFileVersion("{0}")]' -f $asmVersion)
-) | Set-Content -LiteralPath $genVersion -Encoding ASCII
+) 
+# ASCII + LF via WriteAllText: Set-Content writes CRLF on Windows (see AGENTS.md "encoding rules").
+[System.IO.File]::WriteAllText($genVersion, (($genLines -join "`n") + "`n"), [System.Text.Encoding]::ASCII)
 $sources += $genVersion
 Write-Host ("[1/3] version: BridgeConfig={0} assembly={1}" -f $version, $asmVersion)
 
