@@ -1,6 +1,6 @@
 # BlBridge 进度列表
 
-> **最后核实：2026-09-24 18:50**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §七 护甲覆盖四档对照，2026-09-24 18:37–18:45）
+> **最后核实：2026-09-24 19:40**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
 > 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
 > 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
@@ -404,9 +404,18 @@ ARMS `191459_538` / `191534_790` / `191610_398`
 - 新增 `src/EnumNames.cs`（manifest 17 sources）；`BridgeConfig.Version` 与 `module/SubModule.xml` → **0.8.1**
 - 构建：`build.ps1 -Deploy` 成功（59 KB，`dll sha256 = 7CB21A49287892E0…`，旧 dll 备份 `BlBridge.dll.bak_20260924_193505`）
 
-**待游戏内验证（判据）**：
-1. `bridge_status.json` → `version: 0.8.1`、`fileChangedSinceLoad: false`；
-2. `hit.bodyPartName` 出现 `Head`，且 `hit.bodyPart` **仍是** `CriticalBodyPartsBegin`（旧字段未变）；
-3. `shot.weaponSlotName` 出现 `Weapon0`，且 `shot.weaponSlot` **仍是** `WeaponItemBeginSlot`；
-4. `hit.shieldSlot` / `hit.shieldItem` 有值，且**盾值回升时槽/物品随之变化**（缺口 2 的正面证据）；
-5. `ai.topSpeedReach` 有值。
+**▶ 游戏内验证（2026-09-24 19:37，1 场靶场：`battle_20260924_193725_850.jsonl`）—— 判据全过**
+
+| 判据 | 结果 |
+|---|---|
+| 1. `version 0.8.1` + `fileChangedSinceLoad: false` + `buildCheck ok`（四段一致） | ✅ |
+| 2. `hit.bodyPartName` = `Head` **1040** 次；`hit.bodyPart` 仍是 `CriticalBodyPartsBegin` **1040** 次 | ✅ 新旧并存，其余 8 个部位**逐值一致**（ArmLeft 267 / ArmRight 378 / ShoulderRight 299 / ShoulderLeft 309 / Chest 80 / Neck 59 / Abdomen 16 / Legs 5） |
+| 3. `shot.weaponSlotName` = `Weapon0`；`weaponSlot` 仍是 `WeaponItemBeginSlot` | ✅（另 `Weapon2` 无别名冲突，两列同名） |
+| 4. `hit.shieldSlot` = `{1: 437}`、`hit.shieldItem` = `stronger_reinforced_kite_shield`（437 条） | ✅ 字段有值 |
+| 5. `ai.topSpeedReach` 30/30 条，2.590~3.031 | ✅ |
+| 附：`dummy_hit.bodyPartName` 同样正确（`Head` 959 次） | ✅ |
+
+**⚠️ 判据 4 的"正面证据"本场未取到**：10 个持盾靶共 437 条带盾命中，
+**盾 HP 回升 0 次、换盾 0 次**（盾物品恒为 `stronger_reinforced_kite_shield`、槽恒为 1）
+⇒ "回升时能否区分『换了盾』与『盾被修复』"**仍需一场出现盾值回升的战斗**才能验证
+（②-附 2 记录的 477→530 回升出自 0.7.9 的一场，本场未复现）。
