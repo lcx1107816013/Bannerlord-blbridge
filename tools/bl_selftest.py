@@ -282,6 +282,47 @@ def test_parse_dummy_armor():
         check("字符串" in str(e), "对象形式给出可读提示", e)
 
 
+def test_parse_squad_groups():
+    """多兵种/战术组的 DSL 解析（v0.8.8）：合法要准，非法必须报错。
+
+    为什么必须严格：C# 侧拿到的是**字符串**，一旦我们把非法输入"宽容"地透传过去，
+    就又是一次"参数静默失效"（2026-09-24 有 9 场实验正是这么作废的）。
+    """
+    import bl_common
+    g = bl_common.parse_squad_groups("imperial_legionary:10:Infantry:hold")
+    check(g == [{"troop": "imperial_legionary", "count": 10, "formation": "Infantry",
+                 "movement": "hold"}], "四字段组", g)
+    g2 = bl_common.parse_squad_groups("khuzait_khans_guard:5")
+    check(g2 == [{"troop": "khuzait_khans_guard", "count": 5, "formation": None,
+                  "movement": None}], "两字段：formation/movement 缺省为 None", g2)
+    g3 = bl_common.parse_squad_groups("a:1|b:2:HorseArcher")
+    check(len(g3) == 2 and g3[1]["formation"] == "HorseArcher" and g3[0]["formation"] is None,
+          "多组用 | 分隔、各组独立", g3)
+    g4 = bl_common.parse_squad_groups("a:1:infantry:HOLD")
+    check(g4[0]["formation"] == "Infantry" and g4[0]["movement"] == "hold",
+          "formation 大小写不敏感→规范名；movement 归小写", g4)
+    check(bl_common.parse_squad_groups(None) == [] and bl_common.parse_squad_groups("   ") == [],
+          "None / 纯空白 ⇒ 空列表")
+    for bad, why in (("a", "字段数 1"),
+                     ("a:1:Infantry:hold:extra", "字段数 5"),
+                     ("a:0", "count=0"),
+                     ("a:abc", "count 非整数"),
+                     ("a:1:Infantryy", "未知 formation"),
+                     ("a:1:Infantry:jump", "未知 movement"),
+                     ("a:1||b:2", "中间空组"),
+                     (":1", "缺兵种 id")):
+        try:
+            bl_common.parse_squad_groups(bad)
+            check(False, "非法组串必须报错（%s）: %r" % (why, bad))
+        except ValueError as e:
+            check(True, "非法组串报错（%s）" % why)
+    try:
+        bl_common.parse_squad_groups(123)
+        check(False, "非字符串必须报错")
+    except ValueError as e:
+        check(True, "非字符串报错: %s" % e)
+
+
 def test_bl_batch_plan_args():
     """bl_batch 的 plan → CLI 参数组装（纯函数，不需要游戏）。
 
@@ -898,6 +939,7 @@ def main():
     print("⑪ bl_batch plan → CLI 参数 + bl_common 护甲解析（严格）")
     print("=" * 90)
     test_parse_dummy_armor()
+    test_parse_squad_groups()
     test_bl_batch_plan_args()
     test_bl_cmd_dummy_armor_strict()
     test_death_compare_split()

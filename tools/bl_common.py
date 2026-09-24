@@ -136,3 +136,61 @@ def parse_dummy_armor(text):
         except ValueError:
             raise ValueError("部位 %s 的值不是数字：%r" % (k, v))
     return out
+
+
+# ── 多兵种 / 战术组（v0.8.8）：扁平字符串 DSL ─────────────────────────────
+# 为什么是字符串而不是嵌套 JSON：C# 侧的自研解析器 `Jmini` 只读**裸值**——把字符串
+# 传给它既不报错也不生效（静默用 fallback），嵌套结构更传不过去。这与
+# `--dummy-armor head=45,torso=35` 是同一套思路（2026-09-24 的 9 场实验就是这么废掉的）。
+
+SQUAD_FORMATIONS = ("Infantry", "Ranged", "Cavalry", "HorseArcher", "Skirmisher",
+                    "HeavyInfantry", "LightCavalry", "HeavyCavalry", "General", "Bodyguard")
+SQUAD_MOVEMENTS = ("charge", "advance", "hold", "fallback", "stop", "retreat")
+_FORMATION_BY_LOWER = dict((n.lower(), n) for n in SQUAD_FORMATIONS)
+
+
+def parse_squad_groups(text):
+    """解析 ``troop:count[:formation[:movement]]``（多组用 ``|``）→ list[dict]。
+
+    ``formation`` 大小写不敏感、回写为规范名（GC1）；两个可选字段缺省时是 None
+    （默认值由调用方决定：C# 侧编队走引擎默认、movement 走 ``charge``）。
+    **非法输入一律抛 ValueError，绝不静默丢弃** —— 理由同 parse_dummy_armor。
+    """
+    if text is None:
+        return []
+    if not isinstance(text, str):
+        raise ValueError("组串必须是字符串，收到 %s" % type(text).__name__)
+    if not text.strip():
+        return []
+    out = []
+    for idx, part in enumerate(text.split("|"), 1):
+        part = part.strip()
+        if not part:
+            raise ValueError("第 %d 组为空（应为 troop:count[:formation[:movement]]，多组用 | 分隔）" % idx)
+        fields = [f.strip() for f in part.split(":")]
+        if len(fields) not in (2, 3, 4):
+            raise ValueError("第 %d 组 %r 的字段数 = %d，应为 troop:count[:formation[:movement]]"
+                             % (idx, part, len(fields)))
+        troop, cnt = fields[0], fields[1]
+        if not troop:
+            raise ValueError("第 %d 组 %r 缺少兵种 id" % (idx, part))
+        try:
+            count = int(cnt)
+        except ValueError:
+            raise ValueError("第 %d 组 %r 的 count 不是整数：%r" % (idx, part, cnt))
+        if count < 1:
+            raise ValueError("第 %d 组 %r 的 count 必须 ≥1，收到 %d" % (idx, part, count))
+        formation = None
+        if len(fields) >= 3 and fields[2]:
+            formation = _FORMATION_BY_LOWER.get(fields[2].lower())
+            if formation is None:
+                raise ValueError("第 %d 组 %r 的 formation 未知：%r（可用：%s）"
+                                 % (idx, part, fields[2], ", ".join(SQUAD_FORMATIONS)))
+        movement = None
+        if len(fields) == 4 and fields[3]:
+            movement = fields[3].lower()
+            if movement not in SQUAD_MOVEMENTS:
+                raise ValueError("第 %d 组 %r 的 movement 未知：%r（可用：%s）"
+                                 % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS)))
+        out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
+    return out
