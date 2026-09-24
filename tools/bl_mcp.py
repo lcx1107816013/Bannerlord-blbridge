@@ -34,6 +34,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bl_analyze  # noqa: E402
 import bl_common  # noqa: E402
+import bl_sage  # noqa: E402
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "blbridge"
@@ -724,7 +725,11 @@ TOOLS = [
                                            "（只作用于靶子；未知部位名/非数字会直接报错，不静默跳过）")},
             "dummyBodyItem": {"type": "string",
                               "description": ("把靶子**身甲**换成该物品 id（材质对照实验用，"
-                                              "如 plated_leather_coat）。材质抗性只来自物品，数值可另用 dummyArmor 对齐")}},
+                                              "如 plated_leather_coat）。材质抗性只来自物品，数值可另用 dummyArmor 对齐")},
+            "skipTroopCheck": {"type": "boolean",
+                               "description": ("跳过兵种 id 校验（默认 false=校验）。"
+                                               "校验走 BannerlordSage 索引，只覆盖官方 XML；"
+                                               "用第三方模组兵种时该 id 会被判为不存在，此时置 true 跳过")}},
             "required": ["attackerTroop", "defenderTroop"], "additionalProperties": False},
     },
     {
@@ -797,6 +802,25 @@ TOOLS = [
                 "labelA": {"type": "string", "description": "A 组标签"},
                 "labelB": {"type": "string", "description": "B 组标签"},
                 "out": {"type": "string", "description": "报告输出路径（markdown）"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_lookup_troop",
+        "description": ("查兵种：校验 id 是否存在、按 id 模糊搜索、按文化筛选。"
+                        "数据来自 BannerlordSage 的索引库（只读，只索引官方 XML）。"
+                        "没装 BannerlordSage 时返回 available=false —— 属软依赖，不影响其他工具。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "check": {"type": "array", "items": {"type": "string"},
+                          "description": "要校验的兵种 id 列表，如 [\"imperial_legionary\"]"},
+                "search": {"type": "string", "description": "按 id 模糊搜索，% 为通配符，如 imperial_%"},
+                "culture": {"type": "string",
+                            "description": "配合 search 按文化过滤，empire 或 Culture.empire 均可"},
+                "limit": {"type": "integer", "description": "search 返回条数，默认 20"},
+                "status": {"type": "boolean", "description": "只做索引可用性自检"},
             },
             "additionalProperties": False,
         },
@@ -925,6 +949,22 @@ def call_tool(name, args):
             params["dummyBodyItem"] = str(args.get("dummyBodyItem"))
         if not params["attackerTroop"] or not params["defenderTroop"]:
             return {"ok": False, "error": "必须提供 attackerTroop 与 defenderTroop"}
+
+        # 兵种 id 前置校验。为什么放在发命令之前：id 打错时 C# 侧静默走 fallback，
+        # 日志里看不出来，代价是白等一整场对局（10 分钟级）。
+        # 为什么又留了 skipTroopCheck 出口：索引只覆盖官方 XML（xml_scope=official），
+        # 第三方模组的兵种会被判成"不存在"，那种情况必须能跳过。
+        troop_check = None
+        if not args.get("skipTroopCheck"):
+            troop_check = bl_sage.check_troops([params["attackerTroop"], params["defenderTroop"]])
+            if troop_check.get("available") and troop_check.get("missing"):
+                return {"ok": False,
+                        "error": "兵种 id 在索引里不存在：%s" % ", ".join(troop_check["missing"]),
+                        "missing": troop_check["missing"],
+                        "suggestions": dict((m, bl_sage.suggest_troops(m)) for m in troop_check["missing"]),
+                        "hint": ("索引只覆盖官方 XML；若该兵种确实来自第三方模组，"
+                                 "用 skipTroopCheck=true 跳过校验。可用 bl_lookup_troop 查兵种")}
+
         resp, err = send_command("start_battle", params, timeout=60)
         if err:
             return {"ok": False, "error": err}
@@ -936,6 +976,7 @@ def call_tool(name, args):
                     "response": resp}
         return {"ok": True, "state": body.get("state"), "accepted": body.get("accepted"),
                 "buildCheck": bc,
+                "troopCheck": troop_check,
                 "buildWarning": (bc.get("detail") if bc.get("code") == "stale_source" else None),
                 "hint": "用 bl_wait_for_state(state=ended) 等它打完", "response": resp}
 
@@ -1039,6 +1080,24 @@ def call_tool(name, args):
                 "out": args.get("out"),
                 "report": (p.stdout or "")[-8000:],
                 "stderr": (p.stderr or "")[-1000:]}
+
+    if name == "bl_lookup_troop":
+        if args.get("status"):
+            return {"ok": True, "sage": bl_sage.status()}
+        ids = args.get("check")
+        if ids:
+            if not isinstance(ids, list):
+                return {"ok": False, "error": "check 必须是字符串数组"}
+            chk = bl_sage.check_troops(ids)
+            return {"ok": True, "available": chk.get("available"), "reason": chk.get("reason"),
+                    "found": chk.get("found"), "missing": chk.get("missing")}
+        if args.get("search"):
+            st = bl_sage.status()
+            rows = (bl_sage.search(args.get("search"), args.get("culture"),
+                                   int(args.get("limit") or 20)) if st.get("available") else [])
+            return {"ok": True, "available": st.get("available"), "reason": st.get("reason"),
+                    "count": len(rows), "troops": rows}
+        return {"ok": True, "sage": bl_sage.status()}
 
     return {"ok": False, "error": "unknown tool: %s" % name}
 

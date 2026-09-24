@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bl_common  # noqa: E402
 import bl_mcp  # noqa: E402
+import bl_sage  # noqa: E402
 
 
 def _print(resp, err):
@@ -85,6 +86,8 @@ def main(argv):
                    help="重生时守方进场点")
     p.add_argument("--random-seed", dest="random_seed", type=int, default=None,
                    help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
+    p.add_argument("--skip-troop-check", dest="skip_troop_check", action="store_true",
+                   help="跳过兵种 id 校验（索引只覆盖官方 XML；用第三方模组兵种时加它）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -162,6 +165,34 @@ def main(argv):
                 print("错误: --%s 解析失败：%s" % (attr.replace("_", "-"), e))
                 return 2
             params[key] = raw
+        # 兵种 id 前置校验（与 MCP bl_start_battle 同一语义）：CLI 打错 id 同样会被
+        # 游戏端静默 fallback、白等一整场对局。给了 --attacker/--defender-groups 时
+        # 对应的单兵种参数会被游戏端忽略，所以只校验真正生效的那组。
+        # 索引不可用 ⇒ 警告但放行（软依赖：BlBridge 不因没装 BannerlordSage 而不能用）。
+        ids = []
+        if getattr(args, "attacker_groups", None):
+            ids += [g["troop"] for g in bl_common.parse_squad_groups(args.attacker_groups)]
+        else:
+            ids.append(args.attacker)
+        if getattr(args, "defender_groups", None):
+            ids += [g["troop"] for g in bl_common.parse_squad_groups(args.defender_groups)]
+        else:
+            ids.append(args.defender)
+        chk = bl_sage.check_troops(ids)
+        if chk.get("available") and chk.get("missing"):
+            if getattr(args, "skip_troop_check", False):
+                print("警告: 兵种 id 不在索引里（--skip-troop-check 放行）：%s"
+                      % ", ".join(chk["missing"]))
+            else:
+                print("错误: 兵种 id 在索引里不存在：%s" % ", ".join(chk["missing"]))
+                for m in chk["missing"]:
+                    s = bl_sage.suggest_troops(m)
+                    if s:
+                        print("  近似候选：%s -> %s" % (m, ", ".join(s)))
+                print("  （索引只覆盖官方 XML；第三方模组兵种请加 --skip-troop-check）")
+                return 2
+        elif not chk.get("available"):
+            print("警告: 兵种 id 未校验：%s" % (chk.get("reason") or "索引不可用"))
         if getattr(args, "rounds", None):
             params["rounds"] = int(args.rounds)
             if getattr(args, "round_end_alive", None) is not None:
