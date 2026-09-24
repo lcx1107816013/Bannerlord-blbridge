@@ -263,6 +263,8 @@ namespace BlBridge
                 DummyRangeBehavior.ArmorArms = (float)armorArms;
                 DummyRangeBehavior.BodyItemId = bodyItem;
 
+                // v0.8.3：标记本场来源，供 meta 事件区分靶场实验与玩家实战
+                SubModule.MissionOrigin = "bridge";
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;

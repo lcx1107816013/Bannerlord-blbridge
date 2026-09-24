@@ -453,3 +453,38 @@ ARMS `191459_538` / `191534_790` / `191610_398`
   分析按 `bodyPartName` 分组（换身甲只影响躯干/肩类部位的材质）
 - **编译期踩坑**：`Agent.Banner` 是 `ItemObject`（旗子物品）**不是** `Banner` ——
   `FillFrom` 要的 Banner 得从 `Formation`/`Team` 取；`MBObjectManager` 需 `using TaleWorlds.ObjectSystem;`
+
+### ③ 死因偏差处理（立项遗留 ④，2026-09-24）
+
+`bl_death_compare.py` 新增纯函数 `summarize()`：**主口径只取「死于箭」的样本**
+（不足 `MIN_ARROW_SAMPLES=3` 拒绝给数，显示 `-`）；「死于近战」只计数、不计入；「旧口径」（全样本）保留供对照。
+
+- **实测差异**：`imperial_legionary` 旧口径 **5.0 → 新口径 7.0** —— 它 20 个样本里 9 个死于近战，
+  混算把中位拉低了 2 箭；100% 死于箭的兵种新旧口径一致 ✓
+- 自测新增 6 项断言（`test_death_compare_split`），全量回归 `EXIT=0`
+
+### ③ 暴露时长混淆分离（2026-09-24，71 场 / 20 兵种）
+
+| 关系 | Pearson r |
+|---|---|
+| 存活时长 ↔ **总挨箭** | **+0.493** |
+| 存活时长 ↔ **扣血箭** | +0.235 |
+| 总挨箭 ↔ 扣血箭 | **−0.414** |
+
+- 存活时长确实污染「总挨箭」（骑兵存活中位 35~48 秒 vs 步兵 75~113 秒）
+- 「扣血箭」几乎不受时长影响 ⇒ **§③ 选它当主口径是对的**（首次给出量化依据）
+- **意外发现**：总挨箭与扣血箭**负相关** ⇒ 「总挨箭 − 扣血箭」= **被盾挡下的箭**。
+  带盾兵种差得极大（`vlandian_knight` 16 vs 4、`khuzait_spear_infantry` 31 vs 3），
+  无盾的 `battanian_fian_champion` 则是 10 vs 10 完全相等
+  ⇒ **「总挨箭」实际度量的是"箭压力"而非"受伤"**，里面混着盾的阻挡率。
+
+### v0.8.3：来源标记 + 工具收尾（2026-09-24）
+
+- `meta` 事件新增 `mission`：`"bridge"`（BlBridge 自建靶场）/ `"game"`（其它，含玩家在战役/沙盒里打的实战）
+  —— 解决"`battles/` 里靶场实验与实战混在一起、事后分不清"。
+  实现：`SubModule.MissionOrigin` 静态标记（`ScenarioRunner` 开战前置 `"bridge"`），
+  `TelemetryBehavior` 构造时读一次并**立刻复位** ⇒ 标记只对那一场有效、无残留。
+- `bl_mcp.py` 的 `bl_start_battle` 补齐靶场 schema（`dummySide`/`dummyArmor`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`），
+  口径与 `bl_cmd.py` 完全一致（布尔发字符串 `"true"`、护甲发**数字**）
+- 新增 `tools/plan.material.example.json`（材质对照示例）
+- 编译部署 **0.8.3**（`dll sha256 = 822AC5409555470A…`）

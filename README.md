@@ -53,6 +53,7 @@ BlBridge/
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
   tools/plan.example.json         跑批计划示例（换边双跑）
   tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
+  tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json
@@ -106,7 +107,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 | `bl_read_config` | 回读 Warbandlord 配置 | 否 |
 | `bl_apply_config` | 改 Warbandlord 配置（自动备份 + XML 校验） | 否（改完需重启游戏） |
 | `bl_battle_status` | 推演状态机 + 双方存活数 + 战果 | 是 |
-| `bl_start_battle` | 开一场 AI 对 AI 战斗 | 是 |
+| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`） | 是 |
 | `bl_wait_for_state` | 等状态（idle/loading/running/ended/error） | 是 |
 | `bl_abort` | 中止当前推演 | 是 |
 | `bl_fast_forward` | 开关战斗加速（10 倍速，**对自己手打的战斗也生效**） | 是 |

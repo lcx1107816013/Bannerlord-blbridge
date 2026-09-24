@@ -10,7 +10,7 @@ namespace BlBridge
     /// </summary>
     internal static class BridgeConfig
     {
-        public const string Version = "0.8.2";
+        public const string Version = "0.8.3";
         public const string ModuleId = "BlBridge";
 
         /// <summary>

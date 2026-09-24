@@ -16,6 +16,13 @@ namespace BlBridge
     {
         private static int _missionCount;
 
+        /// <summary>
+        /// v0.8.3：下一场 mission 的来源标记。默认 "game"；
+        /// `ScenarioRunner.OpenMission` 在开战前置为 "bridge"，
+        /// `TelemetryBehavior` 构造时读一次并复位 ⇒ 标记只对那一场有效。
+        /// </summary>
+        internal static string MissionOrigin = "game";
+
         // A9：崩溃检测所需的三态标记
         //   cleanExit=false 写于加载时，true 写于 OnSubModuleUnloaded（引擎的模块卸载钩子）
         //   missionInProgress 标记"退出时正在战斗中"

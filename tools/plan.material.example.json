@@ -1,0 +1,30 @@
+{
+  "label": "material_contrast_same_armor_value",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "dummySide": "defender",
+  "unlimitedAmmo": true,
+  "configs": [
+    {
+      "label": "cloth_body",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10,
+      "dummyArmor": "head=45,torso=35,legs=20,arms=25",
+      "dummyBodyItem": "nordic_tunic"
+    },
+    {
+      "label": "plate_body",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10,
+      "dummyArmor": "head=45,torso=35,legs=20,arms=25",
+      "dummyBodyItem": "plated_leather_coat"
+    }
+  ]
+}

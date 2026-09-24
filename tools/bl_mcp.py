@@ -33,6 +33,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bl_analyze  # noqa: E402
+import bl_common  # noqa: E402
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "blbridge"
@@ -711,7 +712,19 @@ TOOLS = [
                                        "消除\"攻方进攻/守方原地防守\"带来的方向偏差（实测镜像对局会 13:0 一边倒）；"
                                        "default=引擎默认战术，仅用于 A/B 对照")},
             "playerSide": {"type": "string", "enum": ["attacker", "defender"],
-                           "description": "谁被标记为玩家侧，仅用于排查该标记是否带来系统性偏差，默认 attacker"}},
+                           "description": "谁被标记为玩家侧，仅用于排查该标记是否带来系统性偏差，默认 attacker"},
+            "dummySide": {"type": "string", "enum": ["none", "attacker", "defender"],
+                          "description": "不朽靶场（v0.8.0）：把该方设为永不倒下的靶子，默认 none"},
+            "freezeDummies": {"type": "boolean",
+                              "description": "冻结靶子 AI（不还手）。会改变 AI 行为，默认 false"},
+            "unlimitedAmmo": {"type": "boolean",
+                              "description": "给射手补满弹药（靶子的弹药不补 —— 它是被测对象），默认 false"},
+            "dummyArmor": {"type": "string",
+                           "description": ("靶子护甲数值覆盖，如 \"head=45,torso=35,legs=20,arms=25\""
+                                           "（只作用于靶子；未知部位名/非数字会直接报错，不静默跳过）")},
+            "dummyBodyItem": {"type": "string",
+                              "description": ("把靶子**身甲**换成该物品 id（材质对照实验用，"
+                                              "如 plated_leather_coat）。材质抗性只来自物品，数值可另用 dummyArmor 对齐")}},
             "required": ["attackerTroop", "defenderTroop"], "additionalProperties": False},
     },
     {
@@ -894,6 +907,22 @@ def call_tool(name, args):
             "orders": args.get("orders") or "charge",
             "playerSide": args.get("playerSide") or "attacker",
         }
+        # 靶场参数（v0.8.0~v0.8.2），口径与 bl_cmd.py 完全一致：
+        #   布尔走 Jmini.Str ⇒ 必须发字符串 "true"；护甲走 Jmini.Num ⇒ 必须发**数字**。
+        # 解析失败一律拒绝，不静默跳过（静默丢弃曾让 9 场护甲实验整批作废）。
+        if args.get("dummySide") and args.get("dummySide") != "none":
+            params["dummySide"] = str(args.get("dummySide"))
+        if args.get("freezeDummies") is True:
+            params["freezeDummies"] = "true"
+        if args.get("unlimitedAmmo") is True:
+            params["unlimitedAmmo"] = "true"
+        if args.get("dummyArmor"):
+            try:
+                params.update(bl_common.parse_dummy_armor(args.get("dummyArmor")))
+            except ValueError as e:
+                return {"ok": False, "error": "--dummy-armor 解析失败：%s" % e}
+        if args.get("dummyBodyItem"):
+            params["dummyBodyItem"] = str(args.get("dummyBodyItem"))
         if not params["attackerTroop"] or not params["defenderTroop"]:
             return {"ok": False, "error": "必须提供 attackerTroop 与 defenderTroop"}
         resp, err = send_command("start_battle", params, timeout=60)

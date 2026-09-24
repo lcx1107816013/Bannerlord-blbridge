@@ -83,6 +83,9 @@ namespace BlBridge
                 sb.Append("{\"t\":\"meta\",\"schema\":1,\"mod\":\"").Append(BridgeConfig.ModuleId);
                 sb.Append("\",\"version\":\"").Append(BridgeConfig.Version);
                 sb.Append("\",\"startedUtc\":\"").Append(Jw.UtcNow());
+                // v0.8.3：来源标记 —— BlBridge 自建靶场为 "bridge"，玩家在战役/沙盒里打的仗为 "game"。
+                // 没有它，battles/ 目录里"靶场实验"与"玩家实战"混在一起，事后无法分辨。
+                sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin));
                 sb.Append("\",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
                 Jw.Write(sb.ToString());
             }
@@ -90,6 +93,19 @@ namespace BlBridge
             {
                 _ioError = ex.GetType().Name + ": " + ex.Message;
             }
+        }
+
+        /// <summary>
+        /// 本场 mission 的来源标记："bridge"（BlBridge 自建靶场）/ "game"（其它，含玩家实战）。
+        /// 由 `ScenarioRunner.OpenMission` 在开战前置 "bridge"；构造时读一次并**立刻复位**，
+        /// 所以标记只在它被设置的那一场有效，不存在残留污染。
+        /// </summary>
+        private readonly string _origin;
+
+        public TelemetryBehavior()
+        {
+            _origin = SubModule.MissionOrigin;
+            SubModule.MissionOrigin = "game";
         }
 
         public override void OnAgentBuild(Agent agent, Banner banner)

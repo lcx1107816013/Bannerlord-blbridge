@@ -371,6 +371,34 @@ def test_bl_cmd_dummy_armor_strict():
     check("未知部位" in out or "hed" in out, "报错信息指名道姓", out.strip()[:200])
 
 
+def test_death_compare_split():
+    """bl_death_compare 必须把「死于箭」与「死于近战」**分开**——后者不可比。
+
+    立项遗留第 ④ 项：`legionary` 只有 55%、`swordsman`/`heavy_horseman` 67% 死于箭，
+    这些行的「扣血箭」只统计了"恰好被箭射死"的子集，与 100% 死于箭的行不是同一个总体；
+    混在一起算中位数就是选择偏差。
+    """
+    import bl_death_compare as bdc
+    rows = [
+        {"troop": "t", "maxHp": 140, "arrow_hits": 10, "arrow_damaging": 5, "killed_by_missile": True},
+        {"troop": "t", "maxHp": 140, "arrow_hits": 12, "arrow_damaging": 7, "killed_by_missile": True},
+        {"troop": "t", "maxHp": 140, "arrow_hits": 30, "arrow_damaging": 2, "killed_by_missile": True},
+        {"troop": "t", "maxHp": 140, "arrow_hits": 99, "arrow_damaging": 1, "killed_by_missile": False},
+        {"troop": "t", "maxHp": 140, "arrow_hits": 99, "arrow_damaging": 1, "killed_by_missile": False},
+    ]
+    s = bdc.summarize(rows)
+    check(s["n"] == 5 and s["n_arrow"] == 3 and s["n_melee"] == 2, "样本按死因拆开", s)
+    check(abs(s["arrow_rate_pct"] - 60.0) < 0.01, "死于箭率 = 60%", s["arrow_rate_pct"])
+    check(s["arrow_damaging_median"] == 5.0, "扣血箭中位只取「死于箭」的 3 个样本",
+          s["arrow_damaging_median"])
+    check(s["all_damaging_median"] == 2.0, "旧口径（全样本）保留供对照", s["all_damaging_median"])
+    s2 = bdc.summarize(rows[3:])
+    check(s2["n_arrow"] == 0 and s2["arrow_damaging_median"] is None,
+          "「死于箭」样本不足 ⇒ 拒绝给中位（与 bl_compare 的样本量门槛一致）", s2)
+    s3 = bdc.summarize([])
+    check(s3["n"] == 0 and s3["arrow_damaging_median"] is None, "空输入不崩", s3)
+
+
 def main():
 
 
@@ -700,6 +728,7 @@ def main():
     test_parse_dummy_armor()
     test_bl_batch_plan_args()
     test_bl_cmd_dummy_armor_strict()
+    test_death_compare_split()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))
