@@ -67,6 +67,12 @@ def main(argv):
     p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
                    help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
                         "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
+    p.add_argument("--attacker-groups", dest="attacker_groups", default=None,
+                   help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
+                        '如 "imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge"'
+                        "（给了它则 --attacker/--a 被忽略；非法直接报错，不静默跳过）")
+    p.add_argument("--defender-groups", dest="defender_groups", default=None,
+                   help="守方多兵种/战术组，语法同 --attacker-groups（给了它则 --defender/--d 被忽略）")
     p.add_argument("--rounds", type=int, default=None,
                    help="多轮连续实验：同一 mission 内跑 N 轮（每轮一个日志文件；默认 1 = 关闭）")
     p.add_argument("--round-end-alive", dest="round_end_alive", type=int, default=None,
@@ -144,6 +150,18 @@ def main(argv):
             params["dummyBodyItem"] = args.dummy_body_item
         if getattr(args, "random_seed", None) is not None:
             params["randomSeed"] = int(args.random_seed)
+        for attr, key in (("attacker_groups", "attackerGroups"),
+                          ("defender_groups", "defenderGroups")):
+            raw = getattr(args, attr, None)
+            if not raw:
+                continue
+            try:
+                # 在**本地**先校验（GC3）：非法绝不透传给游戏端 —— 那边只会静默用默认值。
+                bl_common.parse_squad_groups(raw)
+            except ValueError as e:
+                print("错误: --%s 解析失败：%s" % (attr.replace("_", "-"), e))
+                return 2
+            params[key] = raw
         if getattr(args, "rounds", None):
             params["rounds"] = int(args.rounds)
             if getattr(args, "round_end_alive", None) is not None:

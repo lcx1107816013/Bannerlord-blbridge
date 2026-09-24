@@ -468,6 +468,33 @@ def test_bl_cmd_dummy_armor_strict():
     check("未知部位" in out or "hed" in out, "报错信息指名道姓", out.strip()[:200])
 
 
+def test_bl_cmd_squad_strict():
+    """bl_cmd.py 的多兵种/战术组参数：参数暴露 + 非法 DSL 在**发命令之前**就被拒。
+
+    同 `--dummy-armor` 的理由：参数静默失效曾让实验整批作废（2026-09-24）。
+    合法输入这里不测（那要真连游戏）；非法输入不会走到游戏。
+    """
+    import subprocess
+    help_out = subprocess.run([sys.executable, os.path.join(HERE, "bl_cmd.py"), "start", "--help"],
+                              capture_output=True, cwd=HERE)
+    helptext = (help_out.stdout + help_out.stderr).decode("utf-8", "replace")
+    check("--attacker-groups" in helptext and "--defender-groups" in helptext,
+          "start 子命令暴露 --attacker-groups/--defender-groups")
+    # ⚠️ 断言用 **ASCII 关键词**：子进程在未设 PYTHONIOENCODING 时按 locale(GBK) 写 stdout，
+    #    这里若按 utf-8 解码，中文就是乱码 ⇒ 只查中文会**假失败**（本任务第一版正是这么栽的）。
+    #    ASCII 字节在 GBK/UTF-8 下解码一致 ⇒ 用它做判据最稳（既有测试的 `or "hed"` 同一思路）。
+    for bad, kw in (("a:0", "count"),
+                    ("a:1:Infantryy", "formation"),
+                    ("a:1:Infantry:jump", "movement")):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "bl_cmd.py"), "start",
+                            "--attacker", "imperial_legionary", "--defender", "battanian_wildling",
+                            "--attacker-groups", bad],
+                           capture_output=True, cwd=HERE)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace")
+        check(r.returncode != 0 and (kw in out or "解析失败" in out),
+              "非法组串非 0 退出且指明原因（%s）" % kw, out.strip()[:160])
+
+
 def test_death_compare_split():
     """bl_death_compare 必须把「死于箭」与「死于近战」**分开**——后者不可比。
 
@@ -979,6 +1006,7 @@ def main():
     test_bl_batch_plan_args()
     test_squad_plan_args()
     test_bl_cmd_dummy_armor_strict()
+    test_bl_cmd_squad_strict()
     test_death_compare_split()
 
     # ── ⑫ 跨档对比（材质/护甲对照：两档差多少 + 生效判据）──────────────
