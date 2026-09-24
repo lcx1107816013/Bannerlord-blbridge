@@ -1,5 +1,5 @@
 {
-  "label": "swap_sides_round2",
+  "label": "swap_sides_symmetric",
   "runsPerConfig": 1,
   "scene": "battle_terrain_a",
   "orders": "charge",
@@ -13,44 +13,44 @@
     {
       "label": "T4_aserai_infantry",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "aserai_infantry",
-      "d": 5
+      "d": 20
     },
     {
       "label": "T4_battanian_falxman",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "battanian_falxman",
-      "d": 5
+      "d": 20
     },
     {
       "label": "T5_imperial_legionary",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "imperial_legionary",
-      "d": 5
+      "d": 20
     },
     {
       "label": "T5_battanian_wildling",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "battanian_wildling",
-      "d": 5
+      "d": 20
     },
     {
       "label": "T6_imperial_cataphract",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "imperial_cataphract",
-      "d": 5
+      "d": 20
     },
     {
       "label": "T6_khuzait_khans_guard",
       "attacker": "battanian_fian_champion",
-      "a": 40,
+      "a": 20,
       "defender": "khuzait_khans_guard",
-      "d": 5
+      "d": 20
     }
   ]
 }
