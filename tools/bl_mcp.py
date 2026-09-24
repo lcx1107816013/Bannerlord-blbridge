@@ -810,7 +810,10 @@ TOOLS = [
         "name": "bl_lookup_troop",
         "description": ("查兵种：校验 id 是否存在、按 id 模糊搜索、按文化筛选。"
                         "数据来自 BannerlordSage 的索引库（只读，只索引官方 XML）。"
-                        "没装 BannerlordSage 时返回 available=false —— 属软依赖，不影响其他工具。"),
+                        "没装 BannerlordSage 时返回 available=false —— 属软依赖，不影响其他工具。"
+                        "注意：search 的 pattern 走 SQL LIKE（% 是通配符，如 imperial_%），"
+                        "传裸词（如 legionary）会返回空结果 —— 那不是「没这个兵种」；"
+                        "culture 区分大小写，需与库中一致（empire 或 Culture.empire）。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -818,7 +821,8 @@ TOOLS = [
                           "description": "要校验的兵种 id 列表，如 [\"imperial_legionary\"]"},
                 "search": {"type": "string", "description": "按 id 模糊搜索，% 为通配符，如 imperial_%"},
                 "culture": {"type": "string",
-                            "description": "配合 search 按文化过滤，empire 或 Culture.empire 均可"},
+                            "description": "配合 search 按文化过滤，empire 或 Culture.empire 均可；"
+                                           "区分大小写（EMPIRE 会得到空结果）"},
                 "limit": {"type": "integer", "description": "search 返回条数，默认 20"},
                 "status": {"type": "boolean", "description": "只做索引可用性自检"},
             },
