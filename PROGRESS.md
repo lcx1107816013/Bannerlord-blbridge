@@ -380,3 +380,33 @@ CriticalBodyPartsEnd   = 6    // ArmLeft 的别名
 **日志**（`battles/`，2026-09-24）：BASE `battle_20260924_190945_274` / `191017_341` / `191053_122`；
 HEAD `191128_383` / `191203_290` / `191238_552`；TORSO `191313_527` / `191349_090` / `191424_415`；
 ARMS `191459_538` / `191534_790` / `191610_398`
+
+## 八、v0.8.1 遥测补齐（2026-09-24，**已编译部署、待游戏内验证**）
+
+**动机**：②-附 列的 3 个遥测缺口。**先取证再改**（全部反编译核实，不猜）：
+
+| # | 缺口 | 取证结论 |
+|---|---|---|
+| 1 | 真速度上限 | **引擎不通过公开 API 暴露**：`AgentDrivenProperties` 的 100+ 属性里只有 `MaxSpeedMultiplier` / `CombatMaxSpeedMultiplier`（**倍率**）；`AgentStatCalculateModel` 无 `GetMaximumSpeed`；`Agent` 也没有 `MaxSpeed`（唯一同名项是 `SiegeWeaponMovementComponent.MaxSpeed`，围城器械的）⇒ **原记录"没采"应更正为"引擎不提供"** |
+| 2 | 盾槽身份 | `TryGetShield` 只回传 HP，且取遍历到的**第一个** `IsShield()` 槽 ⇒ 盾槽/盾物品变过即误判（场 1 有盾值回升 477→530） |
+| 3 | 部位/槽位名 | `BoneBodyPartType`：`Head=0` 与 `CriticalBodyPartsBegin=0` **同值**；`EquipmentIndex`：`WeaponItemBeginSlot=0` 与 `Weapon0=0` **同值** ⇒ `ToString()` 返回别名，`Head` / `Weapon0` 字面**永不出现** |
+
+**改动**（一律**新增**字段，旧字段不动，避免破坏已有 60+ 场历史日志）：
+
+| 事件 | 新增字段 | 来源 |
+|---|---|---|
+| `hit` | `bodyPartName` | 新 `EnumNames.BodyPart`（枚举真值 → 稳定名） |
+| `hit` | `shieldSlot` / `shieldItem` | `TryGetShield` 增回传槽索引与 `Item.StringId` |
+| `shot` | `weaponSlotName` | 新 `EnumNames.EquipSlot` |
+| `kill` / `dummy_hit` | `bodyPartName` | 同上 |
+| `ai` | `topSpeedReach` | `DrivenProperty.TopSpeedReachDuration`（加速到顶速时长） |
+
+- 新增 `src/EnumNames.cs`（manifest 17 sources）；`BridgeConfig.Version` 与 `module/SubModule.xml` → **0.8.1**
+- 构建：`build.ps1 -Deploy` 成功（59 KB，`dll sha256 = 7CB21A49287892E0…`，旧 dll 备份 `BlBridge.dll.bak_20260924_193505`）
+
+**待游戏内验证（判据）**：
+1. `bridge_status.json` → `version: 0.8.1`、`fileChangedSinceLoad: false`；
+2. `hit.bodyPartName` 出现 `Head`，且 `hit.bodyPart` **仍是** `CriticalBodyPartsBegin`（旧字段未变）；
+3. `shot.weaponSlotName` 出现 `Weapon0`，且 `shot.weaponSlot` **仍是** `WeaponItemBeginSlot`；
+4. `hit.shieldSlot` / `hit.shieldItem` 有值，且**盾值回升时槽/物品随之变化**（缺口 2 的正面证据）；
+5. `ai.topSpeedReach` 有值。

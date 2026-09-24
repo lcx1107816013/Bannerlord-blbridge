@@ -151,6 +151,10 @@ namespace BlBridge
                 sb.Append(",\"isMissile\":").Append(Jw.B(blow.IsMissile));
                 sb.Append(",\"damageType\":\"").Append(blow.DamageType.ToString()).Append('"');
                 sb.Append(",\"bodyPart\":\"").Append(blow.VictimBodyPart.ToString()).Append('"');
+                // 直名（v0.8.1）：引擎 Head=0 与 CriticalBodyPartsBegin=0 同值，ToString 返回别名，
+                // 直接读 bodyPart 会看到 "CriticalBodyPartsBegin"（占命中 43%~54%，2026-09-24 实测）。
+                // 旧字段保留不动，避免破坏已有 60+ 场历史日志。
+                sb.Append(",\"bodyPartName\":\"").Append(EnumNames.BodyPart(blow.VictimBodyPart)).Append('"');
                 sb.Append(",\"dmg\":").Append(Jw.N(blow.InflictedDamage));
                 sb.Append(",\"magnitude\":").Append(Jw.N(blow.BaseMagnitude));
                 sb.Append(",\"absorbedByArmor\":").Append(Jw.N(blow.AbsorbedByArmor));
@@ -175,11 +179,17 @@ namespace BlBridge
                 // 盾牌状态：用"盾自己的血量"区分"打在盾上"与"打在身体上"，
                 // 不依赖任何瞄准推断 —— 打中盾 → 这个值下降；打中身体 → 它不变。
                 // 分析器从 shieldHp 序列归零即可得出"几箭破盾"。
+                // v0.8.1 补盾**身份**：旧版只取"遍历到的第一个盾槽"，盾槽/盾物品变过就会误判
+                // （场 1 有 agent 盾值回升 477 → 530 ⇒ 盾身份变过）。
                 short shHp, shMax;
-                if (TryGetShield(affectedAgent, out shHp, out shMax))
+                int shSlot;
+                string shItem;
+                if (TryGetShield(affectedAgent, out shHp, out shMax, out shSlot, out shItem))
                 {
                     sb.Append(",\"shieldHp\":").Append(Jw.N((int)shHp));
                     sb.Append(",\"shieldMax\":").Append(Jw.N((int)shMax));
+                    sb.Append(",\"shieldSlot\":").Append(Jw.N(shSlot));
+                    sb.Append(",\"shieldItem\":\"").Append(Jw.Esc(shItem)).Append('"');
                 }
                 sb.Append('}');
                 Jw.Write(sb.ToString());
@@ -211,6 +221,9 @@ namespace BlBridge
                 sb.Append(",\"side\":\"").Append(SideOf(shooterAgent)).Append('"');
                 sb.Append(",\"troop\":\"").Append(Jw.Esc(TroopOf(shooterAgent))).Append('"');
                 sb.Append(",\"weaponSlot\":\"").Append(weaponIndex.ToString()).Append('"');
+                // 直名（v0.8.1）：EquipmentIndex 的 WeaponItemBeginSlot(0) 与 Weapon0(0) 同值，
+                // ToString 返回前者 ⇒ 字面 "Weapon0" 永不出现（与 bodyPart 同类）。
+                sb.Append(",\"weaponSlotName\":\"").Append(EnumNames.EquipSlot(weaponIndex)).Append('"');
                 sb.Append(",\"weaponClass\":\"").Append(Jw.Esc(WeaponClassOf(shooterAgent, weaponIndex))).Append('"');
                 sb.Append(",\"px\":").Append(Jw.N(position.x));
                 sb.Append(",\"py\":").Append(Jw.N(position.y));
@@ -250,10 +263,12 @@ namespace BlBridge
         /// 用途：用**盾自己的血量**区分"打在盾上"与"打在身体上"——不依赖任何瞄准推断：
         /// 打中盾 → 这个值下降；打中身体 → 它不变。分析器从 shieldHp 序列归零即可得"几箭破盾"。
         /// </summary>
-        private static bool TryGetShield(Agent a, out short hp, out short max)
+        private static bool TryGetShield(Agent a, out short hp, out short max, out int slot, out string itemId)
         {
             hp = 0;
             max = 0;
+            slot = -1;
+            itemId = "";
             try
             {
                 if (a == null) return false;
@@ -267,6 +282,8 @@ namespace BlBridge
                     {
                         hp = w.HitPoints;
                         max = w.ModifiedMaxHitPoints;
+                        slot = (int)i;
+                        itemId = w.Item.StringId ?? "";
                         return true;
                     }
                 }
@@ -298,6 +315,7 @@ namespace BlBridge
                 sb.Append(",\"dmg\":").Append(Jw.N(blow.InflictedDamage));
                 sb.Append(",\"damageType\":\"").Append(blow.DamageType.ToString()).Append('"');
                 sb.Append(",\"bodyPart\":\"").Append(blow.VictimBodyPart.ToString()).Append('"');
+                sb.Append(",\"bodyPartName\":\"").Append(EnumNames.BodyPart(blow.VictimBodyPart)).Append('"');
                 sb.Append(",\"isMissile\":").Append(Jw.B(blow.IsMissile));
                 sb.Append(",\"weaponClass\":").Append(Jw.N(blow.WeaponClass));
                 sb.Append('}');
@@ -518,6 +536,11 @@ namespace BlBridge
                 sb.Append(",\"defensiveness\":").Append(Jw.N(a.Defensiveness));
                 sb.Append(",\"maxSpeed\":").Append(Jw.N(DP(a, DrivenProperty.MaxSpeedMultiplier)));
                 sb.Append(",\"combatSpeed\":").Append(Jw.N(DP(a, DrivenProperty.CombatMaxSpeedMultiplier)));
+                // v0.8.1：补"加速到顶速所需时长"。**引擎不通过公开 API 暴露世界单位的速度上限**
+                // （AgentDrivenProperties 的 100+ 属性里只有 *Multiplier；AgentStatCalculateModel
+                //  也没有 GetMaximumSpeed —— 2026-09-24 反编译核实过），所以"上限是否生效"只能退回到
+                //  "实测速度峰值 ÷ 倍率"的统计口径间接判断；这里补的时长是加速模型的直接读数。
+                sb.Append(",\"topSpeedReach\":").Append(Jw.N(DP(a, DrivenProperty.TopSpeedReachDuration)));
                 sb.Append(",\"armorEnc\":").Append(Jw.N(DP(a, DrivenProperty.ArmorEncumbrance)));
             // 四部位护甲值：既是"护甲覆盖是否生效"的判据，也是护甲对照实验的自变量读数。
             // 部位名照引擎真名（ArmorTorso / ArmorLegs / ArmorArms，不是 Body / Arm / Leg）。

@@ -282,6 +282,8 @@ namespace BlBridge
             sb.Append(",\"isMissile\":").Append(Jw.B(blow.IsMissile));
             sb.Append(",\"damageType\":\"").Append(blow.DamageType.ToString()).Append('"');
             sb.Append(",\"bodyPart\":\"").Append(blow.VictimBodyPart.ToString()).Append('"');
+            // 直名（v0.8.1）：引擎 Head=0 与 CriticalBodyPartsBegin=0 同值，ToString 返回别名
+            sb.Append(",\"bodyPartName\":\"").Append(EnumNames.BodyPart(blow.VictimBodyPart)).Append('"');
             sb.Append(",\"weaponClass\":\"").Append(blow.WeaponRecord.WeaponClass.ToString()).Append('"');
             // OnScoreHit 独有
             if (weapon != null)
