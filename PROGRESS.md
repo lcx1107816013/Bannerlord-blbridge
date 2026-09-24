@@ -857,6 +857,43 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 **② 收尾结论**：护甲与材质的对照**一律走第一轮那条路**；换装路线的价值仅剩
 "验证换装机制本身可用"（已达成：`dummy_swap.actualItem` 6/6 一致 + `armorBody` 逐场一致）。
 
+### ③ 换边双跑（第一版，2026-09-24 22:00–22:04）：方法跑通，指标设计要改
+
+**做法**：`--rounds 2 --round-swap --round-end-alive 1` + **无 `dummySide`**
+（先逐字段核对了立项批 `battle_20260924_194641_881` 那组：`dummySide=None`、Defender=被测 5 人、
+Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手），6 兵种各 1 场。
+
+**跑通的部分** ✅：多轮生效（`meta.round` = 1/2、每轮独立文件），攻守确实互换
+（round 2 的 `Attacker` 变成被测兵种 5 人、`Defender` 变成 fian_champion 40 人）。
+
+**round 1（被测兵种当守方）—— 复现立项表** ✅（6 场、每兵种 5 靶）：
+
+| 兵种 | 本次「扣血箭」中位 | §三 立项表 |
+|---|---|---|
+| aserai_infantry | 4.0 | 3 |
+| battanian_falxman | 5.0 | 5 |
+| battanian_wildling | 6.0 | 8 |
+| imperial_cataphract | 6.0 | 8 |
+| khuzait_khans_guard | 10.0 | 9 |
+| imperial_legionary | `-`（只 40% 死于箭，样本 <3 ⇒ 拒绝给数） | 7（§九 记 55%） |
+
+**round 2（攻守互换）—— 指标无区分度** ❌：4 场全部得到「fian_champion 扣血箭中位 = **9**」
+（4 个完全不同的攻方兵种数值相同）。原因：`--round-swap` 只交换**兵种与位置**，**人数跟着兵种走**
+⇒ round 2 变成"被测兵种 **5 人** vs fian_champion **40 人**"；而这个指标是"**每个** fian_champion
+个体到死挨几箭"，**与攻方人数无关** ⇒ 只要各攻方的远程单发伤害相近（标枪/投石/弓 ≈18），结果就都是 9。
+⇒ **下一版必须改对称配置**（例如 20 vs 20），互换后才仍对称，才能把"位置效应"与"兵种差异"分开。
+
+**本次暴露的两个坑（都值得记）**：
+
+1. **`dummySide: defender` + 多轮 = 第 2 轮永不触发**：不朽靶子 ⇒ 第 1 轮既不会全灭、也到不了
+   `EndAlive` ⇒ 只能等 `cap` 超时 ⇒ 只产出 round 1。我第一次按这个配置跑了 6 场，**全部只拿到
+   round=1**（5 个文件），整批作废重跑。⇒ **多轮实验不要配不朽靶子**。
+2. **2 场缺 round 2**（`aserai_infantry` / `imperial_cataphract`）—— 原因未查（可能第 1 轮未达结束条件，
+   或重生失败）。⇒ 若日后要用多轮做正式实验，应先查清这一点。
+
+**结论**：③ 的**方法**已验证可行（多轮 + 攻守互换 + 每轮独立文件 + `unit` 事件可精确归属），
+但**指标设计需重做**（对称人数）。
+
 ### 候选扩展（已评估，**暂不做** —— 2026-09-24，用户裁定先收尾实测）
 
 用户提议借鉴两个 mod 扩大可测的实验类型。**已查：本机均未安装**（`Modules/` 里只有内置 `CustomBattle`）。

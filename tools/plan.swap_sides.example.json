@@ -5,7 +5,6 @@
   "orders": "charge",
   "playerSide": "attacker",
   "capSec": 30,
-  "dummySide": "defender",
   "unlimitedAmmo": true,
   "rounds": 2,
   "roundSwap": true,
@@ -19,10 +18,10 @@
       "d": 5
     },
     {
-      "label": "T4_falxman",
+      "label": "T4_battanian_falxman",
       "attacker": "battanian_fian_champion",
       "a": 40,
-      "defender": "falxman",
+      "defender": "battanian_falxman",
       "d": 5
     },
     {
