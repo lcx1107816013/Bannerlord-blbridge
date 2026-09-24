@@ -121,6 +121,11 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
         "--orders", orders,
         "--player-side", player_side,
     ]
+    # plan 顶层 skipTroopCheck=true 必须**同时**透传给 CLI：bl_batch 只跳过了它自己的预检，
+    # 而 `bl_cmd.py start` 里还有一道本地索引预检（bl_sage.check_troops），第三方模组兵种
+    # 不在索引里 ⇒ 会被它拦下、整批 start_failed（2026-09-24 实跑踩过，当时只能绕开 batch）。
+    if plan.get("skipTroopCheck"):
+        out.append("--skip-troop-check")
     side = dummy.get("dummySide")
     if side is not None and side not in ("none", "attacker", "defender"):
         raise ValueError("dummySide 只能是 none/attacker/defender，收到 %r" % (side,))
