@@ -180,6 +180,10 @@ namespace BlBridge
             double armorTorso = Jmini.Num(raw, "dummyArmorTorso", -1.0);
             double armorLegs = Jmini.Num(raw, "dummyArmorLegs", -1.0);
             double armorArms = Jmini.Num(raw, "dummyArmorArms", -1.0);
+            // v0.8.2：把靶子的**身甲**换成指定物品 id（空 = 不换）。
+            // 用于"同兵种、同护甲数值、只换材质"的对照：材质抗性 R 只来自物品，
+            // 数值仍由上面四个覆盖值对齐。见 DummyRangeBehavior.BodyItemId。
+            string bodyItem = Jmini.Str(raw, "dummyBodyItem", "");
 
             // 1) 必须处于自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）
             string stateName = "";
@@ -257,6 +261,7 @@ namespace BlBridge
                 DummyRangeBehavior.ArmorTorso = (float)armorTorso;
                 DummyRangeBehavior.ArmorLegs = (float)armorLegs;
                 DummyRangeBehavior.ArmorArms = (float)armorArms;
+                DummyRangeBehavior.BodyItemId = bodyItem;
 
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;

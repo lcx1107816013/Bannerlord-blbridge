@@ -64,6 +64,9 @@ def main(argv):
                    help="靶子护甲数值覆盖，如 head=45,torso=35,legs=20,arms=25"
                         "（只作用于靶子；未写的部位不动；每帧重申，零 Harmony；"
                         "未知部位名/非数字会直接报错，不静默跳过）")
+    p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
+                   help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
+                        "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -125,6 +128,8 @@ def main(argv):
             except ValueError as e:
                 print("错误: --dummy-armor 解析失败：%s" % e)
                 return 2
+        if getattr(args, "dummy_body_item", None):
+            params["dummyBodyItem"] = args.dummy_body_item
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

@@ -317,6 +317,12 @@ def test_bl_batch_plan_args():
                                   base, scene, orders, ps, cap)
     check("--unlimited-ammo" in A and "--freeze-dummies" in A, "布尔靶场开关被追加", A)
 
+    A = bl_batch.build_start_args({}, dict(base, dummyBodyItem="plated_leather_coat"),
+                                  scene, orders, ps, cap)
+    check(A[A.index("--dummy-body-item") + 1] == "plated_leather_coat", "身甲物品透传（材质对照用）", A)
+    check("--dummy-body-item" not in bl_batch.build_start_args({}, base, scene, orders, ps, cap),
+          "未指定身甲物品时不追加开关")
+
     for bad, why in (("hed=45", "未知部位名"), ("head=abc", "值非数字"), ("head", "缺 = 号")):
         try:
             bl_batch.build_start_args({}, dict(base, dummyArmor=bad), scene, orders, ps, cap)

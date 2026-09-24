@@ -299,7 +299,8 @@ manifest_missing         旧版部署，没有清单
 | `flee` / `panic` | agent, side, troop |
 | `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp |
 | `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
-| `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName` |
+| `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName`；**v0.8.2 起** `dummy_meta` 另带 `bodyItem`（请求替换的身甲物品 id） |
+| `dummy_swap` | **v0.8.2**：靶子身甲被替换时的一条记录 —— item, **material**（实际生效的材质，可观测落点）, armorBody, agents；找不到物品时 `agents=0` 且带 `error` |
 
 > **为什么有 `bodyPartName` / `weaponSlotName`（v0.8.1）**：引擎的两个枚举带**同值别名**，
 > `ToString()` 返回别名而不是直观名 —— `BoneBodyPartType` 里 `Head = 0` 与 `CriticalBodyPartsBegin = 0` 同值

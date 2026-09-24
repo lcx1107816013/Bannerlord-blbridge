@@ -111,7 +111,13 @@
      ⚠️ 换成「总挨箭」口径就是 **8~15** ⇒ 口径不定死，同一批数据能得出相反结论。
   2. **"护甲回默认后 T4+ 中位 5 箭" → 对 T4 成立、对 T5/T6 偏低**：T4 实测多数 **3~5**（模型说 5 ✓），
      但 T5/T6 实测 **7~9**。模型那句话把三个档位混成了一句话。
-  3. **"材质差异 7%" → 仍未测**：需要"同兵种不同材质"的对照（兵种固定、只换护甲材质）。
+  3. **"材质差异 7%" → 语义已查明、仍待测**：出自 **Warbandlord 的护甲公式模型**（离线反编译重建），
+     指"同一护甲值下布甲 vs 板甲的实伤差 7%"（刺伤 A=40 时 39.3 vs 36.5）。
+     机理 = mod 引入的**材质抗性 R**（`config.xml` 的 `MaterialResistance` 组：Cloth 刺 0.55 / Plate 刺 0.65）；
+     公式：阈值 = R·A_eff·0.6·PRF，PR = 0.125^(R·A_eff·0.0215+0.09)。
+     ⚠️ **原版引擎不读材质**（只进音效 `GetSoundParameterForArmorType`），是 mod 用 Harmony 改写的
+     ⇒ 查证时别只看 `TaleWorlds.*.dll`（我踩过这个坑，差点得出反向结论）。
+     验证路线见 §九（`--dummy-body-item` 换装）。
 - **⚠️ 三个必须挂在结论上的限制**：
   1. **样本量**：每兵种 1 场 × 5 靶 = **5 样本**，撑不起"必然"（镜像局 σ 曾实测 2.6）。
   2. **死因偏差**：T4 骑兵与部分步兵的"死于箭"只有 40~80%（`imperial_heavy_horseman` **40%**、
@@ -419,3 +425,31 @@ ARMS `191459_538` / `191534_790` / `191610_398`
 **盾 HP 回升 0 次、换盾 0 次**（盾物品恒为 `stronger_reinforced_kite_shield`、槽恒为 1）
 ⇒ "回升时能否区分『换了盾』与『盾被修复』"**仍需一场出现盾值回升的战斗**才能验证
 （②-附 2 记录的 477→530 回升出自 0.7.9 的一场，本场未复现）。
+
+## 九、③ 数据补强 + v0.8.2 靶子换装（材质对照的实现）
+
+### ③ 数据补强（2026-09-24 19:40–19:48，40 场）
+配置同 §③（`fian_champion` 40 人 vs 被测兵种 5 人），每兵种样本 **5 → 15**（5 靶 × 3 场）：
+
+| 档 | 兵种数 | 「扣血箭」中位区间 | 旧（5 样本） |
+|---|---|---|---|
+| T4 | 8 | **3~6** | 2~7（多数 3~5） |
+| T5 | 6 | **5~8** | 7~8 |
+| T6 | 6 | **5~10（中位 8）** | 5~10（中位 7.5） |
+
+⇒ **「T6 挨 8 箭」在 15 样本下仍成立**（T6 六兵种中位 = 8）。
+**死因偏差仍在**（未修）：`imperial_legionary` 55%、`vlandian_swordsman` 67%、`imperial_heavy_horseman` 67%、
+`vlandian_knight`/`vlandian_banner_knight` 87% 死于箭 —— 这些行的「扣血箭」只统计"恰好被箭射死"的子集。
+复现：筛出 `40 fian_champion vs 5 被测` 的 71 个文件 → `bl_death_compare.collect()`。
+
+### v0.8.2 靶子换装（**已编译，部署待游戏关闭**）
+- **动机**：验「材质差异 7%」（§三 第 3 条的更正）——需要"同兵种、同护甲数值、**只换材质**"
+- **实现**：`--dummy-body-item <item_id>` 把靶子身甲换成该物品。
+  `SpawnEquipment.Clone(false)` → `AddEquipmentToSlotWithoutAgent(Body, …)` → `MissionEquipment.FillFrom(eq, banner)`
+  （零 Harmony；`MissionEquipment` 索引器**只有 getter**，所以必须整份灌回；每个 agent 只换一次）
+- **新事件 `dummy_swap`**：item / material / armorBody / agents —— 本参数的**可观测落点**（防静默失效）
+- **实验设计**：靶子 `imperial_legionary` 10 人 + 攻方 `fian_champion` 20 人，
+  `--dummy-armor` 对齐四部位数值，只换身甲（Cloth `nordic_tunic` vs Plate `plated_leather_coat`），每档 3 场，
+  分析按 `bodyPartName` 分组（换身甲只影响躯干/肩类部位的材质）
+- **编译期踩坑**：`Agent.Banner` 是 `ItemObject`（旗子物品）**不是** `Banner` ——
+  `FillFrom` 要的 Banner 得从 `Formation`/`Team` 取；`MBObjectManager` 需 `using TaleWorlds.ObjectSystem;`

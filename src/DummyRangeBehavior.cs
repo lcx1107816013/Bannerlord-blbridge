@@ -40,6 +40,7 @@
 using System.Text;
 using TaleWorlds.Core;
 using TaleWorlds.MountAndBlade;
+using TaleWorlds.ObjectSystem;
 
 namespace BlBridge
 {
@@ -81,6 +82,17 @@ namespace BlBridge
         internal static float ArmorLegs = -1f;
         internal static float ArmorArms = -1f;
 
+        /// <summary>
+        /// v0.8.2：把靶子的**身甲**换成指定物品 id（空 = 不换）。
+        /// 动机：Warbandlord 的护甲公式里材质抗性 R 参与伤害
+        /// （阈值 = R·A_eff·0.6·PRF…；PR = 0.125^(R·A_eff·0.0215+0.09)），
+        /// 而 R 只来自**物品**的 MaterialType、数值来自 AgentDrivenProperties
+        /// ⇒ 两者来源不同：换物品即换材质，数值仍可由 ArmorHead/Torso/Legs/Arms 对齐。
+        /// 这是"同兵种同数值、只换材质"对照实验的全部机理。
+        /// 只作用于靶子；每个 agent 只换一次（FillFrom 会重置整份装备，每帧重建会打断战斗状态）。
+        /// </summary>
+        internal static string BodyItemId = "";
+
         private float _elapsed;
         private int _seq;
         private int _restored;
@@ -91,6 +103,10 @@ namespace BlBridge
         private int _mismatchCount;
         private bool _frozen;
         private bool _wroteMeta;
+        /// <summary>已换过身甲的靶子 agent（避免每帧重建整份装备）。</summary>
+        private readonly System.Collections.Generic.HashSet<int> _swapped = new System.Collections.Generic.HashSet<int>();
+        /// <summary>换装报告只写一条（记录实际生效的物品与材质）。</summary>
+        private string _swapReported;
 
         private static bool Enabled
         {
@@ -111,6 +127,7 @@ namespace BlBridge
                     WriteMetaOnce();
                     ApplyDummyToughness();
                     ApplyArmorOverride();
+                    ApplyBodyItem();
                     if (FreezeDummies && !_frozen)
                     {
                         FreezeAll();
@@ -239,6 +256,7 @@ namespace BlBridge
                 // 顺手补上原先漏掉的两项（static 字段残留会污染玩家之后的手动战斗）
                 UnlimitedAmmoForShooters = false;
                 ArmorHead = ArmorTorso = ArmorLegs = ArmorArms = -1f;
+                BodyItemId = "";
             }
         }
 
@@ -255,6 +273,7 @@ namespace BlBridge
               .Append(",\"torso\":").Append(Jw.N(ArmorTorso))
               .Append(",\"legs\":").Append(Jw.N(ArmorLegs))
               .Append(",\"arms\":").Append(Jw.N(ArmorArms)).Append('}');
+            sb.Append(",\"bodyItem\":\"").Append(Jw.Esc(BodyItemId)).Append('"');
             sb.Append(",\"note\":\"Mortal + OnScoreHit 内回血；applied 取自引擎 damagedHp\"}");
             Jw.Write(sb.ToString());
         }
@@ -360,6 +379,111 @@ namespace BlBridge
                 catch
                 {
                 }
+            }
+        }
+
+        /// <summary>
+        /// 把靶子的身甲换成 BodyItemId（每个 agent 只换一次）。
+        ///
+        /// 为什么走 `SpawnEquipment.Clone` + `MissionEquipment.FillFrom`：
+        /// `MissionEquipment` 的索引器**只有 getter**（反编译核实），运行时无法单槽赋值；
+        /// 而 `Equipment.AddEquipmentToSlotWithoutAgent` 能改 `Equipment`，
+        /// `FillFrom(Equipment, Banner)` 能把整份装备灌进 agent（零 Harmony）。
+        /// 换完发一条 `dummy_swap` 记录**实际生效的物品与材质**——这是本参数的可观测落点
+        /// （否则又是一个"写了参数但没生效"的静默失效）。
+        /// </summary>
+        private void ApplyBodyItem()
+        {
+            if (string.IsNullOrEmpty(BodyItemId)) return;
+            Mission m = Mission.Current;
+            if (m == null) return;
+            ItemObject item = null;
+            try
+            {
+                MBObjectManager om = MBObjectManager.Instance;
+                if (om != null) item = om.GetObject<ItemObject>(BodyItemId);
+            }
+            catch
+            {
+            }
+            if (item == null)
+            {
+                if (_swapReported == null)
+                {
+                    _swapReported = "missing";
+                    WriteSwap(-1, "", 0, "item_not_found");
+                }
+                return;
+            }
+            int n = 0;
+            foreach (Agent a in m.Agents)
+            {
+                if (a == null || !a.IsActive() || !a.IsHuman) continue;
+                if (!IsDummy(a)) continue;
+                if (_swapped.Contains(a.Index)) continue;
+                try
+                {
+                    Equipment eq = a.SpawnEquipment.Clone(false);
+                    eq.AddEquipmentToSlotWithoutAgent(EquipmentIndex.Body, new EquipmentElement(item));
+                    // 注意：Agent.Banner 是 ItemObject（旗子物品），不是 Banner ——
+                    // FillFrom 要的是 Banner，从阵型/队伍取（编译期实测踩到过）。
+                    Banner banner = null;
+                    try
+                    {
+                        if (a.Formation != null) banner = a.Formation.Banner;
+                        else if (a.Team != null) banner = a.Team.Banner;
+                    }
+                    catch
+                    {
+                    }
+                    a.Equipment.FillFrom(eq, banner);
+                    _swapped.Add(a.Index);
+                    n++;
+                }
+                catch
+                {
+                }
+            }
+            if (n > 0 && _swapReported == null)
+            {
+                _swapReported = BodyItemId;
+                int bodyArmor = -1;
+                string mat = "";
+                try
+                {
+                    ArmorComponent ac = item.ArmorComponent;
+                    if (ac != null)
+                    {
+                        bodyArmor = ac.BodyArmor;
+                        mat = ac.MaterialType.ToString();
+                    }
+                }
+                catch
+                {
+                }
+                WriteSwap(bodyArmor, mat, n, "");
+            }
+        }
+
+        private void WriteSwap(int bodyArmor, string material, int agents, string error)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"t\":\"dummy_swap\",\"time\":").Append(Jw.N(_elapsed));
+                sb.Append(",\"item\":\"").Append(Jw.Esc(BodyItemId)).Append('"');
+                sb.Append(",\"material\":\"").Append(Jw.Esc(material)).Append('"');
+                sb.Append(",\"armorBody\":").Append(Jw.N(bodyArmor));
+                sb.Append(",\"agents\":").Append(Jw.N(agents));
+                if (!string.IsNullOrEmpty(error))
+                {
+                    sb.Append(",\"error\":\"").Append(Jw.Esc(error)).Append('"');
+                }
+                sb.Append('}');
+                Jw.Write(sb.ToString());
+            }
+            catch
+            {
             }
         }
 

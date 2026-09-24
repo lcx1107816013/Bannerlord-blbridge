@@ -51,7 +51,7 @@ DEFAULT_BATTLES = os.path.join(
 # ── 靶场参数（v0.8.0）：plan 顶层给默认值，单配置可覆盖 ────────────────
 # 键名与 `bl_cmd.py start` 的开关一一对应，值直接透传给 CLI（零翻译层）；
 # 护甲的部位名清单只有一份，在 bl_common.DUMMY_ARMOR_PARTS。
-DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor")
+DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor", "dummyBodyItem")
 
 
 def resolve_dummy_params(plan, cfg):
@@ -100,6 +100,10 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
     if armor:
         bl_common.parse_dummy_armor(armor)   # 只校验；值原样透传给 CLI
         out += ["--dummy-armor", armor]
+    body_item = dummy.get("dummyBodyItem")
+    if body_item:
+        # 物品 id 不做本地校验：不认识的 id 由游戏端报 item_not_found 并写进 dummy_swap
+        out += ["--dummy-body-item", str(body_item)]
     return out
 
 
