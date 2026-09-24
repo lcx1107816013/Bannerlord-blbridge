@@ -606,6 +606,67 @@ AttributeError: 'NoneType' object has no attribute 'splitlines'
 1. MCP 子进程的 env 里注入 `PYTHONIOENCODING = "utf-8"`（与父进程读的编码对齐；不依赖调用者环境）；
 2. `out is None` 时**显式 `check(False, …)` 并打印 stderr**，让根因可见，不再让症状跑到 `AttributeError`。
 
+## 十四、兵种 id 前置校验 —— 接通 BannerlordSage 索引（2026-09-24）
+
+**要解决的问题**：`bl_start_battle` 的兵种 id 敲错时，C# 侧**静默走 fallback**，日志里看不出来，
+代价是白等一整场对局才发现那场根本没按预期开局。
+
+**为什么不再写一遍 XML 解析**：BannerlordSage 已经把全量兵种索引进了一个 SQLite 文件 ——
+`F:\Program Files\BannerlordSage\dist\games\bannerlord\bannerlord.db`（见其 `src/utils/env.ts` 的 `dbPath`），
+1981 条兵种；实测 Python 标准库 `sqlite3` **只读直连**即可查询，无需启动 bun、无需走 MCP 套娃。
+
+**新增 `tools/bl_sage.py`（只读通道，软依赖）**：
+
+- `status()` / `lookup()` / `check_troops()` / `search()`，另带 CLI（`--status` / `--check` / `--search`）；
+- **只读**打开（`mode=ro`）：BannerlordSage 是长驻进程、持有写连接并设了 `busy_timeout`，我们写会撞锁；
+- **软依赖**：db 缺失 / schema 变了 ⇒ `available=False` + `reason`，**不抛异常、不阻断主流程**
+  （BlBridge 必须能在没装 BannerlordSage 的机器上独立使用）；
+- 只依赖业务表 `bannerlord_troops`，**不碰 `*_fts` 虚拟表**（FTS5 能否查询取决于 Python 编译选项，不稳）；
+- 启动时校验表 + 必需列齐全，schema 变了就报并把实际列名带回来，而不是抛 `KeyError` 让人猜。
+
+**`bl_mcp.py` 两处接入**：
+
+1. 新工具 `bl_lookup_troop`：校验 id / 按 id 模糊搜索 / 按文化筛选 / 索引可用性自检；
+2. `bl_start_battle` 在**发命令之前**校验双方 id，缺失即返回错误 + 近似候选（取首段前缀猜）；
+   新增 `skipTroopCheck` 出口 —— 索引只覆盖**官方 XML**（`xml_scope=official`），
+   第三方模组的兵种会被判成"不存在"，那种情况必须能跳过，否则等于误伤。
+
+**判据（均已实测）**：
+
+- `--check imperial_legionary battanian_fian_champion imperial_legionarry`
+  ⇒ 前两个 OK（L26 / L31），拼错的那个判 MISS；
+- `bl_start_battle` 传错 id ⇒ `ok=False`、`missing=['imperial_legionarry']`、给出 5 个 `imperial_*` 候选；
+- db 指向不存在的路径 ⇒ `available=False`、`missing=[]`（**不误报**），`bl_start_battle` 不被拦截；
+- `tools/bl_selftest.py` 全绿（工具数断言 15 → 16，并新增"bl_lookup_troop 已注册"一项）。
+
+**润色（同日，实测暴露后已修）**：
+
+1. 建议列表原按字母序取前 5 —— `imperial_legionarry` 的建议里**反而没有** `imperial_legionary`
+   （它按字母序排在后面）。改用 `difflib.SequenceMatcher`（标准库）按相似度重排，正确 id 排第一；
+2. 同一兵种 id 在官方 XML 里被多个文件重复定义（SandBoxCore 与 CustomBattle 都有
+   `imperial_infantryman`），`bl_sage.search` 已按 id 去重取首条，否则建议/搜索结果出现同名条目。
+
+**CLI / 跑批接入（同日续）**：
+
+- 读码发现 `bl_cmd.py start` 走 `send_command` **直通通道**、绕过 MCP 工具层校验
+  ⇒ CLI 与批量原先对错 id 完全裸奔；
+- `suggest_troops` 下沉到 `bl_sage.py`：`bl_batch.py` 按其文件头设计**不 import bl_mcp**、
+  只依赖数据通道，而批量预检同样需要给近似候选；
+- `bl_cmd.py start`：加同一语义校验（给了 `--attacker/--defender-groups` 时只校验组里的
+  troop —— 单兵种参数那时会被游戏端忽略）+ `--skip-troop-check` 出口；索引不可用 ⇒ 警告放行；
+- `bl_batch.py`：跑批前**一次性预检全部配置的兵种 id**（含 squad 组 DSL 展开），错一个**整批中止**
+  —— N 局全是无效样本比单场失败严重得多；**dry-run 也预检**（它本来就是"验证计划本身"的入口）；
+  plan 顶层 `"skipTroopCheck": true` 与 CLI / MCP 是同一个出口；
+- **顺带修掉一个既有 bug**：`bl_batch.py` 没调 `bl_common.safe_streams()`，纯净 shell 下打印 `⇒`
+  直接 `UnicodeEncodeError`（连 `--dry-run` 都跑不完）—— 与十三节里 bl_metrics / bl_compare
+  中过的是同一招；
+- 判据（均已实测）：`bl_cmd` 错 id ⇒ rc=2 + 候选（legionary 排第一）；加 `--skip-troop-check`
+  ⇒ 警告放行并到达发送阶段；`bl_batch` 坏 plan ⇒ 整批中止 rc=1、好 plan ⇒ dry-run 走完 rc=0；
+  `bl_selftest.py` 全绿。
+
+**注意**：MCP 工具列表是**连接时枚举**的 —— 改完 `bl_mcp.py` 后要**重启 blbridge MCP**，
+否则 IDE 侧看不到 `bl_lookup_troop`（改完首次验证时就是这个现象）。
+
 **连带修掉的同源缺陷**：`bl_selftest.py` 自己**没有** `bl_common.safe_streams()`（§六 #2 给
 `bl_metrics` / `bl_compare` / `bl_death_compare` 修过的那条）⇒ 默认中文控制台下，本文件里含 `⇒` 的
 `check()` 标签（⑩⑪ 段）会抛 `UnicodeEncodeError`。已在 `main()` 开头补上 —— 修①之后立刻暴露的就是它。
@@ -618,7 +679,7 @@ AttributeError: 'NoneType' object has no attribute 'splitlines'
 且读取路径上的异常必须能被看见 —— 线程里的 `UnicodeDecodeError` 就是一个把"编码问题"伪装成
 "`NoneType` 没有 `splitlines`"的完美烟幕。
 
-## 十四、材质对照：机理取证 + 两轮实测准备（2026-09-24 晚间续）
+## 十五、材质对照：机理取证 + 两轮实测准备（2026-09-24 晚间续）
 
 **起因**：§九/§十二 的材质对照（`--dummy-body-item` 换身甲）`Δ 中位 = 0.0`，当时的猜测是
 "Warbandlord 的 5 层串行把单层效应稀释了"。**反编译取证推翻了它** —— 真因是**改错了装备副本**。
@@ -1012,3 +1073,90 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 是这游戏的常态（随机 modifier）⇒ 换装实验里 `armorBody` 读回 **25 / 50**（两件甲 XML 都写 36）
 **很可能就是物品随机 modifier**。试穿探针要**每件甲跑多场、看 `armorBody` 是否波动**：
 波动 = 随机 modifier（好修：spawn 时固定或记录）；恒定 = Warbandlord 类**静态改写**（得换物品对）。
+
+## 十六、多兵种混编 + 战术命令（v0.8.8，T1–T8 已入库，T9 待验）
+
+> 本节由 **Task 10**（2026-09-25）产出；当时另一个任务正在改 `PROGRESS.md`，故先落独立草稿、收尾时并入（只调编号与元说明，正文未改）。
+> ⚠️ **T9（游戏内 5 条判据）尚未执行** ⇒ 判据结果一律写 `（待 T9）`，**不填任何数字**。
+
+### 1. DSL 语法
+
+`<troop>:<count>[:<formation>[:<movement>]]`，多组用 `|` 分隔。
+
+- `troop`：兵种 id（**不做本地校验**，由游戏端报 `unknown_troop`，与 `--dummy-body-item` 同策略）。
+- `count`：整数 ≥ 1。
+- `formation`：`FormationClass` 的引擎名，**大小写不敏感**；取值只允许
+  `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`。
+  省略 ⇒ 引擎按兵种决定编队。
+- `movement`：`charge | advance | hold | fallback | stop | retreat`（小写）。省略 ⇒ `charge`。
+- plan 里值可以是 **DSL 字符串**或**组列表**（每项 dict 含 `troop/count/formation/movement`）；
+  是列表时先转成 DSL 字符串再解析（**只有一条解析路径**）。
+
+**两条能力边界（写死）**：
+
+1. **`formation` 不能下发** —— `IAgentOriginBase` 的 18 个成员里**没有 formation**；编队由
+   `BasicCharacterObject.GetFormationClass()` 按兵种决定（那是引擎 `virtual`，改它会污染共享的
+   `CharacterObject`，不可取）⇒ `formation` 只做**解析时校验 + 日志里记录实际编队**（GC4 观测量不受影响）。
+2. **`hold` 落 `MovementOrderStop`** —— 引擎 `MovementOrder` 只暴露
+   `Charge/Retreat/Stop/Advance/FallBack/Null`，且 ctor 全 private ⇒ `hold` 与 `stop` 等价，
+   降级提示在 `OrderNotes` 里**可读回**。
+
+### 2. Global Constraints（GC1–GC6，逐字照计划）
+
+- **GC1 DSL 格式（定死）**：`<troop>:<count>[:<formation>[:<movement>]]`，多组用 `|` 分隔。
+  - `troop`：兵种 id（**不做本地校验**，由游戏端报 `unknown_troop`，与 `--dummy-body-item` 同策略）
+  - `count`：整数 ≥ 1
+  - `formation`：`FormationClass` 的引擎名，**大小写不敏感**，取值只允许：
+    `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`
+    ⚠️ **修订（2026-09-24 23:5x，用户批准路 A）**：`IAgentOriginBase` 无 formation 成员、
+    编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定 ⇒ 该字段**不能下发**，
+    语义降级为"**解析时校验 + 日志里记录实际编队**"（GC4 的观测量不受影响）。
+  - `movement`：`charge | advance | hold | fallback | stop | retreat`（小写；映射见 T4）
+  - 示例：`imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge`
+  - 缺省：省略 `formation` ⇒ 引擎默认编队；省略 `movement` ⇒ `charge`
+- **GC2 向后兼容**：旧 plan 字段 `attacker`/`a`/`defender`/`d` 的行为**逐字节不变**
+  （等价于单组：`formation` 缺省、`movement=charge`）。旧 plan 必须仍能跑出与今天一致的结果。
+- **GC3 非法即报错、绝不静默**：DSL 字段数 ∉ {2,3,4}、`count` 非正整数、未知 `formation`/`movement`
+  ⇒ **抛错并中止跑批**，错误信息里带上出错的那一组原文。这是本项目最贵教训（参数静默丢弃曾让 9 场实验作废）。
+- **GC4 可观测落点（每个新参数都要能被读回）**：
+  1. `unit` 事件新增 **`formation`** 字段（`FormationClass` 的**真名**，见 T7 别名坑）；
+  2. 新增 **`squad`** 事件，每组一行（字段见 T7）；
+  3. 分析侧必须能按 `formation` 分组（`bl_dummy_analyze --by` 加一项）。
+- **GC5 工程约束**：零 Harmony；`python tools/bl_selftest.py` 必须 **EXIT=0**；改后须
+  `build.ps1 -Deploy`（**游戏必须关闭**）且 `bl_cmd.py buildcheck` 文件链条一致。
+- **GC6 版本**：`src/BridgeConfig.cs` 的 `Version` 与 `module/SubModule.xml` → **0.8.8**（build.ps1 会自动同步后者）。
+
+### 3. 位置偏移量（确切值）
+
+多轮重生时，**第 i 组**的进场点 = 基点 `x + i*12f`（y/z 不变）；基点未指定 ⇒ 交回引擎默认。
+
+### 4. movement 落点裁决
+
+- 按该组兵种的**实际编队**下发 movement。
+- 同一**实际编队**被多组以**不同** movement 命中 ⇒ 报错 `conflicting_movements`。
+- `groups` 与 `orders != "charge"` 混用 ⇒ 报错 `conflicting_orders`。
+
+### 5. T9 判据清单（5 条，逐字照计划 §T9）
+
+1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
+   结果：（待 T9）
+2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:hold` + `khuzait_khans_guard:5:HorseArcher:charge`）
+   ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
+   结果：（待 T9）
+3. `unit` 事件的 `formation` 与 `squad` 一致（10 个 Infantry、5 个 HorseArcher）；
+   结果：（待 T9）
+4. **行为可辨**：`hold` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
+   结果：（待 T9）
+5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件为单组 + `movement=charge`，
+   且 `end.validity.verdict = ok`、`nanCount = 0`、坏行 0。
+   结果：（待 T9）
+
+### 6. 提交记录
+
+- `ab5c3a3` —— **T5**：`src/ScenarioRunner.cs` 自定义 `IMissionTroopSupplier`（`SquadTroopSupplier`）按组建队/编队/下命令。
+- `20e8d1e` —— **T6**：`src/RoundOrchestratorBehavior.cs` 多轮重生与每轮命令重申按组（`x = base.x + i*12f`）。
+- `8af3989` —— **T7**：遥测落点 —— `unit.formation` 字段 + `squad` 事件 + `EnumNames.Formation` 别名映射（按真值写死）。
+- `d2c8623` —— **T8**：版本 `0.8.8`（`src/BridgeConfig.cs` + `module/SubModule.xml`）+ 编译部署
+  （`out\BlBridge.dll` 与模块目录 DLL sha256 逐字一致）。
+- `b775b08` —— **计划勘误**：§T5 规格段三处作废（self-spawn / 位置分段 / 指定编队）+ movement/`hold` 落点裁决。
+- `7fc8157` —— **T10**：文档与示例 plan（`README.md` §七 事件格式 + `tools/plan.multitroop.example.json`）。
