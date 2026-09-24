@@ -698,6 +698,71 @@ namespace BlBridge
             return fallback;
         }
 
+        // ── T7：首轮 squad 事件（source="supplier"）─────────────────────────
+        /// <summary>
+        /// 首轮入场完成时写两侧的 squad 事件（GC4 触发点 1，由 ScenarioProbe.OnMissionTick 调用）。
+        /// spawned 口径 = `SquadTroopSupplier.ProvidedCounts[group]`（**交给引擎的 origin 数**，
+        /// 不是实际 spawn 的 agent 数 —— 首轮这部分由引擎经 supplier 生成，我们只知道自己供了多少）。
+        /// round 恒为 1（首轮）。无 groups 的一方 specs 为 null ⇒ 该侧不写（GC2）。
+        /// </summary>
+        private static void WriteFirstRoundSquadEvents()
+        {
+            try
+            {
+                List<SquadSpec> aSpecs = _pendingAttackerGroups;
+                List<SquadSpec> dSpecs = _pendingDefenderGroups;
+                bool aHas = (aSpecs != null) ? (aSpecs.Count > 0) : false;
+                bool dHas = (dSpecs != null) ? (dSpecs.Count > 0) : false;
+                if (!aHas)
+                {
+                    if (!dHas) return;
+                }
+                TelemetryBehavior.WriteSquadEvents(1, "supplier",
+                    aSpecs, ResolveAll(aSpecs), ProvidedOf(BattleSideEnum.Attacker),
+                    dSpecs, ResolveAll(dSpecs), ProvidedOf(BattleSideEnum.Defender));
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>取某方 supplier 的逐组"已交给引擎的 origin 数"；非组路径/取不到 ⇒ null。</summary>
+        private static int[] ProvidedOf(BattleSideEnum side)
+        {
+            try
+            {
+                IMissionTroopSupplier[] sup = _pendingSuppliers;
+                if (sup == null) return null;
+                int i = (int)side;
+                if (i < 0) return null;
+                if (i >= sup.Length) return null;
+                SquadTroopSupplier s = sup[i] as SquadTroopSupplier;
+                if (s == null) return null;
+                IReadOnlyList<int> pc = s.ProvidedCounts;
+                if (pc == null) return null;
+                int[] arr = new int[pc.Count];
+                for (int k = 0; k < pc.Count; k++) arr[k] = pc[k];
+                return arr;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 逐组 Resolve 兵种（下标与 specs 一一对应）；缺 ⇒ 该位为 null
+        /// （squad 事件的 formation 随之落 "Unset"）。仅供 squad 事件的 formation 取值。
+        /// </summary>
+        private static List<BasicCharacterObject> ResolveAll(List<SquadSpec> specs)
+        {
+            if (specs == null) return null;
+            List<BasicCharacterObject> list = new List<BasicCharacterObject>(specs.Count);
+            for (int i = 0; i < specs.Count; i++)
+                list.Add(specs[i] == null ? null : Resolve(specs[i].Troop));
+            return list;
+        }
+
         private static CustomBattleCombatant _pendingAttacker;
         private static CustomBattleCombatant _pendingDefender;
         private static IMissionTroopSupplier[] _pendingSuppliers;
@@ -930,6 +995,9 @@ namespace BlBridge
                             _missionStartUnix = NowUnix;
                             State = RunStateRunning;
                             ApplyFastForward(m);
+                            // T7：首轮入场完成 ⇒ 写两侧的 squad 事件（source="supplier"）。
+                            // 此刻 _pendingSuppliers 仍指向本场的 SquadTroopSupplier（首轮 provided 已定）。
+                            WriteFirstRoundSquadEvents();
                         }
                         return;
                     }

@@ -14,7 +14,7 @@
             （实测 dmg=203 而 hpAfter == hpMax），会造出 +110% 的假偏差。
 
 用法：
-    python bl_dummy_analyze.py <battle.jsonl> [--mode auto|range|battle] [--by troop|weapon|bodypart]
+    python bl_dummy_analyze.py <battle.jsonl> [--mode auto|range|battle] [--by troop|weapon|bodypart|formation]
     python bl_dummy_analyze.py <dir>            # 目录下全部 *.jsonl 汇总
     python bl_dummy_analyze.py --compare A=<...> B=<...>   # 跨档对比（材质/护甲对照）
 
@@ -50,6 +50,7 @@ def load(path):
 
 def applied_from_range(events):
     """靶场口径：applied 是逐击的绝对量（引擎 OnScoreHit 的 damagedHp），直接可用。"""
+    units = unit_table(events)
     rows = []
     for e in events:
         if e.get("t") != "dummy_hit":
@@ -77,6 +78,8 @@ def applied_from_range(events):
                 "damagetype": e.get("damageType", ""),
                 "missile": bool(e.get("isMissile", False)),
                 "distance": float(e.get("hitDistance", 0.0)),
+                # 受击者的实际编队（--by formation）。旧日志缺该字段 ⇒ "" ⇒ group_by 兜底 "(空)"。
+                "formation": victim_formation(e, units),
             }
         )
     return rows
@@ -87,6 +90,7 @@ def applied_from_battle(events):
 
     若遥测未来也改用 OnScoreHit（事件里会带 blocked / damagedHp），则优先用那些字段。
     """
+    units = unit_table(events)
     last_hp = {}
     rows = []
     for e in events:
@@ -114,6 +118,8 @@ def applied_from_battle(events):
                 "damagetype": e.get("damageType", ""),
                 "missile": bool(e.get("isMissile", False)),
                 "distance": 0.0,
+                # 受击者的实际编队（--by formation）。旧日志缺该字段 ⇒ "" ⇒ group_by 兜底 "(空)"。
+                "formation": victim_formation(e, units),
             }
         )
     return rows
@@ -184,6 +190,31 @@ def group_by(rows, key):
     for r in rows:
         groups.setdefault(r.get(key, "") or "(空)", []).append(r)
     return groups
+
+
+def unit_table(events):
+    """agent 下标 → 该 agent 的 unit 事件（含 troop / formation）。
+
+    `--by formation` 用它把**受击者**映射回其 unit 属性；与既有 troop 分组走同一条
+    「事件字段 → group_by」路径，不另起一套解析。旧日志的 unit 事件没有 formation
+    字段 ⇒ 取值得到 ""，随后落入 group_by 的既有 "(空)" 兜底（与 troop 缺字段同一策略）。
+    """
+    table = {}
+    for e in events:
+        if e.get("t") == "unit":
+            a = e.get("agent")
+            if a is not None:
+                table[a] = e
+    return table
+
+
+def victim_formation(e, units):
+    """受击者的 unit.formation。hit 事件的受击者字段是 `defender`，dummy_hit 是 `victim`，二者都取。"""
+    key = e.get("victim", e.get("defender"))
+    u = units.get(key)
+    if not u:
+        return ""
+    return u.get("formation", "") or ""
 
 
 # ── 跨档对比（材质 / 护甲对照；2026-09-24 新增）─────────────────────────
@@ -347,7 +378,7 @@ def compare_tiers(tiers, key="bodypartname", metric="applied", missile=None,
 
 def render_compare(specs, by="bodypart", metric="applied", top=10):
     key = {"bodypart": "bodypartname", "troop": "troop", "damagetype": "damagetype",
-           "none": None}.get(by, "bodypartname")
+           "formation": "formation", "none": None}.get(by, "bodypartname")
     tiers = [(t, load_tier(f)) for t, f in explode_tiers(specs)]
     tiers = [(t, d) for t, d in tiers if d["files"]]
     print("=" * 100)
@@ -463,7 +494,7 @@ def analyze(path, mode, by):
 
     if by != "none":
         key = {"troop": "troop", "weapon": "weapon", "bodypart": "bodypart",
-               "damagetype": "damagetype"}[by]
+               "damagetype": "damagetype", "formation": "formation"}[by]
         print("  分组（%s）" % by)
         groups = group_by(rows, key)
         for name in sorted(groups, key=lambda k: -len(groups[k])):
@@ -484,7 +515,7 @@ def main():
     ap.add_argument("path", nargs="?", help="JSONL 文件或目录")
     ap.add_argument("--mode", default="auto", choices=["auto", "range", "battle"])
     ap.add_argument("--by", default="troop",
-                    choices=["troop", "weapon", "bodypart", "damagetype", "none"])
+                    choices=["troop", "weapon", "bodypart", "damagetype", "formation", "none"])
     ap.add_argument("--compare", nargs="+", metavar="LABEL=PATH",
                     help="跨档对比（材质/护甲对照）：LABEL=PATH，PATH 可为 jsonl / 目录 / "
                          "bl_batch 的 manifest.json；第一档为基准")

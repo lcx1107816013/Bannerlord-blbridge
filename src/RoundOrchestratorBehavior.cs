@@ -74,7 +74,6 @@ namespace BlBridge
         private int _round = 1;
         private int _cleanupDeaths;
         private bool _finished;
-        private bool _started;
 
         public override void OnMissionTick(float dt)
         {
@@ -101,7 +100,6 @@ namespace BlBridge
             int d = CountAlive(m.DefenderTeam);
             if (a < 0 || d < 0) return;            // 队伍还没建好
             if (a + d == 0) return;                // 还没生成（首轮加载中）
-            _started = true;
             if (a > EndAlive && d > EndAlive) return;
 
             if (_round >= Rounds)
@@ -197,15 +195,23 @@ namespace BlBridge
             List<BasicCharacterObject> atkTroops = swapped ? DefenderSquadTroops : AttackerSquadTroops;
             List<SquadSpec> defSquads = swapped ? AttackerSquads : DefenderSquads;
             List<BasicCharacterObject> defTroops = swapped ? AttackerSquadTroops : DefenderSquadTroops;
-            if (HasSquads(atkSquads)) SpawnGroups(m, m.AttackerTeam, atkSquads, atkTroops, atkPos, true);
+            // T7：逐组记录**实际重生成功数**，供 squad 事件（source="respawn"）。
+            int[] atkSpawned = null;
+            int[] defSpawned = null;
+            if (HasSquads(atkSquads)) atkSpawned = SpawnGroups(m, m.AttackerTeam, atkSquads, atkTroops, atkPos, true);
             else Spawn(m, m.AttackerTeam, atkCh, atkN, atkPos, true);
-            if (HasSquads(defSquads)) SpawnGroups(m, m.DefenderTeam, defSquads, defTroops, defPos, false);
+            if (HasSquads(defSquads)) defSpawned = SpawnGroups(m, m.DefenderTeam, defSquads, defTroops, defPos, false);
             else Spawn(m, m.DefenderTeam, defCh, defN, defPos, false);
 
             // 4) 重设战术：与首轮同一口径。有组 ⇒ 按组重申 movement（与重生同组同 swap）；
             //    无组 ⇒ 旧 ApplyCharge 原样（GC2）。
             ApplyRoundOrders(m.AttackerTeam, atkSquads);
             ApplyRoundOrders(m.DefenderTeam, defSquads);
+
+            // 5) T7：重生完成后写两侧的 squad 事件（source="respawn"，spawned = 实际成功次数）。
+            //    无组的一方 specs 为 null ⇒ 该侧不写（GC2）。
+            TelemetryBehavior.WriteSquadEvents(_round, "respawn",
+                atkSquads, atkTroops, atkSpawned, defSquads, defTroops, defSpawned);
         }
 
         /// <summary>该方是否有可用的组规格（null / 空 ⇒ 走旧单值路径）。</summary>
@@ -220,10 +226,12 @@ namespace BlBridge
         /// 防御分支：`specs[i]` / 对应 troop 缺失时**不静默** —— 写一条 `round_spawn_group_skipped`
         /// 事件（含 round / 第几组 / 原因）后跳过该组，绝不无痕少一组（GC3；Start() 已保证正常路径不可达）。
         /// </summary>
-        private void SpawnGroups(Mission m, Team team, List<SquadSpec> specs,
+        private int[] SpawnGroups(Mission m, Team team, List<SquadSpec> specs,
             List<BasicCharacterObject> troops, Vec3? basePos, bool attackerSide)
         {
-            if (!HasSquads(specs)) return;
+            if (!HasSquads(specs)) return null;
+            // T7：逐组记录**实际 SpawnAgent 成功次数**，作为该轮 squad 事件的 spawned（source="respawn"）。
+            int[] spawned = new int[specs.Count];
             for (int i = 0; i < specs.Count; i++)
             {
                 SquadSpec s = specs[i];
@@ -246,8 +254,9 @@ namespace BlBridge
                     p.x = basePos.Value.x + (float)i * 12f;   // 只改 x：y/z 与基点相同
                     pos = p;
                 }
-                Spawn(m, team, troop, s.Count, pos, attackerSide);
+                spawned[i] = Spawn(m, team, troop, s.Count, pos, attackerSide);
             }
+            return spawned;
         }
 
         /// <summary>
@@ -292,9 +301,10 @@ namespace BlBridge
         /// 单值 / 单组重生。⚠️ 走 `Mission.SpawnAgent` ⇒ 生成出的 agent **没有 `IAgentOriginBase`**：
         /// 它不在 `IMissionTroopSupplier` 的口径里（第 2 轮起尤其如此，见类注释与 `task-6-report.md` §2.1）。
         /// </summary>
-        private static void Spawn(Mission m, Team team, BasicCharacterObject ch, int count, Vec3? pos, bool attackerSide)
+        private static int Spawn(Mission m, Team team, BasicCharacterObject ch, int count, Vec3? pos, bool attackerSide)
         {
-            if (m == null || team == null || ch == null || count <= 0) return;
+            if (m == null || team == null || ch == null || count <= 0) return 0;
+            int spawned = 0;
             for (int i = 0; i < count; i++)
             {
                 try
@@ -311,12 +321,14 @@ namespace BlBridge
                         data = data.InitialPosition(p)
                                    .InitialDirection(new Vec2(attackerSide ? 1f : -1f, 0f));
                     }
-                    m.SpawnAgent(data);
+                    Agent a = m.SpawnAgent(data);
+                    if (a != null) spawned++;
                 }
                 catch
                 {
                 }
             }
+            return spawned;
         }
 
         private static void ApplyCharge(Team team)

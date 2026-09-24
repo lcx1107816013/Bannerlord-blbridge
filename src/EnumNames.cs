@@ -11,6 +11,9 @@ namespace BlBridge
     ///                      ⇒ 头部命中全被写成 "CriticalBodyPartsBegin"，字面 "Head" 永不出现
     ///   EquipmentIndex   : WeaponItemBeginSlot = 0 与 Weapon0 = 0 **同值**
     ///                      ⇒ 第一个武器槽恒为 "WeaponItemBeginSlot"，字面 "Weapon0" 永不出现
+    ///   FormationClass   : Skirmisher = 4 = NumberOfDefaultFormations、General = 8 = NumberOfRegularFormations、
+    ///                      Unset = 10 = NumberOfAllFormations **三处同值**
+    ///                      ⇒ ToString() 可能给出边界常量名（如 "NumberOfAllFormations"）而非 "Unset"
     ///
     /// 2026-09-24 实测确认（0.8.0 日志：`Head` 出现 0 次、`CriticalBodyPartsBegin` 2277 次）。
     /// 这里按**枚举真值**给出稳定名，供分析器直接使用。
@@ -55,6 +58,26 @@ namespace BlBridge
                 case 10: return "Horse";
                 case 11: return "HorseHarness";
                 default: return i.ToString();
+            }
+        }
+
+        /// <summary>编队名（`FormationClass`，`FormationClass.cs:3-20`）。同值别名见类注释。</summary>
+        public static string Formation(FormationClass f)
+        {
+            switch ((int)f)
+            {
+                case 0: return "Infantry";
+                case 1: return "Ranged";
+                case 2: return "Cavalry";
+                case 3: return "HorseArcher";
+                case 4: return "Skirmisher";        // 别名 NumberOfDefaultFormations 的真身
+                case 5: return "HeavyInfantry";
+                case 6: return "LightCavalry";
+                case 7: return "HeavyCavalry";
+                case 8: return "General";           // 别名 NumberOfRegularFormations 的真身
+                case 9: return "Bodyguard";
+                case 10: return "Unset";            // 别名 NumberOfAllFormations 的真身
+                default: return f.ToString();        // 11 = NumberOfAllFormationsWithUnset 走这里
             }
         }
     }
