@@ -1,0 +1,8 @@
+# BlBridge：全仓库统一 UTF-8 无 BOM + LF（硬规则，见 AGENTS.md「编码规则」）
+# 这里**只**钉编码与行尾两条；缩进/空白风格不动（避免制造无谓 diff）。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true

@@ -160,7 +160,12 @@ $manifest = [ordered]@{
     sources     = $sourceHashes
     builtUtc    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
-($manifest | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+# Write UTF-8 WITHOUT BOM: PowerShell 5.1's `-Encoding UTF8` adds a BOM (PS 7 does not),
+# and downstream readers may parse this JSON as strict utf-8 -- so pin the encoding here,
+# do not rely on luck (see AGENTS.md "encoding rules").
+$utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList @($false)
+$manifestJson = ($manifest | ConvertTo-Json -Depth 5) -replace "`r`n", "`n"
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson + "`n", $utf8NoBom)
 Write-Host ("[2/3] manifest -> {0} (version {1}, {2} sources)" -f $manifestPath, $version, $sourceHashes.Count)
 
 # ---------- deploy ----------
@@ -214,7 +219,9 @@ if ($Deploy) {
     $xml = Get-Content -LiteralPath $subModuleSrc -Raw
     $xmlNew = [regex]::Replace($xml, '(<Version\s+value=")[^"]*(")', ('${1}v' + $version + '${2}'))
     if ($xmlNew -ne $xml) {
-        Set-Content -LiteralPath $subModuleSrc -Value $xmlNew -Encoding UTF8 -NoNewline
+        # Same: write back WITHOUT BOM (PS 5.1's -Encoding UTF8 adds one). $xmlNew came from a
+        # -Raw read, so its line endings already match the source file (LF).
+        [System.IO.File]::WriteAllText($subModuleSrc, $xmlNew, $utf8NoBom)
         Write-Host ("      module/SubModule.xml version -> v{0}" -f $version)
     }
     Copy-Item $subModuleSrc (Join-Path $target 'SubModule.xml') -Force

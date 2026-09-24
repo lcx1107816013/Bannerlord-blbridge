@@ -1,0 +1,18 @@
+# 一律以 LF 入库（2026-09-25）。
+#
+# 为什么需要这条：之前有 14 个文件的工作区版本是 CRLF 而索引/HEAD 是 LF，git 的 stat 缓存
+# 让这批差异**隐身**（git status 不报），直到有人真的改到那个文件，才炸出一整份文件的 diff
+# （症状：`git diff --stat` 与 `git diff --ignore-cr-at-eol --stat` 行数不一致）。
+# 钉住 eol 之后，这类差异不会再出现。
+* text=auto eol=lf
+
+# 二进制：不做任何文本/行尾转换
+*.dll binary
+*.exe binary
+*.pdb binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.db binary
