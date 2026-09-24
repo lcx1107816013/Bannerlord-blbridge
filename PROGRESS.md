@@ -574,3 +574,46 @@ B: time=2.0027  px=586.6436  py=762.2758  vy=1.9847
 1. **`meta` 产出非法 JSON**（v0.8.4 引入）：拼接式组装里"数字字段不能吃 `\"` 前缀"，
    产出 `"randomSeed":777"` ⇒ meta 被 `load_events` **静默跳过**。已改为每行自闭合。
 2. **`dummy_swap` 只记请求值**（见 ②）：已补 `actualItem`（从 agent 读回实际身甲）。
+
+## 十三、自测脚本的编码脆弱点（2026-09-24 晚间续，交接之后）
+
+**症状**：`python tools/bl_selftest.py` 在**纯净 shell**（未设 `PYTHONIOENCODING`）下 **EXIT=1**：
+
+```
+File "tools/bl_selftest.py", line 462, in main
+    responses = [json.loads(l) for l in out.splitlines() if l.strip()]
+AttributeError: 'NoneType' object has no attribute 'splitlines'
+```
+
+**这是"基线健康"判据本身失效**：交接要求 `bl_selftest.py` 必须 `EXIT=0`，而它只在"调用者环境恰好设了
+`PYTHONIOENCODING=utf-8`"时通过（上一轮会话即在那种环境里跑，所以没暴露）。
+
+**根因（插桩 + 读 `D:\Program Files\Python312\Lib\subprocess.py` 核实）**：
+
+1. 子进程 `bl_mcp.py` 的 stdout 被重定向到管道时，Python 按 **locale 编码**（中文 Windows = GBK）写出，
+   而 `bl_selftest.py` 用 `encoding="utf-8"` 读 ⇒ `_readerthread` 抛 `UnicodeDecodeError`；
+2. 该异常发生在**读取线程内部**，**被静默吞掉**（`subprocess.py:1598-1600` 的 `_readerthread` 无异常处理）；
+3. Windows 版 `_communicate`（`subprocess.py:1603-1651`）最后是
+   `stdout = stdout[0] if stdout else None` —— 缓冲区空 ⇒ **`communicate()` 返回 `stdout=None`**；
+4. ⇒ 下游 `out.splitlines()` 才炸，**症状与根因（编码）毫无关系**。
+
+**定位方法（可复用）**：给 `subprocess.Popen._communicate` 打包装打印入参/返回值，立刻看见
+`stdout=TextIOWrapper → 返回 (None, '')`；再用最小探针（只发 ASCII 的 `initialize`）成功、发中文请求失败，
+即锁定"中文 + 编码失配"。**注意**：`out is None` 不等于"空输出"。
+
+**修法（`tools/bl_selftest.py`，两处）**：
+
+1. MCP 子进程的 env 里注入 `PYTHONIOENCODING = "utf-8"`（与父进程读的编码对齐；不依赖调用者环境）；
+2. `out is None` 时**显式 `check(False, …)` 并打印 stderr**，让根因可见，不再让症状跑到 `AttributeError`。
+
+**连带修掉的同源缺陷**：`bl_selftest.py` 自己**没有** `bl_common.safe_streams()`（§六 #2 给
+`bl_metrics` / `bl_compare` / `bl_death_compare` 修过的那条）⇒ 默认中文控制台下，本文件里含 `⇒` 的
+`check()` 标签（⑩⑪ 段）会抛 `UnicodeEncodeError`。已在 `main()` 开头补上 —— 修①之后立刻暴露的就是它。
+
+**判据（两条，均须通过）**：
+- 纯净 shell（`PYTHONIOENCODING` 未设）跑 `python tools/bl_selftest.py` ⇒ **EXIT=0**
+- 故意 `PYTHONIOENCODING=gbk` 再跑 ⇒ **EXIT=0**（证明修法自足，不靠调用者施舍）
+
+**教训（本项目"静默失效"家族新成员）**：凡是"父进程按 A 编码读子进程输出"，**两端编码都要钉死**，
+且读取路径上的异常必须能被看见 —— 线程里的 `UnicodeDecodeError` 就是一个把"编码问题"伪装成
+"`NoneType` 没有 `splitlines`"的完美烟幕。

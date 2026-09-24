@@ -400,7 +400,8 @@ def test_death_compare_split():
 
 
 def main():
-
+    import bl_common
+    bl_common.safe_streams()      # 默认中文控制台（GBK）下不因 ⇒/⚠️ 崩（同 bl_metrics/bl_compare 的修复）
 
     tmp = tempfile.mkdtemp(prefix="blbridge_selftest_")
     logdir = os.path.join(tmp, "logs")
@@ -439,6 +440,13 @@ def main():
     print("=" * 90)
     env = dict(os.environ)
     env["BLBRIDGE_LOG_DIR"] = logdir
+    # 2026-09-24 踩坑：本段按 utf-8 读子进程 stdout，但子进程的 stdout 被重定向到管道时
+    # 用的是 **locale 编码**（中文 Windows = GBK）⇒ 中文 JSON 以 GBK 字节写出 ⇒
+    # `_readerthread` 抛 UnicodeDecodeError 且**被线程静默吞掉** ⇒ subprocess 的
+    # `stdout = stdout[0] if stdout else None` 直接变成 None。
+    # 症状是 `'NoneType' object has no attribute 'splitlines'`，与根因毫无关系。
+    # ⇒ 把子进程输出编码钉成 utf-8，不依赖调用者环境里有没有 PYTHONIOENCODING。
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "bl_mcp.py")],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, universal_newlines=True, encoding="utf-8")
@@ -459,6 +467,12 @@ def main():
     ]
     payload = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in reqs)
     out, err = proc.communicate(payload, timeout=60)
+    if out is None:
+        # 注意：stdout=None 不是"空输出"，而是读取线程里的异常被静默吞掉了（见上面的编码说明）。
+        # 这里显式报出来，否则症状会跑到下面变成 AttributeError，掩盖根因。
+        check(False, "MCP 子进程 stdout 可读（编码须与 PYTHONIOENCODING 对齐）",
+              "stdout=None; stderr=%r" % err[:200])
+        out = ""
     responses = [json.loads(l) for l in out.splitlines() if l.strip()]
     by_id = dict((r.get("id"), r) for r in responses)
 
