@@ -140,7 +140,19 @@ internal sealed class SquadSpec {
 
 **文件**：`src/ScenarioRunner.cs`
 
-**规格**：
+> ⚠️ **勘误（2026-09-25，本节「规格」段有三处已作废）**：下面的「规格」写于改用路 A **之前**，与上方「前提修订」块冲突。
+> 实际执行以 `task-5-brief.md`（sdd 执行期 brief，在 `.sdd/2026-09-24-multitroop-tactics-plan/`）+ 用户裁决为准：
+> ① ~~`AgentBuildData.Formation(f)` + 逐组 `Mission.SpawnAgent`~~ **作废** —— 两队由**引擎**经 `IMissionTroopSupplier` 生成；
+> ② ~~按组顺序分段分配 spawn 位置、把偏移量写进实现~~ **作废** —— 位置由引擎 deployment plan 决定（多轮重生才有位置分段，见 §T6 的 `x = base.x + i*12m`）；
+> ③ ~~`SetArrangementOrder` / 指定编队~~ **作废** —— `IAgentOriginBase` 无 formation 成员，编队由 `BasicCharacterObject.GetFormationClass()` 决定。
+> **movement 落点（用户裁决）**：按「该组兵种的**实际编队**」下发；同一实际编队被多组以不同 movement 命中 ⇒ **报错中止**；
+> `groups` 与 `orders != "charge"` 不得混用 ⇒ 报错。
+> **`hold` 落点（引擎能力边界）**：`MovementOrder` 只暴露 Charge/Retreat/Stop/Advance/FallBack/Null，且 ctor 全 private
+> ⇒ `hold` 落 `MovementOrderStop`（等价 `stop`），并在 `OrderNotes` 里留可读回提示。
+> **是否保留 DSL 的 `hold` 一词仍待用户最终裁决**（保留 = 现状、零改动；移除 = 需同步改 GC1 + T1/T4 与 Python 断言）。
+> 执行记录（T5–T8 提交 `ab5c3a3` / `20e8d1e` / `8af3989` / `d2c8623`）见 `.sdd/2026-09-24-multitroop-tactics-plan/progress.md`。
+
+**规格**（⚠️ 以下三条已作废，见上方勘误）：
 - 新增静态字段 `AttackerGroups`/`DefenderGroups`（`List<SquadSpec>`，缺省 null ⇒ 走旧路径，GC2）。
 - 建队时：为每个 spec 取目标 `Formation` —— 用 `team.GetFormation(FormationClass.X)`
   （`FormationClass` 在 `TaleWorlds.Core`，需 `using TaleWorlds.Core;`）；
