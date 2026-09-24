@@ -1,6 +1,6 @@
 # BlBridge 进度列表
 
-> **最后核实：2026-09-24 02:04**（本文件由 Reasonix 会话建立并维护；① 游戏内验证执行于 2026-09-24 01:40–01:41）
+> **最后核实：2026-09-24 18:50**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §七 护甲覆盖四档对照，2026-09-24 18:37–18:45）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
 > 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
 > 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
@@ -241,9 +241,40 @@ CLI：`python tools/bl_cmd.py start ... --dummy-armor head=45,torso=35,legs=20,a
 - **顺手修的既有缺陷**：`OnRemoveBehavior` 原先只复位 `DummySide` / `FreezeDummies`，漏了
   `UnlimitedAmmoForShooters` 与新的护甲字段（static 残留会污染玩家之后的手动战斗），已补齐。
 
-**验证状态**：编译通过（58 KB、`0.8.0`）；**尚未部署、未游戏内验证**（`build.ps1 -Deploy` 要求先关闭游戏）。
-**待验证判据**：① `dummy_meta.armor` 与 `ai` 事件的四部位护甲值等于指定值；
-② 同一场里覆盖前后 `hit.damagedHp` 分布发生变化。
+**验证状态**：✅ **已部署 + 已游戏内验证**（2026-09-24）。
+
+- **部署**：`build.ps1 -Deploy` 于 **02:36** 完成（本文件 02:04 那版写的"尚未部署"已过期）；
+  18:3x 核对 `bl_cmd.py buildcheck` = `ok`（源码 = 构建产物 = 部署文件 = 进程内 DLL，`e47ae4f6…`，版本 0.8.0）。
+- **参数修复确认**：`ebf0ea3`（`--dummy-armor` 改传数字）生效 —— `dummy_meta.armor` **不再是 `-1`**。
+- **游戏内验证**：2026-09-24 18:37–18:45，**12 场四档对照**
+  （攻方固定 `battanian_fian_champion` 20 人 vs 不朽靶 `imperial_legionary` 10 人，`battle_terrain_a`，
+  `orders=charge`，`cap=30` 真实秒，`--unlimited-ammo`，每档 3 场）。
+
+  **判据① 通过（12/12 场）**：`dummy_meta.armor` 与 `ai` 事件中靶子的四部位护甲**逐场等于指定值**；
+  攻方护甲始终是自己的 `(50,59,31,42)` ⇒ 覆盖只作用于靶子 ✓
+
+  **判据② 通过**：伤害随护甲**单调**变化，跨度约 **4 倍**
+
+  | 档 | 靶子护甲 head/torso/legs/arms | 近战命中靶子 n | `damagedHp` 均值 | 中位 | p25 | p75 |
+  |---|---|---|---|---|---|---|
+  | D 不覆盖（默认） | (50,75,85,90) | 4892 | 21.92 | 19 | 9 | 34 |
+  | L 低 | (10,10,10,10) | 5258 | **67.62** | 74 | 47 | 97 |
+  | M 中 | (45,35,20,25) | 5611 | **32.22** | 38 | 17 | 49 |
+  | H 高 | (80,70,50,60) | 5871 | **16.85** | 19 | 7 | 26 |
+
+  箭伤（`isMissile=true`，`dSide=Defender`）同向且更剧烈：L 4.64 / M 2.93 / D 1.56 / H 0.69
+  （**中位恒为 0** —— 靶子带盾，多数箭被挡下 ⇒ 盾是护甲实验的混淆项）。
+
+  **对旋钮问题的初步回答**：护甲对每击伤害的影响**很大**（本例低↔高相差 4 倍），
+  远大于"×1.15"这种量级 ⇒ 15% 的护甲微调**可测**：每档近战样本 ≈5600、均值标准误 ≈0.4，
+  足以分辨 5% 级别的均值差异。**但必须固定命中部位/武器**才能干净归因（本次是混合口径，含头/躯/腿/臂）。
+
+**本轮新发现的缺口（并入 ②-附 同源清单）**：
+  1. `bl_batch.py` 的 plan **不支持** `dummySide` / `dummyArmor*` ⇒ 跑批做护甲对照只能逐场走 CLI（本次 12 场即如此）；
+  2. `hit.bodyPart` 出现**枚举边界值** `CriticalBodyPartsBegin`（本批 2640~3326 条/档）——
+     与"弓的 `weaponSlot` 取到 `WeaponItemBeginSlot`"**同一类缺陷**（枚举边界被当成真实值）；
+  3. `hit` 事件里 `dSide=Attacker`（约 1084 条/档，靶子还手打攻方）与 `dSide=Defender` 混在一起
+     ⇒ 分析必须**显式按 `dSide` 过滤**（本次口径：`dSide=Defender` 才是"靶子挨打"）。
 
 **另一条已勘察的路线（未实施）**：真"换装备/材质" —— 参照 `CharacterReload`（本机，Vortex 部署）的姿势：
 `Equipment.Clone(false)` + 槽位赋值 + `CalculateEquipmentCode()`，或 `Equipment.AddEquipmentToSlotWithoutAgent`；
