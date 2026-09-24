@@ -11,3 +11,4 @@ __pycache__/
 # ── 本机运行时配置（入库的是 *.example.json）──
 /blbridge.json
 /blbridge_game.json
+.sdd/
