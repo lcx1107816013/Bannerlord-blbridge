@@ -279,7 +279,7 @@ def test_parse_dummy_armor():
         bl_common.parse_dummy_armor({"head": 45})
         check(False, "对象形式必须报错并提示用字符串")
     except ValueError as e:
-        check("字符串" in str(e), "对象形式给出可读提示", e)
+        check("must be a string" in str(e), "object form gives a readable hint", e)
 
 
 def test_parse_squad_groups():
@@ -308,7 +308,7 @@ def test_parse_squad_groups():
         bl_common.parse_squad_groups("a:1:Infantry:hold")
         check(False, "hold 必须被拒（已移除）")
     except ValueError as e:
-        check("已移除" in str(e), "hold 报错信息必须含补位提示（已移除）", e)
+        check("was removed" in str(e) and "use stop" in str(e), "hold error carries the replacement hint (removed)", e)
     for bad, why in (("a", "字段数 1"),
                      ("a:1:Infantry:stop:extra", "字段数 5"),
                      ("a:0", "count=0"),
@@ -399,7 +399,7 @@ def test_bl_batch_plan_args():
         bl_batch.build_start_args({}, dict(base, dummyArmor={"head": 45}), scene, orders, ps, cap)
         check(False, "plan 里对象形式护甲必须报错")
     except ValueError as e:
-        check("字符串" in str(e), "plan 里对象形式给出可读提示", e)
+        check("must be a string" in str(e), "plan object-form armor gives a readable hint", e)
 
     # ── 多轮参数（v0.8.5；③「换边双跑」用它）：plan 透传 + 非法即报错，绝不静默 ──
     R = bl_batch.build_start_args({"rounds": 2, "roundEndAlive": 1, "roundSwap": True},
@@ -471,7 +471,7 @@ def test_bl_cmd_dummy_armor_strict():
                        capture_output=True, cwd=HERE)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     check(r.returncode != 0, "未知部位名 → 非 0 退出", r.returncode)
-    check("未知部位" in out or "hed" in out, "报错信息指名道姓", out.strip()[:200])
+    check("unknown armor part" in out or "hed" in out, "error message names the offending part", out.strip()[:200])
 
 
 def test_bl_cmd_squad_strict():
@@ -486,9 +486,8 @@ def test_bl_cmd_squad_strict():
     helptext = (help_out.stdout + help_out.stderr).decode("utf-8", "replace")
     check("--attacker-groups" in helptext and "--defender-groups" in helptext,
           "start 子命令暴露 --attacker-groups/--defender-groups")
-    # ⚠️ 断言用 **ASCII 关键词**：子进程在未设 PYTHONIOENCODING 时按 locale(GBK) 写 stdout，
-    #    这里若按 utf-8 解码，中文就是乱码 ⇒ 只查中文会**假失败**（本任务第一版正是这么栽的）。
-    #    ASCII 字节在 GBK/UTF-8 下解码一致 ⇒ 用它做判据最稳（既有测试的 `or "hed"` 同一思路）。
+    # ⚠️ 断言用 ASCII 关键词：tools/ 的面向人输出自 2026-09-25 起**一律 ASCII**
+    #    （不赌控制台编码，见 bl_common.safe_streams 的说明）⇒ 直接查英文关键词即可。
     for bad, kw in (("a:0", "count"),
                     ("a:1:Infantryy", "formation"),
                     ("a:1:Infantry:jump", "movement")):
@@ -497,7 +496,7 @@ def test_bl_cmd_squad_strict():
                             "--attacker-groups", bad],
                            capture_output=True, cwd=HERE)
         out = (r.stdout + r.stderr).decode("utf-8", "replace")
-        check(r.returncode != 0 and (kw in out or "解析失败" in out),
+        check(r.returncode != 0 and (kw in out or "parse failed" in out),
               "非法组串非 0 退出且指明原因（%s）" % kw, out.strip()[:160])
 
 

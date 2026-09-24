@@ -28,93 +28,109 @@ import bl_sage  # noqa: E402
 
 def _print(resp, err):
     if err:
-        print("错误: %s" % err)
+        print("error: %s" % err)
         return 2
     print(json.dumps(resp, ensure_ascii=False, indent=1))
     return 0 if resp.get("ok") else 1
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="BlBridge 控制通道 CLI")
+    ap = argparse.ArgumentParser(description="BlBridge control-channel CLI")
     sub = ap.add_subparsers(dest="cmd")
 
-    sub.add_parser("ping", help="连通性/版本")
-    sub.add_parser("status", help="推演状态机")
-    sub.add_parser("abort", help="中止当前推演")
+    sub.add_parser("ping", help="connectivity / version")
+    sub.add_parser("status", help="scenario state machine")
+    sub.add_parser("abort", help="abort the current scenario")
 
-    p = sub.add_parser("start", help="开一场 AI 对 AI 战斗")
+    p = sub.add_parser("start", help="run one AI-vs-AI battle")
     p.add_argument("--attacker", required=True)
     p.add_argument("--defender", required=True)
-    p.add_argument("--a", type=int, default=20, help="攻方人数")
-    p.add_argument("--d", type=int, default=20, help="守方人数")
+    p.add_argument("--a", type=int, default=20, help="attacker count")
+    p.add_argument("--d", type=int, default=20, help="defender count")
     p.add_argument("--scene", default="battle_terrain_a")
-    p.add_argument("--cap", type=int, default=600, help="单场时长上限（游戏内秒）")
+    p.add_argument("--cap", type=int, default=600, help="per-battle time cap (in-game seconds)")
     p.add_argument("--orders", choices=("charge", "default"), default="charge",
-                   help="charge=双方都对称冲锋（默认，消除攻守战术偏差）；default=引擎默认战术")
+                   help="charge=symmetric charge for both sides (default; removes attack/defense "
+                        "bias); default=engine tactics")
     p.add_argument("--player-side", choices=("attacker", "defender"), default="attacker",
-                   help="谁被标记为玩家侧（仅用于排查该标记是否带来系统性偏差）")
+                   help="which side is flagged as the player (only to test whether that flag "
+                        "biases results)")
     p.add_argument("--allow-any-state", action="store_true",
-                   help="跳过「必须停在自定义战斗界面」检查（用于从主菜单直接开战）")
+                   help="skip the 'must be on the custom-battle screen' check "
+                        "(to start straight from the main menu)")
     p.add_argument("--dummy-side", choices=("none", "attacker", "defender"), default="none",
-                   help="不朽靶场：把该方设为永不倒下的靶子（阶段 2①）")
+                   help="immortal dummy range: make this side never fall (phase 2-1)")
     p.add_argument("--freeze-dummies", action="store_true",
-                   help="靶场模式下属实冻结靶子的 AI（不还手；默认关闭，冻结会改变 AI 行为）")
+                   help="in dummy-range mode, freeze the dummy AI (no fighting back; off by "
+                        "default -- freezing changes AI behavior)")
     p.add_argument("--unlimited-ammo", action="store_true",
-                   help="给射手补满弹药（长测不中断；靶子的弹药不补，它是被测对象）")
+                   help="refill the archers' ammo (for long runs; the dummy's ammo is NOT "
+                        "refilled -- it is the subject under test)")
     p.add_argument("--dummy-armor", default=None,
-                   help="靶子护甲数值覆盖，如 head=45,torso=35,legs=20,arms=25"
-                        "（只作用于靶子；未写的部位不动；每帧重申，零 Harmony；"
-                        "未知部位名/非数字会直接报错，不静默跳过）")
+                   help="override the dummy's armor values, e.g. head=45,torso=35,legs=20,arms=25"
+                        " (dummy only; unlisted parts untouched; re-applied every frame, no "
+                        "Harmony; an unknown part name or a non-numeric value errors out "
+                        "instead of being skipped silently)")
     p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
-                   help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
-                        "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
+                   help="swap the dummy's body armor to this item id (material A/B; empty = no "
+                        "swap. Material resistance comes only from the item; values are still "
+                        "aligned by --dummy-armor)")
     p.add_argument("--attacker-groups", dest="attacker_groups", default=None,
-                   help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
-                        '如 "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
-                        "（给了它则 --attacker/--a 被忽略；非法直接报错，不静默跳过）")
+                   help="attacker multi-troop / tactic groups: troop:count[:formation[:movement]], "
+                        "groups separated by |, e.g. "
+                        '"imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
+                        " (when given, --attacker/--a are ignored; invalid input errors out "
+                        "instead of being skipped silently)")
     p.add_argument("--defender-groups", dest="defender_groups", default=None,
-                   help="守方多兵种/战术组，语法同 --attacker-groups（给了它则 --defender/--d 被忽略）")
+                   help="defender multi-troop / tactic groups, same syntax as --attacker-groups "
+                        "(when given, --defender/--d are ignored)")
     p.add_argument("--rounds", type=int, default=None,
-                   help="多轮连续实验：同一 mission 内跑 N 轮（每轮一个日志文件；默认 1 = 关闭）")
+                   help="multi-round run: N rounds inside one mission (one log file per round; "
+                        "default 1 = off)")
     p.add_argument("--round-end-alive", dest="round_end_alive", type=int, default=None,
-                   help="某方存活 ≤ 此值即判定本轮结束（默认 1）")
+                   help="a side left with <= this many alive ends the round (default 1)")
     p.add_argument("--round-swap", action="store_true",
-                   help="每轮交换攻守（第 2、4…轮把原守方放到攻方位置）")
+                   help="swap sides every round (rounds 2, 4, ... put the former defender on the "
+                        "attacker side)")
     p.add_argument("--round-spawn-attacker", dest="round_spawn_attacker", default=None,
-                   help='重生时攻方进场点，如 "100,0,200"（x,y,z 或 x,z；不给则用引擎默认）')
+                   help='attacker spawn point on respawn, e.g. "100,0,200" (x,y,z or x,z; '
+                        "engine default when omitted)")
     p.add_argument("--round-spawn-defender", dest="round_spawn_defender", default=None,
-                   help="重生时守方进场点")
+                   help="defender spawn point on respawn")
     p.add_argument("--random-seed", dest="random_seed", type=int, default=None,
-                   help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
+                   help="random seed (the same seed reproduces runs value-by-value; engine "
+                        "default when omitted)")
     p.add_argument("--skip-troop-check", dest="skip_troop_check", action="store_true",
-                   help="跳过兵种 id 校验（索引只覆盖官方 XML；用第三方模组兵种时加它）")
+                   help="skip troop-id validation (the index only covers official XML; add this "
+                        "for third-party mod troops)")
     p.add_argument("--timeout", type=float, default=60.0)
 
-    w = sub.add_parser("wait", help="等待状态")
+    w = sub.add_parser("wait", help="wait for a state")
     w.add_argument("--state", default="ended")
     w.add_argument("--timeout", type=float, default=180.0)
     w.add_argument("--poll", type=float, default=2.0)
 
-    ff = sub.add_parser("fastforward", help="开关战斗加速（10 倍速，对你自己手打的战斗也生效）")
-    ff.add_argument("--on", action="store_true", help="开启")
-    ff.add_argument("--off", action="store_true", help="关闭")
-    sub.add_parser("speed", help="查看加速状态（是否生效/Scene.TimeSpeed/Mission.Mode）")
-    sub.add_parser("buildcheck", help="核对 源码/构建产物/部署文件/进程内 DLL 是否一致")
+    ff = sub.add_parser("fastforward", help="toggle battle fast-forward (10x; also affects "
+                                           "battles you fight yourself)")
+    ff.add_argument("--on", action="store_true", help="turn on")
+    ff.add_argument("--off", action="store_true", help="turn off")
+    sub.add_parser("speed", help="show fast-forward state (active / Scene.TimeSpeed / Mission.Mode)")
+    sub.add_parser("buildcheck", help="compare source / build output / deployed file / in-process DLL")
 
     # ── 阶段 2④：批量跑批 + A/B 对比报告 ────────────────────────────────
-    b = sub.add_parser("batch", help="按计划批量跑 N 场（一条命令跑 N 场）")
-    b.add_argument("--plan", required=True, help="跑批计划 JSON")
-    b.add_argument("--out", help="runs.json 输出路径（供 compare 用）")
-    b.add_argument("--dry-run", action="store_true", help="只打印计划，不碰游戏")
-    b.add_argument("--battles-dir", dest="battles_dir", help="战斗日志目录")
+    b = sub.add_parser("batch", help="run N battles from a plan (one command for a whole batch)")
+    b.add_argument("--plan", required=True, help="batch plan JSON")
+    b.add_argument("--out", help="runs.json output path (for compare)")
+    b.add_argument("--dry-run", action="store_true", help="print the plan only, do not touch the game")
+    b.add_argument("--battles-dir", dest="battles_dir", help="battle log directory")
 
-    c = sub.add_parser("compare", help="A/B 对比报告（主指标 = 满编窗口）")
-    c.add_argument("--manifest", help="bl_batch 产出的 runs.json")
-    c.add_argument("--a", help="A 组：文件 / 目录 / 逗号分隔")
-    c.add_argument("--b", help="B 组：同上")
+    c = sub.add_parser("compare", help="A/B report (main metric = full-strength window)")
+    c.add_argument("--manifest", help="runs.json produced by bl_batch")
+    c.add_argument("--a", help="group A: file / dir / comma-separated")
+    c.add_argument("--b", help="group B: same as A")
     c.add_argument("--label-a", dest="label_a", default="A")
     c.add_argument("--label-b", dest="label_b", default="B")
-    c.add_argument("--out", help="把 markdown 报告写到该文件")
+    c.add_argument("--out", help="write the markdown report to this file")
 
     args = ap.parse_args(argv[1:])
     if not args.cmd:
@@ -147,7 +163,7 @@ def main(argv):
                 # 解析失败一律报错退出 —— 静默跳过曾让 9 场实验整批作废（2026-09-24）。
                 params.update(bl_common.parse_dummy_armor(args.dummy_armor))
             except ValueError as e:
-                print("错误: --dummy-armor 解析失败：%s" % e)
+                print("error: --dummy-armor parse failed: %s" % e)
                 return 2
         if getattr(args, "dummy_body_item", None):
             params["dummyBodyItem"] = args.dummy_body_item
@@ -162,7 +178,7 @@ def main(argv):
                 # 在**本地**先校验（GC3）：非法绝不透传给游戏端 —— 那边只会静默用默认值。
                 bl_common.parse_squad_groups(raw)
             except ValueError as e:
-                print("错误: --%s 解析失败：%s" % (attr.replace("_", "-"), e))
+                print("error: --%s parse failed: %s" % (attr.replace("_", "-"), e))
                 return 2
             params[key] = raw
         # 兵种 id 前置校验（与 MCP bl_start_battle 同一语义）：CLI 打错 id 同样会被
@@ -181,18 +197,20 @@ def main(argv):
         chk = bl_sage.check_troops(ids)
         if chk.get("available") and chk.get("missing"):
             if getattr(args, "skip_troop_check", False):
-                print("警告: 兵种 id 不在索引里（--skip-troop-check 放行）：%s"
+                print("warning: troop id(s) not in the index (allowed by --skip-troop-check): %s"
                       % ", ".join(chk["missing"]))
             else:
-                print("错误: 兵种 id 在索引里不存在：%s" % ", ".join(chk["missing"]))
+                print("error: troop id(s) not in the index: %s" % ", ".join(chk["missing"]))
                 for m in chk["missing"]:
                     s = bl_sage.suggest_troops(m)
                     if s:
-                        print("  近似候选：%s -> %s" % (m, ", ".join(s)))
-                print("  （索引只覆盖官方 XML；第三方模组兵种请加 --skip-troop-check）")
+                        print("  similar candidates: %s -> %s" % (m, ", ".join(s)))
+                print("  (the index covers official XML only; for third-party mod troops add "
+                      "--skip-troop-check)")
                 return 2
         elif not chk.get("available"):
-            print("警告: 兵种 id 未校验：%s" % (chk.get("reason") or "索引不可用"))
+            print("warning: troop ids not validated: %s"
+                  % (chk.get("reason") or "index unavailable"))
         if getattr(args, "rounds", None):
             params["rounds"] = int(args.rounds)
             if getattr(args, "round_end_alive", None) is not None:
@@ -210,7 +228,7 @@ def main(argv):
         while time.time() < deadline:
             resp, err = bl_mcp.send_command("status", {}, timeout=10)
             if err:
-                print("错误: %s" % err)
+                print("error: %s" % err)
                 return 2
             st = (resp.get("result") or {}).get("state")
             prog = (resp.get("result") or {}).get("progress") or {}
@@ -219,10 +237,10 @@ def main(argv):
                 print(json.dumps((resp.get("result") or {}).get("result"), ensure_ascii=False, indent=1))
                 return 0
             if st == "error":
-                print("推演进入 error: %s" % (resp.get("result") or {}).get("lastError"))
+                print("scenario entered error: %s" % (resp.get("result") or {}).get("lastError"))
                 return 1
             time.sleep(args.poll)
-        print("等待 %s 超时" % args.state)
+        print("timeout waiting for %s" % args.state)
         return 1
 
     if args.cmd == "fastforward":
