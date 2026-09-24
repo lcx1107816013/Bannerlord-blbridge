@@ -1286,3 +1286,47 @@ cover_08:     期望 159 / 实际 unit 兵种 159   缺 0、多 0
 - 部署：dll sha256 `fcca590bdc7a6472`（本会话重新构建并部署；`SubModule.xml` 同时统一为无 BOM + LF）。
 - 战斗日志：`battle_20260925_0214*.jsonl` … `battle_20260925_021822_999.jsonl`（cover 的 8 场）。
 - 窗口：8 场 × 约 30 秒（cap 20 游戏秒）。
+
+---
+
+## 十八、T13 复测（游戏内）：**未通过** —— 根因精确锁定 `ChargeToTarget`（2026-09-25）
+
+**复测配置**（攻守各一个 `stop` 组 + 一个 `charge` 组作对照）：
+
+```
+attacker-groups "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:10:HorseArcher:charge"
+defender-groups "battanian_wildling:10:Infantry:stop|battanian_fian_champion:10:Ranged:charge"
+```
+
+日志：`battle_20260925_023155_120.jsonl`；部署 dll `82bd8cec4938eb0f`（`AssemblyVersion` 0.8.8.0）。
+
+**判据与结果（未通过）**
+
+| side | troop | 组配置 | 平均速度 | 位移 | `order` 事件统计 |
+|---|---|---|---|---|---|
+| Attacker | imperial_legionary | **stop** | 0.186 | 72 m | **Stop 116/116** ✓ |
+| Attacker | khuzait_khans_guard | charge | 8.928 | 117 m | Charge（对照）✓ |
+| Defender | battanian_wildling | **stop** | **0.904** | **154 m** | **ChargeToTarget 59 / Stop 56** ✗ |
+| Defender | battanian_fian_champion | charge | 0.771 | 148 m | ChargeToTarget/Charge（对照）✓ |
+
+**根因（精确）**：守方编队的 order 被引擎的**防守战术 `ChargeToTarget`** 覆盖，而且**每 1–2 秒来回拉锯**：
+
+```
+t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5.43 ChargeToTarget → 7.43 Stop → …
+```
+
+⇒ T13 原来的修法（"组路径每 0.5 秒重申 order"）只能与它**拉锯**，净效果是守方一路走到 154 米外。
+攻方（非防御方）没有 `ChargeToTarget` 覆盖，所以 order 全程保持 `Stop`。
+
+**结论**
+
+1. 交接文档里"根因可能是 team 级 `TacticCharge` 覆盖"——**方向对、具体战术猜错了**：
+   实际是 `ChargeToTarget`（守方的防守战术）。
+2. "周期性重申 order"这条路**已被证伪**（拉锯无效）⇒ 修法应换成下面之一：
+   - **让该编队脱离 AI 战术**（首选：编队不再被 team 战术覆盖，只执行我们下发的 order）；
+   - **直接设置守方的战术**为"保持不动"，让引擎意图与我们要的**一致**，而不是持续对抗；
+   - 每**帧**重申 order（像 `--dummy-armor` 那样硬抗；代价是持续对抗与抖动）。
+3. 这类修复**必须走游戏内判据** —— 离线测试在结构上发现不了（与 T12 `TypeInitializationException` 同一教训）。
+
+**已具备的紧反馈循环**（`/diagnosing-bugs` 的第一步）：一次 `start`（约 60 秒）+ 读该场 JSONL 的
+`order` 事件与按 troop 的 `state.speed`/位移，即可判定"守方 stop 组是否被覆盖"。
