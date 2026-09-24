@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 各工具共享的 I/O 与格式化小函数（不含任何指标逻辑）。
 
