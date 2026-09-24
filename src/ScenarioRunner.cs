@@ -33,6 +33,8 @@ namespace BlBridge
         // ── 当前运行态 ───────────────────────────────────────────────────
         internal static string State = RunStateIdle;
         internal static string LastError = "";
+        // T5 修复轮 2 · nit-2：命令下发的"提示"（如 hold 降级）写这里，不污染 lastError
+        internal static string OrderNotes = "";
         internal static string StartedUtc = "";
         internal static string AttackerTroop = "";
         internal static string DefenderTroop = "";
@@ -71,6 +73,7 @@ namespace BlBridge
             sb.Append("{\"state\":").Append(Protocol.Q(State));
             sb.Append(",\"busy\":").Append(Jw.B(Busy));
             sb.Append(",\"lastError\":").Append(Protocol.Q(LastError));
+            sb.Append(",\"orderNotes\":").Append(Protocol.Q(OrderNotes));
             sb.Append(",\"requestId\":").Append(Protocol.Q(_currentRequestId));
             sb.Append(",\"startedUtc\":").Append(Protocol.Q(StartedUtc));
             sb.Append(",\"elapsedSec\":").Append(Jw.N((float)ElapsedSeconds()));
@@ -79,6 +82,8 @@ namespace BlBridge
             sb.Append(",\"attackerCount\":").Append(Jw.N(AttackerCount));
             sb.Append(",\"defenderTroop\":").Append(Protocol.Q(DefenderTroop));
             sb.Append(",\"defenderCount\":").Append(Jw.N(DefenderCount));
+            sb.Append(",\"attackerGroups\":").Append(Protocol.Q(AttackerGroupsDsl));
+            sb.Append(",\"defenderGroups\":").Append(Protocol.Q(DefenderGroupsDsl));
             sb.Append(",\"durationCapSec\":").Append(Jw.N((int)DurationCapSeconds));
             sb.Append('}');
             sb.Append(",\"progress\":").Append(ProgressJson());
@@ -214,6 +219,85 @@ namespace BlBridge
                     "）。进游戏后点 Custom Battle，停在选兵界面即可；或传 allowAnyState=true 跳过本检查。", false);
             }
 
+            // 2) T5 多兵种/战术组参数：`troop:count[:formation[:movement]]`，多组用 | 分隔。
+            //    空串 ⇒ 空列表 ⇒ 该方走旧路径（GC2）；任何非法一律显式报 bad_groups（GC3）。
+            string attackerGroupsDslRaw = Jmini.Str(raw, "attackerGroups", "");
+            string defenderGroupsDslRaw = Jmini.Str(raw, "defenderGroups", "");
+            List<SquadSpec> attackerGroups;
+            List<SquadSpec> defenderGroups;
+            try
+            {
+                attackerGroups = SquadSpec.Parse(attackerGroupsDslRaw);
+            }
+            catch (ArgumentException ex)
+            {
+                return Protocol.Failure(id, "bad_groups", "attackerGroups 解析失败：" + ex.Message, false);
+            }
+            try
+            {
+                defenderGroups = SquadSpec.Parse(defenderGroupsDslRaw);
+            }
+            catch (ArgumentException ex)
+            {
+                return Protocol.Failure(id, "bad_groups", "defenderGroups 解析失败：" + ex.Message, false);
+            }
+            bool attackerGrouped = attackerGroups.Count > 0;
+            bool defenderGrouped = defenderGroups.Count > 0;
+            // DSL 按 | 切分的原始片段（与 specs 下标一一对应），用于逐字回显错误消息（修复轮 1 · m2）
+            string[] attackerGroupRawSegments = attackerGrouped ? attackerGroupsDslRaw.Split('|') : null;
+            string[] defenderGroupRawSegments = defenderGrouped ? defenderGroupsDslRaw.Split('|') : null;
+            // 组模式下把"单值"指向第一组，并把 count 换成各组之和：旧脚本读到的单值字段因此非空，
+            // 且 try 块与 OpenMission 的既有赋值/调用无需改动（无 groups 时这两行不执行 ⇒ 逐字节等价）。
+            if (attackerGrouped)
+            {
+                attacker = attackerGroups[0].Troop;
+                aCount = SumCounts(attackerGroups);
+            }
+            if (defenderGrouped)
+            {
+                defender = defenderGroups[0].Troop;
+                dCount = SumCounts(defenderGroups);
+            }
+
+            // 2b) 组模式：逐组校验兵种 + movement 冲突校验（§3 用户裁决 A）+ 多轮拦截。
+            //     必须在下面的单值检查**之前**跑：组模式下该方第一组若兵种未知，这里就能报出
+            //     "带组号 + 逐字原文"的错误，而不会被单值检查报成"无组号"（修复轮 1 · m1）。
+            if (attackerGrouped || defenderGrouped)
+            {
+                // M1：groups × rounds>1 会让第 2 轮起被 RoundOrchestratorBehavior 用单值重生
+                //     （单兵种 + 全 charge），静默退化 ⇒ 显式拒绝（按组重生是 T6 的活）。
+                if (rounds > 1)
+                {
+                    return Protocol.Failure(id, "unsupported_rounds",
+                        "groups 暂不支持多轮（rounds>1）：按组重生是 T6 的活", false);
+                }
+                if (attackerGrouped)
+                {
+                    string gcode;
+                    string gmsg;
+                    if (!ValidateGroupedSide(attackerGroups, attackerGroupRawSegments, "攻方", out gcode, out gmsg))
+                    {
+                        return Protocol.Failure(id, gcode, gmsg, false);
+                    }
+                }
+                if (defenderGrouped)
+                {
+                    string gcode;
+                    string gmsg;
+                    if (!ValidateGroupedSide(defenderGroups, defenderGroupRawSegments, "守方", out gcode, out gmsg))
+                    {
+                        return Protocol.Failure(id, gcode, gmsg, false);
+                    }
+                }
+                // groups 与整体 orders 不能混用（两套命令机制）
+                if (orders != "charge")
+                {
+                    return Protocol.Failure(id, "conflicting_orders",
+                        "attackerGroups/defenderGroups 与 orders=" + orders
+                        + " 不能混用：groups 走按组命令，orders 走整体命令", false);
+                }
+            }
+
             // 2) 兵种 id 必须能解析。
             //    失败时先怀疑"游戏内数据还没加载" —— 实测：停在主菜单（或任何还没进过游戏内
             //    界面的状态）时，**所有**兵种 id 都报 unknown_troop，因为 MBObjectManager
@@ -237,6 +321,11 @@ namespace BlBridge
                 return Protocol.Failure(id, "unknown_troop", "守方兵种 id 不存在: " + defender, false);
             }
 
+            _pendingAttackerGroups = attackerGrouped ? attackerGroups : null;
+            _pendingDefenderGroups = defenderGrouped ? defenderGroups : null;
+            AttackerGroupsDsl = attackerGrouped ? attackerGroupsDslRaw : "";
+            DefenderGroupsDsl = defenderGrouped ? defenderGroupsDslRaw : "";
+
             // 3) 组军并开战
             try
             {
@@ -246,6 +335,7 @@ namespace BlBridge
                 DefenderCount = dCount;
                 DurationCapSeconds = capSec;
                 LastError = "";
+                OrderNotes = "";
                 ResultJson = "null";
                 AttackerInitial = -1;
                 DefenderInitial = -1;
@@ -412,6 +502,17 @@ namespace BlBridge
         {
             BasicCultureObject culture = MBObjectManager.Instance.GetObject<BasicCultureObject>("empire");
 
+            // ── T5：任一方给了 groups ⇒ 走"每方一个自定义 troop supplier"的组路径；
+            //         否则原样走旧路径（下面的代码逐字节不变）。──
+            bool attGrouped = _pendingAttackerGroups != null && _pendingAttackerGroups.Count > 0;
+            bool defGrouped = _pendingDefenderGroups != null && _pendingDefenderGroups.Count > 0;
+            if (attGrouped || defGrouped)
+            {
+                OpenMissionGrouped(scene, culture, attackerTroop, defenderTroop, aCount, dCount,
+                    attGrouped, defGrouped);
+                return;
+            }
+
             CustomBattleCombatant attacker = new CustomBattleCombatant(
                 new TextObject("{=!}BlBridge Attacker"), culture, new Banner(Banners[0]));
             attacker.Side = BattleSideEnum.Attacker;
@@ -438,11 +539,166 @@ namespace BlBridge
             MissionState.OpenNew("BlBridgeScenario", rec, CreateBehaviors, true, true);
         }
 
+        /// <summary>
+        /// T5 组路径：整体 combatant（含全部组，供 leader / spawn handler / 总人数）+ 组级 combatant。
+        /// ⚠️ CustomBattleMissionSpawnHandler.AfterStart() 用整体 combatant 的 NumberOfHealthyMembers
+        ///    当 total 与 initial spawn 数 ⇒ 整体 combatant 必须是全组之和。
+        /// 每方各自判断：一方有 groups、另一方没有也应支持（无 groups 的一侧仍用单个 supplier）。
+        /// </summary>
+        private static void OpenMissionGrouped(string scene, BasicCultureObject culture,
+            BasicCharacterObject attackerTroop, BasicCharacterObject defenderTroop,
+            int aCount, int dCount, bool attackerGrouped, bool defenderGrouped)
+        {
+            CustomBattleCombatant attacker = new CustomBattleCombatant(
+                new TextObject("{=!}BlBridge Attacker"), culture, new Banner(Banners[0]));
+            attacker.Side = BattleSideEnum.Attacker;
+            CustomBattleCombatant defender = new CustomBattleCombatant(
+                new TextObject("{=!}BlBridge Defender"), culture, new Banner(Banners[1]));
+            defender.Side = BattleSideEnum.Defender;
+
+            IMissionTroopSupplier attackerSupplier = BuildSideSupplier(attacker, attackerGrouped,
+                _pendingAttackerGroups, attackerTroop, aCount, BattleSideEnum.Attacker, culture,
+                Banners[0], "Attacker");
+            IMissionTroopSupplier defenderSupplier = BuildSideSupplier(defender, defenderGrouped,
+                _pendingDefenderGroups, defenderTroop, dCount, BattleSideEnum.Defender, culture,
+                Banners[1], "Defender");
+
+            IMissionTroopSupplier[] suppliers = new IMissionTroopSupplier[2];
+            suppliers[(int)attacker.Side] = attackerSupplier;
+            suppliers[(int)defender.Side] = defenderSupplier;
+
+            _pendingAttacker = attacker;
+            _pendingDefender = defender;
+            _pendingSuppliers = suppliers;
+
+            MissionInitializerRecord rec = new MissionInitializerRecord(scene);
+            rec.DoNotUseLoadingScreen = false;
+            rec.PlayingInCampaignMode = false;
+            rec.DecalAtlasGroup = 2;
+
+            MissionState.OpenNew("BlBridgeScenario", rec, CreateBehaviors, true, true);
+        }
+
+        /// <summary>
+        /// 构造一方的 supplier：无 groups ⇒ 沿用单个 CustomBattleTroopSupplier（与旧路径同参）；
+        /// 有 groups ⇒ 每组一个组级 combatant + 组级 supplier，外层包 SquadTroopSupplier 做顺序编排。
+        /// </summary>
+        private static IMissionTroopSupplier BuildSideSupplier(CustomBattleCombatant whole, bool grouped,
+            List<SquadSpec> specs, BasicCharacterObject singleTroop, int singleCount,
+            BattleSideEnum side, BasicCultureObject culture, string banner, string label)
+        {
+            if (!grouped)
+            {
+                whole.AddCharacter(singleTroop, singleCount);
+                return new CustomBattleTroopSupplier(whole, false, false, false, null);
+            }
+
+            CustomBattleTroopSupplier[] groupSuppliers = new CustomBattleTroopSupplier[specs.Count];
+            for (int i = 0; i < specs.Count; i++)
+            {
+                SquadSpec s = specs[i];
+                BasicCharacterObject troop = Resolve(s.Troop);
+                // 整体 combatant 必须含全部组（spawn handler 拿它当 total / initial spawn）
+                whole.AddCharacter(troop, s.Count);
+                // 组级 combatant：名字带组号便于排查；Side/culture/banner 与整体一致
+                CustomBattleCombatant group = new CustomBattleCombatant(
+                    new TextObject("{=!}BlBridge " + label + " Group " + (i + 1)), culture,
+                    new Banner(banner));
+                group.Side = side;
+                group.AddCharacter(troop, s.Count);
+                groupSuppliers[i] = new CustomBattleTroopSupplier(group, false, false, false, null);
+            }
+            return new SquadTroopSupplier(specs, groupSuppliers, whole);
+        }
+
+        private static int SumCounts(List<SquadSpec> specs)
+        {
+            int total = 0;
+            if (specs != null)
+            {
+                for (int i = 0; i < specs.Count; i++) total += specs[i].Count;
+            }
+            return total;
+        }
+
+        /// <summary>
+        /// 逐组校验：兵种 id 可解析（否则 unknown_troop），以及"同一实际编队被多组以不同 movement
+        /// **落点**命中"⇒ conflicting_movements（§3 用户裁决 A）。落点编队 = Resolve(troop).GetFormationClass()，
+        /// 不是 DSL 里写的 formation 字段。
+        /// 冲突比较用 MapMovement 映射后的落点（修复轮 1 · M2）：hold 与 stop 都落 MovementOrderStop ⇒ 不算冲突。
+        /// rawSegments：该方 DSL 按 | 切分的原始片段（与 specs 下标一致），用于逐字回显（修复轮 1 · m2）。
+        /// </summary>
+        private static bool ValidateGroupedSide(List<SquadSpec> specs, string[] rawSegments, string label,
+            out string code, out string message)
+        {
+            code = null;
+            message = null;
+            bool triedLoad = false;
+            Dictionary<FormationClass, MovementOrder.MovementOrderEnum> orderByFormation =
+                new Dictionary<FormationClass, MovementOrder.MovementOrderEnum>();
+            Dictionary<FormationClass, string> movementByFormation = new Dictionary<FormationClass, string>();
+            Dictionary<FormationClass, string> rawByFormation = new Dictionary<FormationClass, string>();
+            for (int i = 0; i < specs.Count; i++)
+            {
+                SquadSpec s = specs[i];
+                BasicCharacterObject troop = Resolve(s.Troop);
+                if (troop == null && !triedLoad)
+                {
+                    // 修复轮 1 · m4：整个循环最多补加载一次（原先每个未知组各加载一次）
+                    triedLoad = true;
+                    if (TryLoadBaseObjects()) troop = Resolve(s.Troop);
+                }
+                if (troop == null)
+                {
+                    code = "unknown_troop";
+                    message = label + "第 " + (i + 1) + " 组兵种 id 不存在: " + RawSegment(rawSegments, i, s.Troop);
+                    return false;
+                }
+                FormationClass fc = troop.GetFormationClass();
+                string mv = s.Movement == null ? "charge" : s.Movement;
+                MovementOrder.MovementOrderEnum ord = ScenarioProbe.MapMovement(mv).OrderEnum;
+                string raw = RawSegment(rawSegments, i, s.Troop);
+                MovementOrder.MovementOrderEnum prevOrd;
+                if (orderByFormation.TryGetValue(fc, out prevOrd))
+                {
+                    if (prevOrd != ord)
+                    {
+                        code = "conflicting_movements";
+                        message = label + "的编队 " + fc + " 被多组以不同 movement 命中: "
+                            + rawByFormation[fc] + "(" + movementByFormation[fc] + ") 与 " + raw + "(" + mv + ")";
+                        return false;
+                    }
+                }
+                else
+                {
+                    orderByFormation[fc] = ord;
+                    movementByFormation[fc] = mv;
+                    rawByFormation[fc] = raw;
+                }
+            }
+            return true;
+        }
+
+        /// <summary>取该组的逐字原文片段；越界时回退到 spec 重建（防御性）。</summary>
+        private static string RawSegment(string[] rawSegments, int i, string fallback)
+        {
+            if (rawSegments != null && i >= 0 && i < rawSegments.Length) return rawSegments[i];
+            return fallback;
+        }
+
         private static CustomBattleCombatant _pendingAttacker;
         private static CustomBattleCombatant _pendingDefender;
         private static IMissionTroopSupplier[] _pendingSuppliers;
         private static string _pendingOrders = "charge";
         private static BattleSideEnum _pendingPlayerSide = BattleSideEnum.Attacker;
+
+        // ── T5：每方多兵种/战术组（null 或空 ⇒ 该方走旧路径，GC2）───────────────────
+        private static List<SquadSpec> _pendingAttackerGroups;
+        private static List<SquadSpec> _pendingDefenderGroups;
+
+        // 原样回显 groups DSL（供 StatusJson 排查）。空串 = 该方无 groups。
+        internal static string AttackerGroupsDsl = "";
+        internal static string DefenderGroupsDsl = "";
 
         private static IEnumerable<MissionBehavior> CreateBehaviors(Mission mission)
         {
@@ -508,6 +764,7 @@ namespace BlBridge
             public override void AfterStart()
             {
                 base.AfterStart();
+                if (TryApplyGroupOrders()) return;
                 if (_pendingOrders != "charge") return;
                 try
                 {
@@ -532,6 +789,108 @@ namespace BlBridge
                     if (f == null || f.CountOfUnits == 0) continue;
                     f.SetMovementOrder(MovementOrder.MovementOrderCharge);
                 }
+            }
+
+            /// <summary>
+            /// T5 组路径：按"每组兵种的实际编队"下发 movement。
+            /// 编队由 BasicCharacterObject.GetFormationClass() 决定（GC1 修订：formation 字段不可下发）。
+            /// 冲突已在 Start() 拦掉（conflicting_movements）；这里只做安全下发，
+            /// f==null 记 LastError 并跳过，绝不抛未捕获异常。
+            /// （修复轮 1 · m3：删掉从未使用的 BattleSideEnum side 参数。）
+            /// </summary>
+            internal static void ApplyOrders(Team team, List<SquadSpec> specs)
+            {
+                if (team == null || specs == null) return;
+                team.ClearTacticOptions();
+                team.AddTacticOption(new TacticCharge(team));
+                for (int i = 0; i < specs.Count; i++)
+                {
+                    SquadSpec s = specs[i];
+                    BasicCharacterObject troop = Resolve(s.Troop);
+                    if (troop == null)
+                    {
+                        AppendOrderError("第 " + (i + 1) + " 组兵种 id 不存在: " + s.Troop);
+                        continue;
+                    }
+                    Formation f = team.GetFormation(troop.GetFormationClass());
+                    if (f == null)
+                    {
+                        AppendOrderError("编队不可用 " + troop.GetFormationClass() + "（组 " + s.Troop + "）");
+                        continue;
+                    }
+                    string mv = s.Movement == null ? "charge" : s.Movement;
+                    f.SetMovementOrder(MapMovement(mv));
+                    if (mv == "hold")
+                    {
+                        // 修复轮 2 · nit-2：hold 降级是"提示"而非"错误" ⇒ 写 OrderNotes，不污染 lastError；
+                        // 修复轮 2 · nit-3：AppendOrderNote 幂等，整场只追加一次。
+                        AppendOrderNote("movement=hold 已降级为 MovementOrderStop（引擎无 Hold 实例）");
+                    }
+                }
+            }
+
+            /// <summary>按**追加**方式记录命令下发问题（不覆盖先前信息；与 LastError 同风格）。仅用于真错误。</summary>
+            private static void AppendOrderError(string detail)
+            {
+                string entry = "orders: " + detail;
+                LastError = string.IsNullOrEmpty(LastError) ? entry : LastError + " | " + entry;
+            }
+
+            /// <summary>
+            /// 记录命令下发的"非错误提示"（如 hold 降级），写入独立的 OrderNotes（不污染 LastError）。
+            /// 幂等：同一条提示整场只追加一次（修复轮 2 · nit-2 / nit-3）。
+            /// </summary>
+            private static void AppendOrderNote(string detail)
+            {
+                string entry = "orders: " + detail;
+                if (OrderNotes.Contains(entry)) return;
+                OrderNotes = string.IsNullOrEmpty(OrderNotes) ? entry : OrderNotes + " | " + entry;
+            }
+
+            /// <summary>
+            /// DSL movement → 引擎 MovementOrder。缺省 charge。
+            /// ⚠️ 引擎 MovementOrderEnum 无 Hold，也没有公开 ctor（MovementOrder 的构造函数全是 private），
+            ///    因此 hold 落到语义最接近的 MovementOrderStop（= OrderType.StandYourGround，原地不动）。
+            ///    这一点与 brief §4.5 的 "MovementOrderHold" 有出入，见 task-5-report.md 的 NEEDS_CONTEXT。
+            /// </summary>
+            internal static MovementOrder MapMovement(string movement)
+            {
+                switch (movement)
+                {
+                    case "advance": return MovementOrder.MovementOrderAdvance;
+                    case "hold": return MovementOrder.MovementOrderStop;
+                    case "fallback": return MovementOrder.MovementOrderFallBack;
+                    case "stop": return MovementOrder.MovementOrderStop;
+                    case "retreat": return MovementOrder.MovementOrderRetreat;
+                    case "charge":
+                    default: return MovementOrder.MovementOrderCharge;
+                }
+            }
+
+            /// <summary>
+            /// T5：组路径下按组下发命令；无 groups 时返回 false，让旧 AfterStart 逻辑原样继续（GC2）。
+            /// 一方有 groups、另一方没有也能工作（无 groups 的一侧仍走 ApplyCharge）。
+            /// </summary>
+            private bool TryApplyGroupOrders()
+            {
+                bool aGrouped = _pendingAttackerGroups != null && _pendingAttackerGroups.Count > 0;
+                bool dGrouped = _pendingDefenderGroups != null && _pendingDefenderGroups.Count > 0;
+                if (!aGrouped && !dGrouped) return false;
+                try
+                {
+                    Mission m = this.Mission;
+                    if (m == null) return true;
+                    if (aGrouped) ApplyOrders(m.AttackerTeam, _pendingAttackerGroups);
+                    else ApplyCharge(m.AttackerTeam);
+                    if (dGrouped) ApplyOrders(m.DefenderTeam, _pendingDefenderGroups);
+                    else ApplyCharge(m.DefenderTeam);
+                }
+                catch (Exception ex)
+                {
+                    // 修复轮 2 · nit-1：改用追加，避免吞掉 ApplyOrders 已写入的提示/错误
+                    AppendOrderError(ex.GetType().Name + ": " + ex.Message);
+                }
+                return true;
             }
 
             public override void OnMissionTick(float dt)
@@ -677,6 +1036,148 @@ namespace BlBridge
                     LastError = "endMission: " + ex.GetType().Name + ": " + ex.Message;
                     State = RunStateError;
                 }
+            }
+        }
+
+        /// <summary>
+        /// T5：每方一个的"按组轮转"troop supplier。
+        /// 它不自己造 origin —— CustomBattleAgentOrigin 的 troopSupplier 参数类型是**具体类**
+        /// CustomBattleTroopSupplier（不是接口，也无法覆盖它的非 virtual 方法），
+        /// 所以每个 origin 都由对应的**组级** custom supplier 产生，这里只做顺序编排与汇总。
+        ///
+        /// 组顺序：组 0 取完才进组 1，不交错。SupplyTroops(n) 允许在**同一次调用里跨组补齐**
+        /// （理由见 task-5-report.md §1：引擎 initial spawn 会一次性请求该方全部兵力，
+        ///  不补齐则第一组之后的组永远不会被 spawn）。
+        /// </summary>
+        internal sealed class SquadTroopSupplier : IMissionTroopSupplier
+        {
+            private readonly List<SquadSpec> _specs;
+            private readonly CustomBattleTroopSupplier[] _groups;
+            private readonly CustomBattleCombatant _whole;
+            private readonly int[] _provided;
+            private int _groupIndex;
+
+            internal SquadTroopSupplier(List<SquadSpec> specs, CustomBattleTroopSupplier[] groups,
+                CustomBattleCombatant whole)
+            {
+                if (specs == null || groups == null || specs.Count != groups.Length)
+                {
+                    throw new ArgumentException("SquadTroopSupplier: specs 与 groups 数量必须一致（传入 "
+                        + (specs == null ? "null" : specs.Count.ToString(CultureInfo.InvariantCulture))
+                        + " vs "
+                        + (groups == null ? "null" : groups.Length.ToString(CultureInfo.InvariantCulture)) + "）");
+                }
+                _specs = specs;
+                _groups = groups;
+                _whole = whole;
+                _provided = new int[groups.Length];
+                _groupIndex = 0;
+            }
+
+            /// <summary>只读暴露本方的组规格（供 T7 的分组归因）。</summary>
+            internal IReadOnlyList<SquadSpec> Specs { get { return _specs; } }
+
+            /// <summary>
+            /// 每组已"交给引擎"的 origin 数（供 T7 的 squad 事件）。
+            /// 注意：这是 supplied 计数，**不等于**实际 spawn 的 agent 数 —— T7 需从 team 侧 Agent 统计。
+            /// 返回副本，避免外部改动内部数组（修复轮 1 · nit）。
+            /// </summary>
+            internal IReadOnlyList<int> ProvidedCounts
+            {
+                get
+                {
+                    int[] copy = new int[_provided.Length];
+                    Array.Copy(_provided, copy, _provided.Length);
+                    return copy;
+                }
+            }
+
+            public int NumRemovedTroops
+            {
+                get
+                {
+                    int sum = 0;
+                    for (int i = 0; i < _groups.Length; i++) sum += _groups[i].NumRemovedTroops;
+                    return sum;
+                }
+            }
+
+            public int NumTroopsNotSupplied
+            {
+                get
+                {
+                    int sum = 0;
+                    for (int i = 0; i < _groups.Length; i++) sum += _groups[i].NumTroopsNotSupplied;
+                    return sum;
+                }
+            }
+
+            /// <summary>任一组还有兵就为 true（按各组"剩余量"算，不依赖组级 supplier 的内部标志）。</summary>
+            public bool AnyTroopRemainsToBeSupplied
+            {
+                get
+                {
+                    for (int i = 0; i < _specs.Count; i++)
+                    {
+                        if (_specs[i].Count - _provided[i] > 0) return true;
+                    }
+                    return false;
+                }
+            }
+
+            public IEnumerable<IAgentOriginBase> SupplyTroops(int numberToAllocate)
+            {
+                List<IAgentOriginBase> result = new List<IAgentOriginBase>();
+                int need = numberToAllocate;
+                while (need > 0 && _groupIndex < _groups.Length)
+                {
+                    int remaining = _specs[_groupIndex].Count - _provided[_groupIndex];
+                    if (remaining <= 0)
+                    {
+                        _groupIndex++;
+                        continue;
+                    }
+                    int take = need < remaining ? need : remaining;
+                    List<IAgentOriginBase> batch = new List<IAgentOriginBase>(_groups[_groupIndex].SupplyTroops(take));
+                    for (int i = 0; i < batch.Count; i++)
+                    {
+                        result.Add(batch[i]);
+                        _provided[_groupIndex]++;
+                    }
+                    need -= batch.Count;
+                    if (batch.Count < take) _groupIndex++;
+                }
+                return result;
+            }
+
+            public IAgentOriginBase SupplyOneTroop()
+            {
+                while (_groupIndex < _groups.Length
+                       && _specs[_groupIndex].Count - _provided[_groupIndex] <= 0)
+                {
+                    _groupIndex++;
+                }
+                if (_groupIndex >= _groups.Length) return null;
+                IAgentOriginBase origin = _groups[_groupIndex].SupplyOneTroop();
+                if (origin != null) _provided[_groupIndex]++;
+                return origin;
+            }
+
+            public IEnumerable<IAgentOriginBase> GetAllTroops()
+            {
+                List<IAgentOriginBase> all = new List<IAgentOriginBase>();
+                for (int i = 0; i < _groups.Length; i++) all.AddRange(_groups[i].GetAllTroops());
+                return all;
+            }
+
+            public BasicCharacterObject GetGeneralCharacter()
+            {
+                return _whole.General;
+            }
+
+            public int GetNumberOfPlayerControllableTroops()
+            {
+                return _whole.CountOfCharacters;
             }
         }
     }
