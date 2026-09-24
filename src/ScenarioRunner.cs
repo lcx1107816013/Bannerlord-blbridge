@@ -827,6 +827,12 @@ namespace BlBridge
             private float _sinceSpeedCheck;
             private bool _endCalled;
 
+            // ── T13：组路径周期性重申 order + 编队 order 观测 ────────────────
+            private float _sinceOrderRefresh;   // 累计秒（重申间隔）
+            private float _sinceOrderSample;    // 累计秒（观测间隔）
+            private const float OrderRefreshSeconds = 0.5f; // 组路径每 0.5s 重申各组的编队 movement order
+            private const float OrderSampleSeconds = 5f;    // 每 5s 写一条 order 观测事件
+
             /// <summary>
             /// 对称化（v0.7.3）：把双方都改成 TacticCharge。
             /// 动机来自**实测**：20v20 同兵种镜像对局连打两局，攻方 13:0 / 6:0 全胜，
@@ -979,6 +985,134 @@ namespace BlBridge
                 return true;
             }
 
+            // ── T13：组路径周期性重申各组的编队 movement order ──────────────────
+            /// <summary>
+            /// 组路径专用：每 `OrderRefreshSeconds` 重申一次各组的编队 movement order，
+            /// 以压过 team 级 `TacticCharge` 周期性把编队 order 重设回 `Charge` 的行为
+            /// （缺陷：按组下发的 movement 对「守方」不生效 —— 见 task-13-brief §0/§1）。
+            /// **双方都无 groups ⇒ 立即返回**（旧路径绝不受影响，GC2）。
+            /// **不**在这里 `ClearTacticOptions()`/`AddTacticOption()`：那只在 `AfterStart` 的
+            /// `ApplyOrders`/`ApplyCharge` 里做一次，避免每隔 0.5s 重置 tactic 造成 AI 抖动。
+            /// 整体 try/catch —— 遥测/命令通道绝不抛。
+            /// </summary>
+            private static void ReapplyGroupOrders(Mission m)
+            {
+                try
+                {
+                    bool aGrouped = _pendingAttackerGroups != null && _pendingAttackerGroups.Count > 0;
+                    bool dGrouped = _pendingDefenderGroups != null && _pendingDefenderGroups.Count > 0;
+                    if (!aGrouped && !dGrouped) return; // 旧路径：什么都不做（GC2）
+                    if (m == null) return;
+                    if (aGrouped) ReapplySideOrders(m.AttackerTeam, _pendingAttackerGroups);
+                    if (dGrouped) ReapplySideOrders(m.DefenderTeam, _pendingDefenderGroups);
+                    // 无 groups 的一方**什么都不做**：它仍由既有 ApplyCharge/TacticCharge 管（GC2）。
+                }
+                catch
+                {
+                }
+            }
+
+            /// <summary>
+            /// 重申某一方（有 groups 的方）每个 spec 的编队 movement order。
+            /// 解析/取编队失败 ⇒ `AppendOrderError`（幂等），绝不抛。
+            /// </summary>
+            private static void ReapplySideOrders(Team team, List<SquadSpec> specs)
+            {
+                if (team == null || specs == null) return;
+                for (int i = 0; i < specs.Count; i++)
+                {
+                    SquadSpec s = specs[i];
+                    if (s == null) continue;
+                    BasicCharacterObject troop = Resolve(s.Troop);
+                    if (troop == null)
+                    {
+                        AppendOrderError("第 " + (i + 1) + " 组兵种 id 不存在: " + s.Troop);
+                        continue;
+                    }
+                    Formation f = team.GetFormation(troop.GetFormationClass());
+                    if (f == null)
+                    {
+                        AppendOrderError("编队不可用 " + troop.GetFormationClass() + "（组 " + s.Troop + "）");
+                        continue;
+                    }
+                    string mv = s.Movement == null ? "charge" : s.Movement;
+                    f.SetMovementOrder(MapMovement(mv));
+                }
+            }
+
+            // ── T13：编队 order 观测事件（每 5s，每方每编队一行）─────────────────
+            /// <summary>
+            /// 每 5s 写一条 `order` 观测事件（用于确诊「tactic 是否覆盖 order」+ 以后当回归网）。
+            /// **只在任一方有 groups 时写**（旧路径不产生新事件 ⇒ GC2）。字段形状见 brief §2.2，写死。
+            /// 整体 try/catch，绝不抛。
+            /// </summary>
+            private static void WriteOrderEvents(Mission m)
+            {
+                try
+                {
+                    bool aGrouped = _pendingAttackerGroups != null && _pendingAttackerGroups.Count > 0;
+                    bool dGrouped = _pendingDefenderGroups != null && _pendingDefenderGroups.Count > 0;
+                    if (!aGrouped && !dGrouped) return; // 旧路径不产生新事件（GC2）
+                    if (!Jw.IsOpen) return;
+                    if (m == null) return;
+                    float time = (float)DurationNow();
+                    WriteOrderSide("Attacker", m.AttackerTeam, time);
+                    WriteOrderSide("Defender", m.DefenderTeam, time);
+                }
+                catch
+                {
+                }
+            }
+
+            /// <summary>写该方每个编队一行 `order` 事件（`count==0` 的也写，便于看「编队是否存在」）。绝不抛。</summary>
+            private static void WriteOrderSide(string side, Team team, float time)
+            {
+                if (team == null) return;
+                string tactic = "none";
+                foreach (Formation f in team.FormationsIncludingEmpty)
+                {
+                    string formation; // JSON 片段：带引号的名字，或裸 `null`
+                    int count;
+                    string order;
+                    if (f == null)
+                    {
+                        formation = "null";
+                        count = 0;
+                        order = "(no-formation)";
+                    }
+                    else
+                    {
+                        string name = "(unknown)";
+                        try { name = EnumNames.Formation(f.LogicalClass); }
+                        catch { name = "(unknown)"; }
+                        if (name == null) name = "(unknown)";
+                        formation = "\"" + Jw.Esc(name) + "\"";
+                        try { count = f.CountOfUnits; }
+                        catch { count = 0; }
+                        try
+                        {
+                            MovementOrder mo = f.GetReadonlyMovementOrderReference();
+                            order = mo.OrderEnum.ToString();
+                            if (string.IsNullOrEmpty(order)) order = "(unknown)";
+                        }
+                        catch
+                        {
+                            order = "(unknown)";
+                        }
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append("{\"t\":\"order\"");
+                    sb.Append(",\"time\":").Append(Jw.N(time));
+                    sb.Append(",\"side\":\"").Append(side).Append('"');
+                    sb.Append(",\"formation\":").Append(formation);
+                    sb.Append(",\"count\":").Append(Jw.N(count));
+                    sb.Append(",\"order\":\"").Append(Jw.Esc(order)).Append('"');
+                    sb.Append(",\"tactic\":\"").Append(Jw.Esc(tactic)).Append('"');
+                    sb.Append('}');
+                    Jw.Write(sb.ToString());
+                }
+            }
+
             public override void OnMissionTick(float dt)
             {
                 base.OnMissionTick(dt);
@@ -1015,6 +1149,22 @@ namespace BlBridge
                     {
                         _sinceSpeedCheck = 0f;
                         ApplyFastForward(m);
+                    }
+
+                    // ── T13：组路径周期性重申 order + 编队 order 观测 ──────────────
+                    // 只在 running 状态累计（本处已在 `State != RunStateRunning` 的 return 之后）。
+                    // 无 groups 时 ReapplyGroupOrders/WriteOrderEvents 立即返回 ⇒ 旧路径逐字未变（GC2）。
+                    _sinceOrderRefresh += dt;
+                    if (_sinceOrderRefresh >= OrderRefreshSeconds)
+                    {
+                        _sinceOrderRefresh = 0f;
+                        ReapplyGroupOrders(m);
+                    }
+                    _sinceOrderSample += dt;
+                    if (_sinceOrderSample >= OrderSampleSeconds)
+                    {
+                        _sinceOrderSample = 0f;
+                        WriteOrderEvents(m);
                     }
 
                     int aAlive = CountAlive(m.AttackerTeam);
