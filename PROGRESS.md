@@ -753,6 +753,12 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 ⚠️ 归档在项目 git **之外**（游戏日志目录旁），git 历史里看不到 —— 后来人若发现 PROGRESS
 引用的场次不在 `battles/`，先看 `battles_archive/README.md`。
 
+**第二次归档（2026-09-24 22:22，当天收尾）**：当天又跑了 ~57 场（**96 文件 / 248 MB**）⇒ 再归档 26 个
+（41.7 MB → 3.4 MB）。**策略升级**：保留集合里新增"**被 `runs/*.json` manifest 引用过**"这一维度 ——
+今天的批次大多只写进 manifest、没有逐场写进 PROGRESS，只认文本短名会把它们误归档（这正是第一版
+"只认两种文本写法"的盲区）。结果：96 → **70 个文件 / 207 MB**
+（保留 = 最近 20 场 ∪ 文本引用 26 ∪ manifest 引用 48）。
+
 ### 第一轮实测：只改 Warbandlord 的 R 表（2026-09-24 21:27，进行中）
 
 **设计**：唯一变量 = `DamageCalc/MaterialResistance/Plate/PierceResistance`（靶子 legionary 全是 Plate 装备；

@@ -55,6 +55,10 @@ BlBridge/
   tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
   tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲；两件甲护甲数值完全相同，只差材质）
   tools/plan.material_r.example.json 跑批计划示例（改 Warbandlord MaterialResistance 的对照：跑 baseline / 改后两趟，各自产出 manifest 再用 --compare）
+  tools/plan.swap_probe.example.json 跑批计划示例（换装探针：同一件甲跑 3 场看运行时 armorBody 是否逐场一致）
+  tools/plan.swap_sides.example.json 跑批计划示例（多轮攻守互换：rounds 2 + roundSwap，每轮一个文件）
+  tools/plan.mirror.example.json   跑批计划示例（镜像双跑：两个 config 互换攻守，供 bl_compare 分解位置效应）
+  tools/plan.mirror2.example.json  跑批计划示例（同上，第二对兵种：cataphract vs fian_champion）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json
