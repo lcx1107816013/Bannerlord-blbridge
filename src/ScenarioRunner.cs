@@ -693,12 +693,11 @@ namespace BlBridge
             if (unknownEntries.Count > 0)
             {
                 // 语义不变（GC3：非法即报错、绝不静默）：仍报错并中止整场，只是从"第一个"换成"全部"。
-                int n = unknownEntries.Count;
-                int shown = n > 8 ? 8 : n;
-                string joined = string.Join("、", unknownEntries.GetRange(0, shown).ToArray());
+                // 2026-09-25：不再截断为前 8 条 —— 全兵种扫描需要一次拿到完整坏 id 清单
+                // （普通误输入通常只有几条，消息长度不是问题）。
                 code = "unknown_troop";
-                message = label + "有 " + n + " 个兵种 id 不存在：" + joined
-                    + (n > 8 ? " 等 " + n + " 个" : "");
+                message = label + "有 " + unknownEntries.Count + " 个兵种 id 不存在："
+                    + string.Join("、", unknownEntries.ToArray());
                 return false;
             }
             resolvedTroops = troops;

@@ -47,6 +47,7 @@ BlBridge/
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
   tools/bl_compare.py             A/B 对比报告：主指标=满编窗口 + 95%CI + 样本量门槛 + 换边双跑交叉验证（阶段 2④）
   tools/bl_cmd.py                 命令行：status / start / wait / batch / compare / buildcheck / fastforward / speed
+  tools/bl_troop_sweep.py         全兵种扫描：probe（可用性判定：引信 + 一次报全，永不建 mission）/ cover（覆盖扫描：跑真战斗比对 unit 事件，找「过了校验却没 spawn」的兵种）
   tools/bl_selftest.py            自测（合成数据 + MCP 协议 + 控制通道 + 假游戏端 + 构建链 + 配置 + 崩溃判定）
   tools/bl_metrics.py             0.7.9 遥测指标分析器（8 个纯函数 seam：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速自洽与倍率 / 装弹时长 / AI 参数分组 / 阵亡挨箭画像）
   tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
