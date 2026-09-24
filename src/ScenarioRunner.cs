@@ -262,20 +262,19 @@ namespace BlBridge
             // 2b) 组模式：逐组校验兵种 + movement 冲突校验（§3 用户裁决 A）+ 多轮拦截。
             //     必须在下面的单值检查**之前**跑：组模式下该方第一组若兵种未知，这里就能报出
             //     "带组号 + 逐字原文"的错误，而不会被单值检查报成"无组号"（修复轮 1 · m1）。
+            // T6：组信息还要交给多轮编排器（按组重生 / 每轮按组重申）⇒ 把校验阶段
+            //     **已 Resolve 过的**兵种对象带出来复用，不重复解析（brief §3.1）。
+            //     无 groups 的一方保持 null（旧路径判据用 null，不是空列表）。
+            List<BasicCharacterObject> attackerGroupChars = null;
+            List<BasicCharacterObject> defenderGroupChars = null;
             if (attackerGrouped || defenderGrouped)
             {
-                // M1：groups × rounds>1 会让第 2 轮起被 RoundOrchestratorBehavior 用单值重生
-                //     （单兵种 + 全 charge），静默退化 ⇒ 显式拒绝（按组重生是 T6 的活）。
-                if (rounds > 1)
-                {
-                    return Protocol.Failure(id, "unsupported_rounds",
-                        "groups 暂不支持多轮（rounds>1）：按组重生是 T6 的活", false);
-                }
                 if (attackerGrouped)
                 {
                     string gcode;
                     string gmsg;
-                    if (!ValidateGroupedSide(attackerGroups, attackerGroupRawSegments, "攻方", out gcode, out gmsg))
+                    if (!ValidateGroupedSide(attackerGroups, attackerGroupRawSegments, "攻方",
+                            out gcode, out gmsg, out attackerGroupChars))
                     {
                         return Protocol.Failure(id, gcode, gmsg, false);
                     }
@@ -284,7 +283,8 @@ namespace BlBridge
                 {
                     string gcode;
                     string gmsg;
-                    if (!ValidateGroupedSide(defenderGroups, defenderGroupRawSegments, "守方", out gcode, out gmsg))
+                    if (!ValidateGroupedSide(defenderGroups, defenderGroupRawSegments, "守方",
+                            out gcode, out gmsg, out defenderGroupChars))
                     {
                         return Protocol.Failure(id, gcode, gmsg, false);
                     }
@@ -388,6 +388,12 @@ namespace BlBridge
                 RoundOrchestratorBehavior.DefenderChar = defenderTroop;
                 RoundOrchestratorBehavior.AttackerCount = aCount;
                 RoundOrchestratorBehavior.DefenderCount = dCount;
+                // T6：把组信息交给多轮编排器（无 groups ⇒ 四个字段皆 null ⇒ 旧单值路径，GC2）。
+                //     Squads 与 SquadTroops 下标一一对应（校验阶段按同一顺序 Resolve，见 §3.1）。
+                RoundOrchestratorBehavior.AttackerSquads = _pendingAttackerGroups;
+                RoundOrchestratorBehavior.DefenderSquads = _pendingDefenderGroups;
+                RoundOrchestratorBehavior.AttackerSquadTroops = attackerGroupChars;
+                RoundOrchestratorBehavior.DefenderSquadTroops = defenderGroupChars;
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;
@@ -627,12 +633,16 @@ namespace BlBridge
         /// 不是 DSL 里写的 formation 字段。
         /// 冲突比较用 MapMovement 映射后的落点（修复轮 1 · M2）：hold 与 stop 都落 MovementOrderStop ⇒ 不算冲突。
         /// rawSegments：该方 DSL 按 | 切分的原始片段（与 specs 下标一致），用于逐字回显（修复轮 1 · m2）。
+        /// T6：resolvedTroops 带出逐组 Resolve 的兵种对象（下标与 specs 一一对应），
+        /// 供多轮编排器按组重生复用，避免重复解析。
         /// </summary>
         private static bool ValidateGroupedSide(List<SquadSpec> specs, string[] rawSegments, string label,
-            out string code, out string message)
+            out string code, out string message, out List<BasicCharacterObject> resolvedTroops)
         {
             code = null;
             message = null;
+            resolvedTroops = null;
+            List<BasicCharacterObject> troops = new List<BasicCharacterObject>();
             bool triedLoad = false;
             Dictionary<FormationClass, MovementOrder.MovementOrderEnum> orderByFormation =
                 new Dictionary<FormationClass, MovementOrder.MovementOrderEnum>();
@@ -654,6 +664,7 @@ namespace BlBridge
                     message = label + "第 " + (i + 1) + " 组兵种 id 不存在: " + RawSegment(rawSegments, i, s.Troop);
                     return false;
                 }
+                troops.Add(troop);
                 FormationClass fc = troop.GetFormationClass();
                 string mv = s.Movement == null ? "charge" : s.Movement;
                 MovementOrder.MovementOrderEnum ord = ScenarioProbe.MapMovement(mv).OrderEnum;
@@ -676,6 +687,7 @@ namespace BlBridge
                     rawByFormation[fc] = raw;
                 }
             }
+            resolvedTroops = troops;
             return true;
         }
 
@@ -829,10 +841,15 @@ namespace BlBridge
                 }
             }
 
-            /// <summary>按**追加**方式记录命令下发问题（不覆盖先前信息；与 LastError 同风格）。仅用于真错误。</summary>
+            /// <summary>
+            /// 按**追加**方式记录命令下发问题（不覆盖先前信息；与 LastError 同风格）。仅用于真错误。
+            /// 幂等（T6 修复轮 1 · nit6）：同一条整场只追加一次 —— 多轮重申会重复命中同一问题，
+            /// 否则 LastError 会累积重复串。追加语义不变，只是重复项被丢弃。
+            /// </summary>
             private static void AppendOrderError(string detail)
             {
                 string entry = "orders: " + detail;
+                if (LastError.Contains(entry)) return;
                 LastError = string.IsNullOrEmpty(LastError) ? entry : LastError + " | " + entry;
             }
 
