@@ -385,12 +385,18 @@ namespace BlBridge
         /// <summary>
         /// 把靶子的身甲换成 BodyItemId（每个 agent 只换一次）。
         ///
-        /// 为什么走 `SpawnEquipment.Clone` + `MissionEquipment.FillFrom`：
-        /// `MissionEquipment` 的索引器**只有 getter**（反编译核实），运行时无法单槽赋值；
-        /// 而 `Equipment.AddEquipmentToSlotWithoutAgent` 能改 `Equipment`，
-        /// `FillFrom(Equipment, Banner)` 能把整份装备灌进 agent（零 Harmony）。
-        /// 换完发一条 `dummy_swap` 记录**实际生效的物品与材质**——这是本参数的可观测落点
-        /// （否则又是一个"写了参数但没生效"的静默失效）。
+        /// 2026-09-24 反编译取证后改的落点：Warbandlord 的护甲/材质公式读的是
+        /// **`Agent.SpawnEquipment`**（`Warbandlord.decompiled.cs:7311 / 7372 / 11055`：
+        /// `TryGetFirstWarbandlordArmorEffect(this Equipment spawnEquipment, …)` 遍历
+        /// spawnEquipment 的护甲槽取 `MaterialType`），**不是** `MissionEquipment`。
+        /// 旧实现只做 `a.Equipment.FillFrom(...)` ⇒ 材质对照整批无效（Δ 中位 = 0.0），
+        /// 与"5 层串行稀释"无关（Warbandlord 是按部位取**第一个覆盖层**）。
+        ///
+        /// 新实现走引擎公开 API `Agent.UpdateSpawnEquipmentAndRefreshVisuals(Equipment)`
+        /// （`Agent.cs:3685` 起）：一次做完 SpawnEquipment 赋值 + MissionEquipment 同步
+        /// （内部 `Equipment.FillFrom`）+ 驱动属性重算 + 视觉刷新。零 Harmony；
+        /// 传进去的是我们自己 Clone 的副本 ⇒ 不会污染兵种模板。
+        /// 换完发一条 `dummy_swap`，记录**从 SpawnEquipment 读回**的实际物品与材质。
         /// </summary>
         private void ApplyBodyItem()
         {
@@ -423,20 +429,13 @@ namespace BlBridge
                 if (_swapped.Contains(a.Index)) continue;
                 try
                 {
+                    // 改 SpawnEquipment（Warbandlord 真正读的那份）；先 Clone 副本再改，
+                    // 避免碰到兵种模板共享的装备对象。
                     Equipment eq = a.SpawnEquipment.Clone(false);
                     eq.AddEquipmentToSlotWithoutAgent(EquipmentIndex.Body, new EquipmentElement(item));
-                    // 注意：Agent.Banner 是 ItemObject（旗子物品），不是 Banner ——
-                    // FillFrom 要的是 Banner，从阵型/队伍取（编译期实测踩到过）。
-                    Banner banner = null;
-                    try
-                    {
-                        if (a.Formation != null) banner = a.Formation.Banner;
-                        else if (a.Team != null) banner = a.Team.Banner;
-                    }
-                    catch
-                    {
-                    }
-                    a.Equipment.FillFrom(eq, banner);
+                    // 公开 API：SpawnEquipment + MissionEquipment + 驱动属性 + 视觉 一次性同步。
+                    // （不再手写 FillFrom —— 它的 Banner 参数还得从阵型/队伍绕，而且只覆盖一半。）
+                    a.UpdateSpawnEquipmentAndRefreshVisuals(eq);
                     _swapped.Add(a.Index);
                     n++;
                 }
@@ -470,7 +469,9 @@ namespace BlBridge
                         {
                             if (a == null || !a.IsActive() || !a.IsHuman) continue;
                             if (!IsDummy(a)) continue;
-                            MissionWeapon w = a.Equipment[EquipmentIndex.Body];
+                            // 读 **SpawnEquipment**：那是 Warbandlord 公式真正读的一份；
+                            // 读 MissionEquipment 只能证明"我们写过"，证明不了"公式看得见"。
+                            EquipmentElement w = a.SpawnEquipment[EquipmentIndex.Body];
                             if (w.Item == null)
                             {
                                 actualItem = "(empty)";
