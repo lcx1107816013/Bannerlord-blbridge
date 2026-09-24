@@ -145,7 +145,9 @@ def parse_dummy_armor(text):
 
 SQUAD_FORMATIONS = ("Infantry", "Ranged", "Cavalry", "HorseArcher", "Skirmisher",
                     "HeavyInfantry", "LightCavalry", "HeavyCavalry", "General", "Bodyguard")
-SQUAD_MOVEMENTS = ("charge", "advance", "hold", "fallback", "stop", "retreat")
+SQUAD_MOVEMENTS = ("charge", "advance", "fallback", "stop", "retreat")
+# 已移除的 movement 及其替代（补位提示，GC3）：只放这一条，别顺手加别的。
+REMOVED_MOVEMENTS = {"hold": "stop"}
 _FORMATION_BY_LOWER = dict((n.lower(), n) for n in SQUAD_FORMATIONS)
 
 
@@ -190,7 +192,11 @@ def parse_squad_groups(text):
         if len(fields) == 4 and fields[3]:
             movement = fields[3].lower()
             if movement not in SQUAD_MOVEMENTS:
-                raise ValueError("第 %d 组 %r 的 movement 未知：%r（可用：%s）"
-                                 % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS)))
+                hint = ""
+                if movement in REMOVED_MOVEMENTS:
+                    repl = REMOVED_MOVEMENTS[movement]
+                    hint = "—— %s 已移除（引擎层它本就等同 %s），请改用 %s" % (movement, repl, repl)
+                raise ValueError("第 %d 组 %r 的 movement 未知：%r（可用：%s）%s"
+                                 % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS), hint))
         out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
     return out

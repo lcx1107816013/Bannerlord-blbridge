@@ -7,12 +7,12 @@
   "capSec": 60,
   "configs": [
     {
-      "label": "two_groups_hold_vs_charge",
+      "label": "two_groups_stop_vs_charge",
       "attacker": "imperial_legionary",
       "a": 15,
       "defender": "battanian_wildling",
       "d": 15,
-      "attackerGroups": "imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge",
+      "attackerGroups": "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge",
       "defenderGroups": "battanian_wildling:15:Infantry:charge"
     }
   ]

@@ -289,22 +289,28 @@ def test_parse_squad_groups():
     就又是一次"参数静默失效"（2026-09-24 有 9 场实验正是这么作废的）。
     """
     import bl_common
-    g = bl_common.parse_squad_groups("imperial_legionary:10:Infantry:hold")
+    g = bl_common.parse_squad_groups("imperial_legionary:10:Infantry:stop")
     check(g == [{"troop": "imperial_legionary", "count": 10, "formation": "Infantry",
-                 "movement": "hold"}], "四字段组", g)
+                 "movement": "stop"}], "四字段组", g)
     g2 = bl_common.parse_squad_groups("khuzait_khans_guard:5")
     check(g2 == [{"troop": "khuzait_khans_guard", "count": 5, "formation": None,
                   "movement": None}], "两字段：formation/movement 缺省为 None", g2)
     g3 = bl_common.parse_squad_groups("a:1|b:2:HorseArcher")
     check(len(g3) == 2 and g3[1]["formation"] == "HorseArcher" and g3[0]["formation"] is None,
           "多组用 | 分隔、各组独立", g3)
-    g4 = bl_common.parse_squad_groups("a:1:infantry:HOLD")
-    check(g4[0]["formation"] == "Infantry" and g4[0]["movement"] == "hold",
+    g4 = bl_common.parse_squad_groups("a:1:infantry:STOP")
+    check(g4[0]["formation"] == "Infantry" and g4[0]["movement"] == "stop",
           "formation 大小写不敏感→规范名；movement 归小写", g4)
     check(bl_common.parse_squad_groups(None) == [] and bl_common.parse_squad_groups("   ") == [],
           "None / 纯空白 ⇒ 空列表")
+    # 移除 hold（2026-09-25 用户按编程规则批准）：写 hold 必须在解析期报错，且提示改用 stop。
+    try:
+        bl_common.parse_squad_groups("a:1:Infantry:hold")
+        check(False, "hold 必须被拒（已移除）")
+    except ValueError as e:
+        check("已移除" in str(e), "hold 报错信息必须含补位提示（已移除）", e)
     for bad, why in (("a", "字段数 1"),
-                     ("a:1:Infantry:hold:extra", "字段数 5"),
+                     ("a:1:Infantry:stop:extra", "字段数 5"),
                      ("a:0", "count=0"),
                      ("a:abc", "count 非整数"),
                      ("a:1:Infantryy", "未知 formation"),
@@ -422,12 +428,12 @@ def test_squad_plan_args():
     scene, orders, ps, cap = "battle_terrain_a", "charge", "attacker", 30
     base = {"attacker": "a", "defender": "b"}
     A = bl_batch.build_start_args({}, dict(base, attackerGroups=[
-        {"troop": "imperial_legionary", "count": 10, "formation": "Infantry", "movement": "hold"},
+        {"troop": "imperial_legionary", "count": 10, "formation": "Infantry", "movement": "stop"},
         {"troop": "khuzait_khans_guard", "count": 5},
     ]), scene, orders, ps, cap)
     check("--attacker-groups" in A, "组列表 ⇒ CLI --attacker-groups", A[-2:])
     dsl = A[A.index("--attacker-groups") + 1]
-    check(dsl == "imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5",
+    check(dsl == "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5",
           "组列表转 DSL（缺省字段省略）", dsl)
     check("--defender-groups" not in A, "只给攻方组时不产生守方参数")
     B = bl_batch.build_start_args({}, dict(base, defenderGroups="b:2:Ranged"),
@@ -441,7 +447,7 @@ def test_squad_plan_args():
     D = bl_batch.build_start_args({}, dict(base, attackerGroups="a:1"), scene, orders, ps, cap)
     check("--attacker-groups" in D, "无 rounds 时组参数不被早退分支吃掉", D[-2:])
     for bad in ([{"troop": "a"}],
-                [{"troop": "a", "count": 1, "movement": "hold"}],
+                [{"troop": "a", "count": 1, "movement": "stop"}],
                 [{"troop": "a", "count": 1, "bogus": 2}],
                 "a:0",
                 "a:1:Infantry:jump"):

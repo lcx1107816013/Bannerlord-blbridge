@@ -284,7 +284,7 @@ namespace BlBridge
 
         /// <summary>
         /// T6：每轮重申命令。有组 ⇒ 复用 T5 的 ScenarioProbe.ApplyOrders（按"该组兵种的实际编队"
-        /// 下发，内部已处理 hold 降级与落点错误记录）；无组 ⇒ 旧 ApplyCharge 原样（GC2）。
+        /// 下发，内部已处理落点错误记录）；无组 ⇒ 旧 ApplyCharge 原样（GC2）。
         /// </summary>
         private static void ApplyRoundOrders(Team team, List<SquadSpec> specs)
         {

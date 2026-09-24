@@ -70,7 +70,7 @@ def main(argv):
                         "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
     p.add_argument("--attacker-groups", dest="attacker_groups", default=None,
                    help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
-                        '如 "imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge"'
+                        '如 "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
                         "（给了它则 --attacker/--a 被忽略；非法直接报错，不静默跳过）")
     p.add_argument("--defender-groups", dest="defender_groups", default=None,
                    help="守方多兵种/战术组，语法同 --attacker-groups（给了它则 --defender/--d 被忽略）")

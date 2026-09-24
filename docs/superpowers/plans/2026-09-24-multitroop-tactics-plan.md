@@ -13,8 +13,8 @@
     ⚠️ **修订（2026-09-24 23:5x，用户批准路 A）**：`IAgentOriginBase` 无 formation 成员、
     编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定 ⇒ 该字段**不能下发**，
     语义降级为"**解析时校验 + 日志里记录实际编队**"（GC4 的观测量不受影响）。
-  - `movement`：`charge | advance | hold | fallback | stop | retreat`（小写；映射见 T4）
-  - 示例：`imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge`
+  - `movement`：`charge | advance | hold | fallback | stop | retreat`（小写；映射见 T4）（⚠️ `hold` 已移除，见下方勘误）
+  - 示例：`imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge`
   - 缺省：省略 `formation` ⇒ 引擎默认编队；省略 `movement` ⇒ `charge`
 - **GC2 向后兼容**：旧 plan 字段 `attacker`/`a`/`defender`/`d` 的行为**逐字节不变**
   （等价于单组：`formation` 缺省、`movement=charge`）。旧 plan 必须仍能跑出与今天一致的结果。
@@ -148,8 +148,9 @@ internal sealed class SquadSpec {
 > **movement 落点（用户裁决）**：按「该组兵种的**实际编队**」下发；同一实际编队被多组以不同 movement 命中 ⇒ **报错中止**；
 > `groups` 与 `orders != "charge"` 不得混用 ⇒ 报错。
 > **`hold` 落点（引擎能力边界）**：`MovementOrder` 只暴露 Charge/Retreat/Stop/Advance/FallBack/Null，且 ctor 全 private
-> ⇒ `hold` 落 `MovementOrderStop`（等价 `stop`），并在 `OrderNotes` 里留可读回提示。
-> **是否保留 DSL 的 `hold` 一词仍待用户最终裁决**（保留 = 现状、零改动；移除 = 需同步改 GC1 + T1/T4 与 Python 断言）。
+> ⇒ `hold` 落 `MovementOrderStop`（等价 `stop`）。
+> **2026-09-25 已裁决：移除**（用户按编程规则批准：接口正交性 / Fail Fast / 数据语义）⇒ DSL 只留 5 个 movement，
+> 写 `hold` 在解析期报错并提示用 `stop`。
 > 执行记录（T5–T8 提交 `ab5c3a3` / `20e8d1e` / `8af3989` / `d2c8623`）见 `.sdd/2026-09-24-multitroop-tactics-plan/progress.md`。
 
 **规格**（⚠️ 以下三条已作废，见上方勘误）：
@@ -205,10 +206,10 @@ internal sealed class SquadSpec {
 
 **判据（全部要有）**：
 1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
-2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:hold` + `khuzait_khans_guard:5:HorseArcher:charge`）
+2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:stop` + `khuzait_khans_guard:5:HorseArcher:charge`）
    ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
 3. `unit` 事件的 `formation` 与 `squad` 一致（10 个 Infantry、5 个 HorseArcher）；
-4. **行为可辨**：`hold` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
+4. **行为可辨**：`stop` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
 5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件为单组 + `movement=charge`，
    且 `end.validity.verdict = ok`、`nanCount = 0`、坏行 0。
 

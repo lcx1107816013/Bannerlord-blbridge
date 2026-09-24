@@ -163,9 +163,9 @@ internal static class GuardTest
 
         Console.WriteLine();
         Console.WriteLine("⑨ SquadSpec：多兵种/战术组 DSL（非法必须抛，绝不静默回落）");
-        var q1 = SquadSpec.Parse("imperial_legionary:10:Infantry:hold");
+        var q1 = SquadSpec.Parse("imperial_legionary:10:Infantry:stop");
         Check(q1.Count == 1 && q1[0].Troop == "imperial_legionary" && q1[0].Count == 10
-              && q1[0].Formation == "Infantry" && q1[0].Movement == "hold",
+              && q1[0].Formation == "Infantry" && q1[0].Movement == "stop",
               "四字段组", q1.Count > 0 ? q1[0].Formation + "/" + q1[0].Movement : "-");
         var q2 = SquadSpec.Parse("khuzait_khans_guard:5");
         Check(q2.Count == 1 && q2[0].Formation == null && q2[0].Movement == null,
@@ -173,12 +173,12 @@ internal static class GuardTest
         var q3 = SquadSpec.Parse("a:1|b:2:HorseArcher");
         Check(q3.Count == 2 && q3[1].Formation == "HorseArcher" && q3[0].Formation == null,
               "多组用 | 分隔、各组独立");
-        var q4 = SquadSpec.Parse("a:1:infantry:HOLD");
-        Check(q4[0].Formation == "Infantry" && q4[0].Movement == "hold",
+        var q4 = SquadSpec.Parse("a:1:infantry:STOP");
+        Check(q4[0].Formation == "Infantry" && q4[0].Movement == "stop",
               "大小写不敏感 → formation 回规范名、movement 归小写");
         Check(SquadSpec.Parse("").Count == 0 && SquadSpec.Parse(null).Count == 0,
               "空串 / null ⇒ 空列表");
-        string[] badDsl = new string[] { "a", "a:1:Infantry:hold:extra", "a:0", "a:abc",
+        string[] badDsl = new string[] { "a", "a:1:Infantry:stop:extra", "a:0", "a:abc",
                                          "a:1:Infantryy", "a:1:Infantry:jump", "a:1||b:2", ":1" };
         foreach (string bad in badDsl)
         {
@@ -187,6 +187,14 @@ internal static class GuardTest
             catch (ArgumentException) { threw = true; }
             Check(threw, "非法组串抛 ArgumentException: " + bad);
         }
+
+        // 移除 hold（2026-09-25 用户按编程规则批准）：写 hold 必须在解析期抛错并提示改用 stop。
+        bool holdThrew = false;
+        string holdMsg = "";
+        try { SquadSpec.Parse("a:1:Infantry:hold"); }
+        catch (ArgumentException ex) { holdThrew = true; holdMsg = ex.Message; }
+        Check(holdThrew && holdMsg.IndexOf("已移除", StringComparison.Ordinal) >= 0,
+              "hold 已移除：必须抛 ArgumentException 且提示改用 stop", holdMsg);
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "结果: 全部通过" : "结果: 失败 " + _fail + " 项");

@@ -17,7 +17,7 @@ namespace BlBridge
     /// formation（`TaleWorlds.Core.FormationClass` 的名字，大小写不敏感）：
     ///   Infantry / Ranged / Cavalry / HorseArcher / Skirmisher /
     ///   HeavyInfantry / LightCavalry / HeavyCavalry / General / Bodyguard
-    /// movement：charge / advance / hold / fallback / stop / retreat
+    /// movement：charge / advance / fallback / stop / retreat
     /// 缺省：`Formation = null`（引擎按兵种决定编队）、`Movement = null`（调用方按 charge 处理）。
     /// </summary>
     internal sealed class SquadSpec
@@ -32,7 +32,11 @@ namespace BlBridge
             "HeavyInfantry", "LightCavalry", "HeavyCavalry", "General", "Bodyguard"
         };
         private static readonly string[] Movements = new string[] {
-            "charge", "advance", "hold", "fallback", "stop", "retreat"
+            "charge", "advance", "fallback", "stop", "retreat"
+        };
+        // 已移除的 movement 及其替代（补位提示，GC3）：只放这一条，别顺手加别的。
+        private static readonly Dictionary<string, string> RemovedMovements = new Dictionary<string, string> {
+            { "hold", "stop" }
         };
 
         internal static List<SquadSpec> Parse(string dsl)
@@ -77,8 +81,16 @@ namespace BlBridge
             for (int i = 0; i < names.Length; i++)
                 if (string.Equals(names[i], raw, StringComparison.OrdinalIgnoreCase))
                     return names[i];
+            string hint = "";
+            if (what == "movement")
+            {
+                string replacement;
+                if (RemovedMovements.TryGetValue(raw.ToLowerInvariant(), out replacement))
+                    hint = "—— " + raw.ToLowerInvariant() + " 已移除（引擎层它本就等同 " + replacement
+                           + "），请改用 " + replacement;
+            }
             throw new ArgumentException("第 " + n + " 组 '" + part + "' 的 " + what + " 未知：'" + raw
-                                        + "'（可用：" + string.Join(", ", names) + "）");
+                                        + "'（可用：" + string.Join(", ", names) + "）" + hint);
         }
     }
 }

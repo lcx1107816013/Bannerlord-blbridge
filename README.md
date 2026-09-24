@@ -59,7 +59,7 @@ BlBridge/
   tools/plan.swap_sides.example.json 跑批计划示例（多轮攻守互换：rounds 2 + roundSwap，每轮一个文件）
   tools/plan.mirror.example.json   跑批计划示例（镜像双跑：两个 config 互换攻守，供 bl_compare 分解位置效应）
   tools/plan.mirror2.example.json  跑批计划示例（同上，第二对兵种：cataphract vs fian_champion）
-  tools/plan.multitroop.example.json 跑批计划示例（多兵种/战术组：attackerGroups/defenderGroups DSL，含 hold 与 charge 两组）
+  tools/plan.multitroop.example.json 跑批计划示例（多兵种/战术组：attackerGroups/defenderGroups DSL，含 stop 与 charge 两组）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json

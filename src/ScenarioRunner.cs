@@ -33,8 +33,6 @@ namespace BlBridge
         // ── 当前运行态 ───────────────────────────────────────────────────
         internal static string State = RunStateIdle;
         internal static string LastError = "";
-        // T5 修复轮 2 · nit-2：命令下发的"提示"（如 hold 降级）写这里，不污染 lastError
-        internal static string OrderNotes = "";
         internal static string StartedUtc = "";
         internal static string AttackerTroop = "";
         internal static string DefenderTroop = "";
@@ -73,7 +71,6 @@ namespace BlBridge
             sb.Append("{\"state\":").Append(Protocol.Q(State));
             sb.Append(",\"busy\":").Append(Jw.B(Busy));
             sb.Append(",\"lastError\":").Append(Protocol.Q(LastError));
-            sb.Append(",\"orderNotes\":").Append(Protocol.Q(OrderNotes));
             sb.Append(",\"requestId\":").Append(Protocol.Q(_currentRequestId));
             sb.Append(",\"startedUtc\":").Append(Protocol.Q(StartedUtc));
             sb.Append(",\"elapsedSec\":").Append(Jw.N((float)ElapsedSeconds()));
@@ -335,7 +332,6 @@ namespace BlBridge
                 DefenderCount = dCount;
                 DurationCapSeconds = capSec;
                 LastError = "";
-                OrderNotes = "";
                 ResultJson = "null";
                 AttackerInitial = -1;
                 DefenderInitial = -1;
@@ -631,7 +627,7 @@ namespace BlBridge
         /// 逐组校验：兵种 id 可解析（否则 unknown_troop），以及"同一实际编队被多组以不同 movement
         /// **落点**命中"⇒ conflicting_movements（§3 用户裁决 A）。落点编队 = Resolve(troop).GetFormationClass()，
         /// 不是 DSL 里写的 formation 字段。
-        /// 冲突比较用 MapMovement 映射后的落点（修复轮 1 · M2）：hold 与 stop 都落 MovementOrderStop ⇒ 不算冲突。
+        /// 冲突比较用 MapMovement 映射后的落点（修复轮 1 · M2）：不同 movement 若落同一点不算冲突。
         /// rawSegments：该方 DSL 按 | 切分的原始片段（与 specs 下标一致），用于逐字回显（修复轮 1 · m2）。
         /// T6：resolvedTroops 带出逐组 Resolve 的兵种对象（下标与 specs 一一对应），
         /// 供多轮编排器按组重生复用，避免重复解析。
@@ -897,12 +893,6 @@ namespace BlBridge
                     }
                     string mv = s.Movement == null ? "charge" : s.Movement;
                     f.SetMovementOrder(MapMovement(mv));
-                    if (mv == "hold")
-                    {
-                        // 修复轮 2 · nit-2：hold 降级是"提示"而非"错误" ⇒ 写 OrderNotes，不污染 lastError；
-                        // 修复轮 2 · nit-3：AppendOrderNote 幂等，整场只追加一次。
-                        AppendOrderNote("movement=hold 已降级为 MovementOrderStop（引擎无 Hold 实例）");
-                    }
                 }
             }
 
@@ -919,28 +909,13 @@ namespace BlBridge
             }
 
             /// <summary>
-            /// 记录命令下发的"非错误提示"（如 hold 降级），写入独立的 OrderNotes（不污染 LastError）。
-            /// 幂等：同一条提示整场只追加一次（修复轮 2 · nit-2 / nit-3）。
-            /// </summary>
-            private static void AppendOrderNote(string detail)
-            {
-                string entry = "orders: " + detail;
-                if (OrderNotes.Contains(entry)) return;
-                OrderNotes = string.IsNullOrEmpty(OrderNotes) ? entry : OrderNotes + " | " + entry;
-            }
-
-            /// <summary>
             /// DSL movement → 引擎 MovementOrder。缺省 charge。
-            /// ⚠️ 引擎 MovementOrderEnum 无 Hold，也没有公开 ctor（MovementOrder 的构造函数全是 private），
-            ///    因此 hold 落到语义最接近的 MovementOrderStop（= OrderType.StandYourGround，原地不动）。
-            ///    这一点与 brief §4.5 的 "MovementOrderHold" 有出入，见 task-5-report.md 的 NEEDS_CONTEXT。
             /// </summary>
             internal static MovementOrder MapMovement(string movement)
             {
                 switch (movement)
                 {
                     case "advance": return MovementOrder.MovementOrderAdvance;
-                    case "hold": return MovementOrder.MovementOrderStop;
                     case "fallback": return MovementOrder.MovementOrderFallBack;
                     case "stop": return MovementOrder.MovementOrderStop;
                     case "retreat": return MovementOrder.MovementOrderRetreat;

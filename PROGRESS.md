@@ -1088,7 +1088,7 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 - `formation`：`FormationClass` 的引擎名，**大小写不敏感**；取值只允许
   `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`。
   省略 ⇒ 引擎按兵种决定编队。
-- `movement`：`charge | advance | hold | fallback | stop | retreat`（小写）。省略 ⇒ `charge`。
+- `movement`：`charge | advance | fallback | stop | retreat`（小写）。省略 ⇒ `charge`。
 - plan 里值可以是 **DSL 字符串**或**组列表**（每项 dict 含 `troop/count/formation/movement`）；
   是列表时先转成 DSL 字符串再解析（**只有一条解析路径**）。
 
@@ -1097,9 +1097,7 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 1. **`formation` 不能下发** —— `IAgentOriginBase` 的 18 个成员里**没有 formation**；编队由
    `BasicCharacterObject.GetFormationClass()` 按兵种决定（那是引擎 `virtual`，改它会污染共享的
    `CharacterObject`，不可取）⇒ `formation` 只做**解析时校验 + 日志里记录实际编队**（GC4 观测量不受影响）。
-2. **`hold` 落 `MovementOrderStop`** —— 引擎 `MovementOrder` 只暴露
-   `Charge/Retreat/Stop/Advance/FallBack/Null`，且 ctor 全 private ⇒ `hold` 与 `stop` 等价，
-   降级提示在 `OrderNotes` 里**可读回**。
+2. **`hold` 已移除**（2026-09-25，用户按编程规则批准）—— 写 `hold` 在解析期报错并提示改用 `stop`；引擎层 `hold` 本来就等于 `stop`（`MovementOrder` 无 Hold 实例）。
 
 ### 2. Global Constraints（GC1–GC6，逐字照计划）
 
@@ -1111,8 +1109,8 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
     ⚠️ **修订（2026-09-24 23:5x，用户批准路 A）**：`IAgentOriginBase` 无 formation 成员、
     编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定 ⇒ 该字段**不能下发**，
     语义降级为"**解析时校验 + 日志里记录实际编队**"（GC4 的观测量不受影响）。
-  - `movement`：`charge | advance | hold | fallback | stop | retreat`（小写；映射见 T4）
-  - 示例：`imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge`
+  - `movement`：`charge | advance | fallback | stop | retreat`（小写；映射见 T4）
+  - 示例：`imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge`
   - 缺省：省略 `formation` ⇒ 引擎默认编队；省略 `movement` ⇒ `charge`
 - **GC2 向后兼容**：旧 plan 字段 `attacker`/`a`/`defender`/`d` 的行为**逐字节不变**
   （等价于单组：`formation` 缺省、`movement=charge`）。旧 plan 必须仍能跑出与今天一致的结果。
@@ -1140,12 +1138,12 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 
 1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
    结果：（待 T9）
-2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:hold` + `khuzait_khans_guard:5:HorseArcher:charge`）
+2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:stop` + `khuzait_khans_guard:5:HorseArcher:charge`）
    ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
    结果：（待 T9）
 3. `unit` 事件的 `formation` 与 `squad` 一致（10 个 Infantry、5 个 HorseArcher）；
    结果：（待 T9）
-4. **行为可辨**：`hold` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
+4. **行为可辨**：`stop` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
    结果：（待 T9）
 5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件为单组 + `movement=charge`，
    且 `end.validity.verdict = ok`、`nanCount = 0`、坏行 0。
@@ -1160,3 +1158,4 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
   （`out\BlBridge.dll` 与模块目录 DLL sha256 逐字一致）。
 - `b775b08` —— **计划勘误**：§T5 规格段三处作废（self-spawn / 位置分段 / 指定编队）+ movement/`hold` 落点裁决。
 - `7fc8157` —— **T10**：文档与示例 plan（`README.md` §七 事件格式 + `tools/plan.multitroop.example.json`）。
+- **T11**：移除 DSL 的 `hold`（引擎层本就等同 `stop`）—— 写 `hold` 在解析期报错并提示改用 `stop`；连带删除 `OrderNotes`/`AppendOrderNote`/`orderNotes`（唯一用户消失）；文档/测试同步为 5 词。
