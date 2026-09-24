@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 各工具共享的 I/O 与格式化小函数（不含任何指标逻辑）。
 
@@ -75,17 +75,22 @@ def fmt(v, nd=1, dash="-"):
     return str(v)
 
 def safe_streams():
-    """让 stdout/stderr 在 GBK 控制台下不因无法编码的字符而崩溃。
+    """把 stdout/stderr 固定为 **UTF-8 输出**（errors="replace" 只兜底极端字符）。
 
-    默认中文 Windows 控制台（locale=gbk）下，输出里的 ⚠️ / ✅ / 箭头符号会抛
-    UnicodeEncodeError，整个 CLI exit 1（2026-09-24 实测：bl_metrics.py 与
-    bl_compare.py 都中过）。只改 errors 不改 encoding：中文照常可读，
-    编不出的字符降级成问号。
+    为什么必须显式设：Windows 上 Python 的 stdout 默认用 **locale 编码**（简中是 cp936），
+    于是脚本写出的是 GBK 字节。而本项目的输出消费端是**调用这些工具的 AI / 管道**
+    （**本机实测**：系统 `chcp 936` / ANSI `gb2312`，而宿主 PowerShell 5.1 的
+    `[Console]::OutputEncoding` 是 `utf-8`，Python 却默认按 locale(cp936) 写 ⇒ 写入/读取不一致；
+    重定向、CI、别的 agent 捕获同理）—— **写入编码 ≠ 读取编码，中文就整片变成 U+FFFD**。
+    所以这里统一按 UTF-8 写，与 `bl_mcp.py` 的入口口径一致（那里一开始就是 utf-8）。
+
+    历史（别再走回去）：旧版只 `reconfigure(errors="replace")`、宣称"中文照常可读"——
+    那只在 GBK 控制台成立，一离开就乱码（2026-09-25 实测：GBK 字节被按 UTF-8 解 ⇒ 满屏 U+FFFD）。
     """
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
 
@@ -135,4 +140,68 @@ def parse_dummy_armor(text):
             out[DUMMY_ARMOR_PARTS[k]] = float(v)
         except ValueError:
             raise ValueError("部位 %s 的值不是数字：%r" % (k, v))
+    return out
+
+
+# ── 多兵种 / 战术组（v0.8.8）：扁平字符串 DSL ─────────────────────────────
+# 为什么是字符串而不是嵌套 JSON：C# 侧的自研解析器 `Jmini` 只读**裸值**——把字符串
+# 传给它既不报错也不生效（静默用 fallback），嵌套结构更传不过去。这与
+# `--dummy-armor head=45,torso=35` 是同一套思路（2026-09-24 的 9 场实验就是这么废掉的）。
+
+SQUAD_FORMATIONS = ("Infantry", "Ranged", "Cavalry", "HorseArcher", "Skirmisher",
+                    "HeavyInfantry", "LightCavalry", "HeavyCavalry", "General", "Bodyguard")
+SQUAD_MOVEMENTS = ("charge", "advance", "fallback", "stop", "retreat")
+# 已移除的 movement 及其替代（补位提示，GC3）：只放这一条，别顺手加别的。
+REMOVED_MOVEMENTS = {"hold": "stop"}
+_FORMATION_BY_LOWER = dict((n.lower(), n) for n in SQUAD_FORMATIONS)
+
+
+def parse_squad_groups(text):
+    """解析 ``troop:count[:formation[:movement]]``（多组用 ``|``）→ list[dict]。
+
+    ``formation`` 大小写不敏感、回写为规范名（GC1）；两个可选字段缺省时是 None
+    （默认值由调用方决定：C# 侧编队走引擎默认、movement 走 ``charge``）。
+    **非法输入一律抛 ValueError，绝不静默丢弃** —— 理由同 parse_dummy_armor。
+    """
+    if text is None:
+        return []
+    if not isinstance(text, str):
+        raise ValueError("组串必须是字符串，收到 %s" % type(text).__name__)
+    if not text.strip():
+        return []
+    out = []
+    for idx, part in enumerate(text.split("|"), 1):
+        part = part.strip()
+        if not part:
+            raise ValueError("第 %d 组为空（应为 troop:count[:formation[:movement]]，多组用 | 分隔）" % idx)
+        fields = [f.strip() for f in part.split(":")]
+        if len(fields) not in (2, 3, 4):
+            raise ValueError("第 %d 组 %r 的字段数 = %d，应为 troop:count[:formation[:movement]]"
+                             % (idx, part, len(fields)))
+        troop, cnt = fields[0], fields[1]
+        if not troop:
+            raise ValueError("第 %d 组 %r 缺少兵种 id" % (idx, part))
+        try:
+            count = int(cnt)
+        except ValueError:
+            raise ValueError("第 %d 组 %r 的 count 不是整数：%r" % (idx, part, cnt))
+        if count < 1:
+            raise ValueError("第 %d 组 %r 的 count 必须 ≥1，收到 %d" % (idx, part, count))
+        formation = None
+        if len(fields) >= 3 and fields[2]:
+            formation = _FORMATION_BY_LOWER.get(fields[2].lower())
+            if formation is None:
+                raise ValueError("第 %d 组 %r 的 formation 未知：%r（可用：%s）"
+                                 % (idx, part, fields[2], ", ".join(SQUAD_FORMATIONS)))
+        movement = None
+        if len(fields) == 4 and fields[3]:
+            movement = fields[3].lower()
+            if movement not in SQUAD_MOVEMENTS:
+                hint = ""
+                if movement in REMOVED_MOVEMENTS:
+                    repl = REMOVED_MOVEMENTS[movement]
+                    hint = "—— %s 已移除（引擎层它本就等同 %s），请改用 %s" % (movement, repl, repl)
+                raise ValueError("第 %d 组 %r 的 movement 未知：%r（可用：%s）%s"
+                                 % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS), hint))
+        out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
     return out

@@ -19,11 +19,18 @@ namespace BlBridge
     ///      这跟刚修完的「死因偏差」是同一类坑，所以必须留标记、不靠猜。
     ///   2. 残兵就地死亡（`Agent.Die`），保持战场清洁
     ///   3. 递增轮次 → 通知遥测**换一个日志文件**（每轮独立、零污染）
-    ///   4. 按配置重生两队（`Mission.SpawnAgent` + `AgentBuildData`，可指定进场位置）
-    ///   5. 重设双方战术为 TacticCharge（与首轮对称化口径一致）
+    ///   4. 重生两队：给了 `*Squads` 的一方**按组**重生（每组按 `SquadSpec.Count`，第 i 组基点
+    ///      沿 x 平移 `i * 12f`），没给的一方沿用旧单值路径（`Mission.SpawnAgent` + `AgentBuildData`）
+    ///   5. 重申战术：给了 `*Squads` 的一方**按组**重申 movement（复用 `ScenarioProbe.ApplyOrders`），
+    ///      没给的一方沿用旧 TacticCharge（对称化口径不变）
     ///
     /// ⚠️ 多轮模式下**不能挂 `AgentVictoryLogic`** —— 它会在"一方全灭"时结束 mission，
     /// 而多轮恰恰要在一方全灭后继续。见 `ScenarioRunner.CreateBehaviors`。
+    ///
+    /// ⚠️ **第 2 轮起重生的 agent 没有 `IAgentOriginBase`**：重生走 `Mission.SpawnAgent`，
+    ///    不经 `IMissionTroopSupplier` ⇒ per-group combatant / 组级 supplier 只覆盖**第 1 轮**。
+    ///    因此 `squad` / `spawned` 一类统计**必须从 `Team.ActiveAgents` 侧数**（T7 的口径，
+    ///    见 `task-6-report.md` §2.1）。
     ///
     /// 零 Harmony：全部走公开 API（`Mission.SpawnAgent` / `AgentBuildData` / `Agent.Die`）。
     /// </summary>
@@ -49,6 +56,14 @@ namespace BlBridge
         internal static int AttackerCount = 0;
         internal static int DefenderCount = 0;
 
+        // ── T6：多轮按组重生 / 每轮按组重申（null = 旧单值路径，GC2）──────────────
+        /// <summary>该方的组规格；null 或空 ⇒ 该方按单值 AttackerChar/AttackerCount 重生。</summary>
+        internal static List<SquadSpec> AttackerSquads = null;
+        internal static List<SquadSpec> DefenderSquads = null;
+        /// <summary>与上面 Squads 下标一一对应的兵种（= Start() 校验阶段 Resolve 的结果）。</summary>
+        internal static List<BasicCharacterObject> AttackerSquadTroops = null;
+        internal static List<BasicCharacterObject> DefenderSquadTroops = null;
+
         internal static bool Enabled
         {
             get { return Rounds > 1; }
@@ -59,7 +74,6 @@ namespace BlBridge
         private int _round = 1;
         private int _cleanupDeaths;
         private bool _finished;
-        private bool _started;
 
         public override void OnMissionTick(float dt)
         {
@@ -86,7 +100,6 @@ namespace BlBridge
             int d = CountAlive(m.DefenderTeam);
             if (a < 0 || d < 0) return;            // 队伍还没建好
             if (a + d == 0) return;                // 还没生成（首轮加载中）
-            _started = true;
             if (a > EndAlive && d > EndAlive) return;
 
             if (_round >= Rounds)
@@ -175,17 +188,123 @@ namespace BlBridge
             int defN = swapped ? AttackerCount : DefenderCount;
             Vec3? atkPos = swapped ? SpawnDefender : SpawnAttacker;
             Vec3? defPos = swapped ? SpawnAttacker : SpawnDefender;
-            Spawn(m, m.AttackerTeam, atkCh, atkN, atkPos, true);
-            Spawn(m, m.DefenderTeam, defCh, defN, defPos, false);
 
-            // 4) 重设战术：与首轮同一口径（双方对称冲锋）
-            ApplyCharge(m.AttackerTeam);
-            ApplyCharge(m.DefenderTeam);
+            // T6：有组 ⇒ 逐组重生；无组 ⇒ 旧单值 Spawn（逐字节不变，GC2）。
+            //     两组列表与 troop 列表随 swap 一起互换（与上面 atkCh/defCh 的互换语义一致）。
+            List<SquadSpec> atkSquads = swapped ? DefenderSquads : AttackerSquads;
+            List<BasicCharacterObject> atkTroops = swapped ? DefenderSquadTroops : AttackerSquadTroops;
+            List<SquadSpec> defSquads = swapped ? AttackerSquads : DefenderSquads;
+            List<BasicCharacterObject> defTroops = swapped ? AttackerSquadTroops : DefenderSquadTroops;
+            // T7：逐组记录**实际重生成功数**，供 squad 事件（source="respawn"）。
+            int[] atkSpawned = null;
+            int[] defSpawned = null;
+            if (HasSquads(atkSquads)) atkSpawned = SpawnGroups(m, m.AttackerTeam, atkSquads, atkTroops, atkPos, true);
+            else Spawn(m, m.AttackerTeam, atkCh, atkN, atkPos, true);
+            if (HasSquads(defSquads)) defSpawned = SpawnGroups(m, m.DefenderTeam, defSquads, defTroops, defPos, false);
+            else Spawn(m, m.DefenderTeam, defCh, defN, defPos, false);
+
+            // 4) 重设战术：与首轮同一口径。有组 ⇒ 按组重申 movement（与重生同组同 swap）；
+            //    无组 ⇒ 旧 ApplyCharge 原样（GC2）。
+            ApplyRoundOrders(m.AttackerTeam, atkSquads);
+            ApplyRoundOrders(m.DefenderTeam, defSquads);
+
+            // 5) T7：重生完成后写两侧的 squad 事件（source="respawn"，spawned = 实际成功次数）。
+            //    无组的一方 specs 为 null ⇒ 该侧不写（GC2）。
+            TelemetryBehavior.WriteSquadEvents(_round, "respawn",
+                atkSquads, atkTroops, atkSpawned, defSquads, defTroops, defSpawned);
         }
 
-        private static void Spawn(Mission m, Team team, BasicCharacterObject ch, int count, Vec3? pos, bool attackerSide)
+        /// <summary>该方是否有可用的组规格（null / 空 ⇒ 走旧单值路径）。</summary>
+        private static bool HasSquads(List<SquadSpec> specs)
         {
-            if (m == null || team == null || ch == null || count <= 0) return;
+            return specs != null && specs.Count > 0;
+        }
+
+        /// <summary>
+        /// T6：按组重生。第 i 组的基点 = 该方基点**沿 x 平移 i*12f**（y/z 不变；brief §3.2 定死的口径）。
+        /// 基点无值 ⇒ 传 null（沿用引擎默认，与旧路径一致）。组内铺开仍由 Spawn() 自身完成。
+        /// 防御分支：`specs[i]` / 对应 troop 缺失时**不静默** —— 写一条 `round_spawn_group_skipped`
+        /// 事件（含 round / 第几组 / 原因）后跳过该组，绝不无痕少一组（GC3；Start() 已保证正常路径不可达）。
+        /// </summary>
+        private int[] SpawnGroups(Mission m, Team team, List<SquadSpec> specs,
+            List<BasicCharacterObject> troops, Vec3? basePos, bool attackerSide)
+        {
+            if (!HasSquads(specs)) return null;
+            // T7：逐组记录**实际 SpawnAgent 成功次数**，作为该轮 squad 事件的 spawned（source="respawn"）。
+            int[] spawned = new int[specs.Count];
+            for (int i = 0; i < specs.Count; i++)
+            {
+                SquadSpec s = specs[i];
+                if (s == null)
+                {
+                    RoundLogGroupSkip(i + 1, "spec 为空");
+                    continue;
+                }
+                BasicCharacterObject troop = (troops != null && i < troops.Count) ? troops[i] : null;
+                if (troop == null)
+                {
+                    // troops 与 specs 本应一一对应（Start() 保证）；缺失 = 防御分支，必须留痕。
+                    RoundLogGroupSkip(i + 1, "troop 缺失（Squads 与 SquadTroops 下标应一一对应）");
+                    continue;
+                }
+                Vec3? pos = null;
+                if (basePos.HasValue)
+                {
+                    Vec3 p = basePos.Value;
+                    p.x = basePos.Value.x + (float)i * 12f;   // 只改 x：y/z 与基点相同
+                    pos = p;
+                }
+                spawned[i] = Spawn(m, team, troop, s.Count, pos, attackerSide);
+            }
+            return spawned;
+        }
+
+        /// <summary>
+        /// T6 · 修复轮 1 · minor3：按组重生"跳过一组"的可观测事件（绝不静默）。
+        /// group1based 用 1 基编号（与错误消息"第 N 组"一致）。
+        /// </summary>
+        private void RoundLogGroupSkip(int group1based, string reason)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"t\":\"round_spawn_group_skipped\"");
+                sb.Append(",\"time\":").Append(Jw.N(_elapsed));
+                sb.Append(",\"round\":").Append(Jw.N(_round));
+                sb.Append(",\"rounds\":").Append(Jw.N(Rounds));
+                sb.Append(",\"group\":").Append(Jw.N(group1based));
+                sb.Append(",\"reason\":").Append(Protocol.Q(reason));
+                sb.Append('}');
+                Jw.Write(sb.ToString());
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// T6：每轮重申命令。有组 ⇒ 复用 T5 的 ScenarioProbe.ApplyOrders（按"该组兵种的实际编队"
+        /// 下发，内部已处理落点错误记录）；无组 ⇒ 旧 ApplyCharge 原样（GC2）。
+        /// </summary>
+        private static void ApplyRoundOrders(Team team, List<SquadSpec> specs)
+        {
+            if (team == null) return;
+            if (HasSquads(specs))
+            {
+                ScenarioRunner.ScenarioProbe.ApplyOrders(team, specs);
+                return;
+            }
+            ApplyCharge(team);
+        }
+
+        /// <summary>
+        /// 单值 / 单组重生。⚠️ 走 `Mission.SpawnAgent` ⇒ 生成出的 agent **没有 `IAgentOriginBase`**：
+        /// 它不在 `IMissionTroopSupplier` 的口径里（第 2 轮起尤其如此，见类注释与 `task-6-report.md` §2.1）。
+        /// </summary>
+        private static int Spawn(Mission m, Team team, BasicCharacterObject ch, int count, Vec3? pos, bool attackerSide)
+        {
+            if (m == null || team == null || ch == null || count <= 0) return 0;
+            int spawned = 0;
             for (int i = 0; i < count; i++)
             {
                 try
@@ -202,12 +321,14 @@ namespace BlBridge
                         data = data.InitialPosition(p)
                                    .InitialDirection(new Vec2(attackerSide ? 1f : -1f, 0f));
                     }
-                    m.SpawnAgent(data);
+                    Agent a = m.SpawnAgent(data);
+                    if (a != null) spawned++;
                 }
                 catch
                 {
                 }
             }
+            return spawned;
         }
 
         private static void ApplyCharge(Team team)
@@ -273,6 +394,10 @@ namespace BlBridge
             DefenderChar = null;
             AttackerCount = 0;
             DefenderCount = 0;
+            AttackerSquads = null;
+            DefenderSquads = null;
+            AttackerSquadTroops = null;
+            DefenderSquadTroops = null;
         }
     }
 }

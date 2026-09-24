@@ -211,7 +211,7 @@ def test_mirror_cross_check():
 
 
 def test_compare_manifest_runs():
-    """bl_compare 的**接入层**必须跑得通，且在默认中文控制台（GBK）下也不能崩。
+    """bl_compare 的**接入层**必须跑得通，且在不设编码环境变量时也不能崩（子进程自己钉 UTF-8）。
 
     2026-09-24 踩坑：只测纯函数 mirror_cross_check 远远不够 —— main() 里
     `stats` 结构改了（多了 cfg）却漏改一处解包，纯函数测试全绿而 CLI 直接崩。
@@ -237,14 +237,14 @@ def test_compare_manifest_runs():
         with io.open(path, "w", encoding="utf-8") as fh:
             json.dump(man, fh, ensure_ascii=False)
         env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "gbk"          # 默认中文 Windows 控制台
-        # 子进程带着 PYTHONIOENCODING=gbk ⇒ 它的输出是 **GBK 字节**，必须按 gbk 解码；
-        # 按 utf-8 解码会让中文全成乱码、断言假失败（2026-09-24 自己踩过）。
+        env.pop("PYTHONIOENCODING", None)        # 不设编码环境变量：子进程自己钉 UTF-8
+        # 子进程由 bl_common.safe_streams() 固定按 UTF-8 写 ⇒ 这里必须按 utf-8 解码
+        # （旧口径是"设 gbk 环境变量 + 按 gbk 读"；统一 UTF-8 后方向正好反过来）。
         r = subprocess.run([sys.executable, os.path.join(HERE, "bl_compare.py"), "--manifest", path],
                            capture_output=True, env=env, cwd=HERE)
-        err = r.stderr.decode("gbk", "replace")[-200:]
-        check(r.returncode == 0, "bl_compare --manifest 在 GBK 控制台下 exit 0", err)
-        out = r.stdout.decode("gbk", "replace")
+        err = r.stderr.decode("utf-8", "replace")[-200:]
+        check(r.returncode == 0, "bl_compare --manifest exit 0", err)
+        out = r.stdout.decode("utf-8", "replace")
         check("换边双跑交叉验证" in out, "输出含交叉验证小节")
         check("识别为镜像双跑" in out, "两组互换攻守 ⇒ 识别为镜像双跑")
         check("位置效应" in out and "兵种差异" in out, "位置效应与兵种差异都被分离出来")
@@ -280,6 +280,53 @@ def test_parse_dummy_armor():
         check(False, "对象形式必须报错并提示用字符串")
     except ValueError as e:
         check("字符串" in str(e), "对象形式给出可读提示", e)
+
+
+def test_parse_squad_groups():
+    """多兵种/战术组的 DSL 解析（v0.8.8）：合法要准，非法必须报错。
+
+    为什么必须严格：C# 侧拿到的是**字符串**，一旦我们把非法输入"宽容"地透传过去，
+    就又是一次"参数静默失效"（2026-09-24 有 9 场实验正是这么作废的）。
+    """
+    import bl_common
+    g = bl_common.parse_squad_groups("imperial_legionary:10:Infantry:stop")
+    check(g == [{"troop": "imperial_legionary", "count": 10, "formation": "Infantry",
+                 "movement": "stop"}], "四字段组", g)
+    g2 = bl_common.parse_squad_groups("khuzait_khans_guard:5")
+    check(g2 == [{"troop": "khuzait_khans_guard", "count": 5, "formation": None,
+                  "movement": None}], "两字段：formation/movement 缺省为 None", g2)
+    g3 = bl_common.parse_squad_groups("a:1|b:2:HorseArcher")
+    check(len(g3) == 2 and g3[1]["formation"] == "HorseArcher" and g3[0]["formation"] is None,
+          "多组用 | 分隔、各组独立", g3)
+    g4 = bl_common.parse_squad_groups("a:1:infantry:STOP")
+    check(g4[0]["formation"] == "Infantry" and g4[0]["movement"] == "stop",
+          "formation 大小写不敏感→规范名；movement 归小写", g4)
+    check(bl_common.parse_squad_groups(None) == [] and bl_common.parse_squad_groups("   ") == [],
+          "None / 纯空白 ⇒ 空列表")
+    # 移除 hold（2026-09-25 用户按编程规则批准）：写 hold 必须在解析期报错，且提示改用 stop。
+    try:
+        bl_common.parse_squad_groups("a:1:Infantry:hold")
+        check(False, "hold 必须被拒（已移除）")
+    except ValueError as e:
+        check("已移除" in str(e), "hold 报错信息必须含补位提示（已移除）", e)
+    for bad, why in (("a", "字段数 1"),
+                     ("a:1:Infantry:stop:extra", "字段数 5"),
+                     ("a:0", "count=0"),
+                     ("a:abc", "count 非整数"),
+                     ("a:1:Infantryy", "未知 formation"),
+                     ("a:1:Infantry:jump", "未知 movement"),
+                     ("a:1||b:2", "中间空组"),
+                     (":1", "缺兵种 id")):
+        try:
+            bl_common.parse_squad_groups(bad)
+            check(False, "非法组串必须报错（%s）: %r" % (why, bad))
+        except ValueError as e:
+            check(True, "非法组串报错（%s）" % why)
+    try:
+        bl_common.parse_squad_groups(123)
+        check(False, "非字符串必须报错")
+    except ValueError as e:
+        check(True, "非字符串报错: %s" % e)
 
 
 def test_bl_batch_plan_args():
@@ -375,6 +422,42 @@ def test_bl_batch_plan_args():
             check(True, "非法多轮参数被拒: %r" % (bad,))
 
 
+def test_squad_plan_args():
+    """plan 的多兵种/战术组（v0.8.8）：组列表与 DSL 两条入口、非法一律报错、旧路径零影响。"""
+    import bl_batch
+    scene, orders, ps, cap = "battle_terrain_a", "charge", "attacker", 30
+    base = {"attacker": "a", "defender": "b"}
+    A = bl_batch.build_start_args({}, dict(base, attackerGroups=[
+        {"troop": "imperial_legionary", "count": 10, "formation": "Infantry", "movement": "stop"},
+        {"troop": "khuzait_khans_guard", "count": 5},
+    ]), scene, orders, ps, cap)
+    check("--attacker-groups" in A, "组列表 ⇒ CLI --attacker-groups", A[-2:])
+    dsl = A[A.index("--attacker-groups") + 1]
+    check(dsl == "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5",
+          "组列表转 DSL（缺省字段省略）", dsl)
+    check("--defender-groups" not in A, "只给攻方组时不产生守方参数")
+    B = bl_batch.build_start_args({}, dict(base, defenderGroups="b:2:Ranged"),
+                                  scene, orders, ps, cap)
+    check(B[B.index("--defender-groups") + 1] == "b:2:Ranged", "DSL 字符串原样透传", B[-2:])
+    # GC2：完全没有组字段 ⇒ 不产生新参数（"旧路径逐字节不变"由既有断言守）
+    C = bl_batch.build_start_args({}, base, scene, orders, ps, cap)
+    check("--attacker-groups" not in C and "--defender-groups" not in C,
+          "GC2：旧字段路径不产生新参数", C)
+    # 关键回归：**没给 rounds** 时组参数也必须出现（build_start_args 有一个 early-return 分支）
+    D = bl_batch.build_start_args({}, dict(base, attackerGroups="a:1"), scene, orders, ps, cap)
+    check("--attacker-groups" in D, "无 rounds 时组参数不被早退分支吃掉", D[-2:])
+    for bad in ([{"troop": "a"}],
+                [{"troop": "a", "count": 1, "movement": "stop"}],
+                [{"troop": "a", "count": 1, "bogus": 2}],
+                "a:0",
+                "a:1:Infantry:jump"):
+        try:
+            bl_batch.build_start_args({}, dict(base, attackerGroups=bad), scene, orders, ps, cap)
+            check(False, "非法组必须报错: %r" % (bad,))
+        except ValueError:
+            check(True, "非法组被拒: %r" % (bad,))
+
+
 def test_bl_cmd_dummy_armor_strict():
     """bl_cmd.py 的 `--dummy-armor` 必须在**发命令之前**拒掉非法输入。
 
@@ -389,6 +472,32 @@ def test_bl_cmd_dummy_armor_strict():
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     check(r.returncode != 0, "未知部位名 → 非 0 退出", r.returncode)
     check("未知部位" in out or "hed" in out, "报错信息指名道姓", out.strip()[:200])
+
+
+def test_bl_cmd_squad_strict():
+    """bl_cmd.py 的多兵种/战术组参数：参数暴露 + 非法 DSL 在**发命令之前**就被拒。
+
+    同 `--dummy-armor` 的理由：参数静默失效曾让实验整批作废（2026-09-24）。
+    合法输入这里不测（那要真连游戏）；非法输入不会走到游戏。
+    """
+    import subprocess
+    help_out = subprocess.run([sys.executable, os.path.join(HERE, "bl_cmd.py"), "start", "--help"],
+                              capture_output=True, cwd=HERE)
+    helptext = (help_out.stdout + help_out.stderr).decode("utf-8", "replace")
+    check("--attacker-groups" in helptext and "--defender-groups" in helptext,
+          "start 子命令暴露 --attacker-groups/--defender-groups")
+    # 断言用 ASCII 关键词：tools/ 的输出统一走 UTF-8（bl_common.safe_streams），直查中文
+    # 关键词也稳；保留 ASCII 关键词只是让断言在任何解码口径下都不误报（`or "hed"` 同一思路）。
+    for bad, kw in (("a:0", "count"),
+                    ("a:1:Infantryy", "formation"),
+                    ("a:1:Infantry:jump", "movement")):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "bl_cmd.py"), "start",
+                            "--attacker", "imperial_legionary", "--defender", "battanian_wildling",
+                            "--attacker-groups", bad],
+                           capture_output=True, cwd=HERE)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace")
+        check(r.returncode != 0 and (kw in out or "解析失败" in out),
+              "非法组串非 0 退出且指明原因（%s）" % kw, out.strip()[:160])
 
 
 def test_death_compare_split():
@@ -515,7 +624,7 @@ def test_dummy_analyze_compare():
     check(abs(t_dt["Cut"]["A"]["mean"] - 35.0) < 1e-9,
           "按 damagetype 分组：Cut 均值=35", t_dt["Cut"]["A"]["mean"])
 
-    # 7) manifest 展开 + 接入层端到端（默认中文控制台 GBK 下也必须 exit 0）
+    # 7) manifest 展开 + 接入层端到端（不设编码环境变量时也必须 exit 0）
     tmp = tempfile.mkdtemp(prefix="bda_compare_")
     try:
         def write_tier(path, applied):
@@ -536,17 +645,17 @@ def test_dummy_analyze_compare():
         check(mt == [("A_base", [fa]), ("B_alt", [fb])], "manifest 展开成两个档", mt)
         check(bda.manifest_tiers(fa) is None, "非 manifest 的 jsonl ⇒ None（不误判）")
         env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "gbk"      # 模拟默认中文控制台
-        # 子进程按 gbk 写 ⇒ 必须按 gbk 读；用 utf-8 读会在线程里抛 UnicodeDecodeError
+        env.pop("PYTHONIOENCODING", None)    # 不设编码环境变量：子进程自己钉 UTF-8
+        # 子进程按 UTF-8 写 ⇒ 必须按 utf-8 读；读错编码会在线程里抛 UnicodeDecodeError
         # 且**被静默吞掉**，只留下 stdout=None（2026-09-24 的 MCP 段就栽在这里）。
         proc = subprocess.run([sys.executable, os.path.join(HERE, "bl_dummy_analyze.py"),
                                "--compare", "base=" + man, "--by", "bodypart"],
-                              capture_output=True, text=True, encoding="gbk",
+                              capture_output=True, text=True, encoding="utf-8",
                               env=env, timeout=180)
         check(proc.stdout is not None, "子进程 stdout 可读（None = 编码失配被吞）",
               repr(proc.stdout)[:60])
         proc_stdout = proc.stdout or ""
-        check(proc.returncode == 0, "跨档对比 CLI 在 GBK 控制台 exit 0", proc.returncode)
+        check(proc.returncode == 0, "跨档对比 CLI exit 0", proc.returncode)
         check("跨档对比" in proc_stdout and "Δ%" in proc_stdout, "输出含对比表",
               proc_stdout[:90].replace("\n", " "))
         check("+20.0%" in proc_stdout, "Δ% 手算 = +20.0%（10 → 12）")
@@ -556,7 +665,7 @@ def test_dummy_analyze_compare():
 
 def main():
     import bl_common
-    bl_common.safe_streams()      # 默认中文控制台（GBK）下不因 ⇒/⚠️ 崩（同 bl_metrics/bl_compare 的修复）
+    bl_common.safe_streams()      # 输出统一 UTF-8（见其 docstring：消费端是 UTF-8 管道）
 
     tmp = tempfile.mkdtemp(prefix="blbridge_selftest_")
     logdir = os.path.join(tmp, "logs")
@@ -597,8 +706,8 @@ def main():
     env["BLBRIDGE_LOG_DIR"] = logdir
     # 这里**故意不设 PYTHONIOENCODING**：bl_mcp.py 自己把 stdio 钉成 UTF-8
     # （`_force_utf8_stdio()`，MCP over stdio 的协议要求），而本段按 utf-8 读。
-    # 不设环境变量，正好让"哪天 bl_mcp 又没钉编码"这种回归在**继承 GBK locale**
-    # 的条件下被下面的乱码断言抓住（2026-09-24 宿主里工具描述全是问号就是这个 bug）。
+    # 不设环境变量，正好让"哪天 bl_mcp 又没钉编码"这种回归被下面的乱码断言抓住
+    # （2026-09-24 宿主里工具描述全是问号就是这个 bug）。
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "bl_mcp.py")],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, universal_newlines=True, encoding="utf-8")
@@ -639,7 +748,8 @@ def main():
     check(init.get("protocolVersion") == "2024-11-05", "initialize 返回协议版本", init.get("protocolVersion"))
     tools = by_id.get(2, {}).get("result", {}).get("tools", [])
     names = sorted(t["name"] for t in tools)
-    check(len(tools) == 15, "tools/list 返回 15 个工具", names)
+    check(len(tools) == 16, "tools/list 返回 16 个工具", names)
+    check("bl_lookup_troop" in names, "bl_lookup_troop 已注册", names)
     check("bl_apply_config" in names and "bl_analyze" in names, "关键工具存在", names)
     st = by_id.get(3, {}).get("result", {})
     check(st.get("content"), "bl_status 返回内容")
@@ -898,8 +1008,11 @@ def main():
     print("⑪ bl_batch plan → CLI 参数 + bl_common 护甲解析（严格）")
     print("=" * 90)
     test_parse_dummy_armor()
+    test_parse_squad_groups()
     test_bl_batch_plan_args()
+    test_squad_plan_args()
     test_bl_cmd_dummy_armor_strict()
+    test_bl_cmd_squad_strict()
     test_death_compare_split()
 
     # ── ⑫ 跨档对比（材质/护甲对照：两档差多少 + 生效判据）──────────────

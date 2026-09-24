@@ -47,6 +47,7 @@ BlBridge/
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
   tools/bl_compare.py             A/B 对比报告：主指标=满编窗口 + 95%CI + 样本量门槛 + 换边双跑交叉验证（阶段 2④）
   tools/bl_cmd.py                 命令行：status / start / wait / batch / compare / buildcheck / fastforward / speed
+  tools/bl_troop_sweep.py         全兵种扫描：probe（可用性判定：引信 + 一次报全，永不建 mission）/ cover（覆盖扫描：跑真战斗比对 unit 事件，找「过了校验却没 spawn」的兵种）
   tools/bl_selftest.py            自测（合成数据 + MCP 协议 + 控制通道 + 假游戏端 + 构建链 + 配置 + 崩溃判定）
   tools/bl_metrics.py             0.7.9 遥测指标分析器（8 个纯函数 seam：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速自洽与倍率 / 装弹时长 / AI 参数分组 / 阵亡挨箭画像）
   tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
@@ -59,6 +60,7 @@ BlBridge/
   tools/plan.swap_sides.example.json 跑批计划示例（多轮攻守互换：rounds 2 + roundSwap，每轮一个文件）
   tools/plan.mirror.example.json   跑批计划示例（镜像双跑：两个 config 互换攻守，供 bl_compare 分解位置效应）
   tools/plan.mirror2.example.json  跑批计划示例（同上，第二对兵种：cataphract vs fian_champion）
+  tools/plan.multitroop.example.json 跑批计划示例（多兵种/战术组：attackerGroups/defenderGroups DSL，含 stop 与 charge 两组）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json
@@ -296,7 +298,7 @@ manifest_missing         旧版部署，没有清单
 | t | 字段 |
 |---|---|
 | `meta` | schema / mod / version / startedUtc / file；**v0.8.3 起**另带 `mission`（`bridge`=BlBridge 自建靶场 / `game`=其它，含玩家在战役沙盒里的实战）；**v0.8.4 起**另带 `randomSeed`（-1 = 未指定）；**v0.8.5 起**另带 `round`（多轮连续实验的轮次） |
-| `unit` | agent, side, troop, level, isHero, isMounted, maxHp |
+| `unit` | agent, side, troop, level, isHero, isMounted, maxHp；**v0.8.8 起**另带 `formation`（该 agent 的**实际**编队名，见下注） |
 | `hit` | attacker, defender, aSide, dSide, aTroop, dTroop, weaponClass, isMissile, damageType, bodyPart, **dmg**, magnitude, absorbedByArmor, strikeType, hpAfter, hpMax, mounted；**v0.7.9 起**另带 `blocked`、**`damagedHp`**（引擎直给的实际扣血）、`hitDistance`、`shotDifficulty`、`attackDir`、`attackType`、`speedMod`、`atkStun`、`defStun`、`dmgPct`、`blowFlags`（逗号组合串）、`shieldHp`、`shieldMax`；**v0.8.1 起**另带 `bodyPartName`（部位直名）、`shieldSlot`、`shieldItem`（盾的槽位与物品 id，用于区分"换了盾"与"盾被修复"） |
 | `shot` | **v0.7.9 起**：shooter, side, troop, weaponSlot, weaponClass, px/py/pz（位置）, vx/vy/vz（速度向量）, speed；**v0.8.1 起**另带 `weaponSlotName`（槽位直名） |
 | `state` | **v0.7.9 起**：每 2 秒 × agent：agent, side, troop, px/py/pz, vx/vy, speed, maxSpeed, combatSpeed, armorEnc, weapEnc, morale, aiState, reloading, reloadPhase, reloadCount, ammo, ammoMax（末 5 项在取不到武器时会缺） |
@@ -304,6 +306,7 @@ manifest_missing         旧版部署，没有清单
 | `kill` | victim, killer, victimTroop, killerTroop, vSide, state, dmg, damageType, bodyPart, isMissile, weaponClass；**v0.8.1 起**另带 `bodyPartName` |
 | `flee` / `panic` | agent, side, troop |
 | `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp |
+| `squad` | **v0.8.8** 多兵种/战术组：每组一行，**仅当该方给了 `attackerGroups`/`defenderGroups` 时才出现**（旧 plan 不产生）。字段 `t / round / side / group / troop / count / formation / movement / spawned / source`；`round` 是 1 基轮次、`group` 是 **0 基**组下标、`formation` 是该组的**实际**编队（**不是** DSL 里写的那个）、`movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量（`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）|
 | `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
 | `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName`；**v0.8.2 起** `dummy_meta` 另带 `bodyItem`（请求替换的身甲物品 id） |
 | `dummy_swap` | **v0.8.2**：靶子身甲被替换时的一条记录 —— item, **material**（实际生效的材质，可观测落点）, armorBody, agents；找不到物品时 `agents=0` 且带 `error` |
@@ -320,6 +323,16 @@ manifest_missing         旧版部署，没有清单
 > `AgentStatCalculateModel` 也没有 `GetMaximumSpeed`（2026-09-24 反编译核实）。
 > 所以"上限是否生效"只能用**统计口径**间接判断：同一兵种/状态下「实测速度峰值 ÷ 倍率」是否恒定；
 > 新加的 `topSpeedReach` 是加速模型的直接读数。
+>
+> **`unit.formation` 与 `squad`（v0.8.8，多兵种混编 + 战术组）**：
+> - `unit` 事件新增字段 **`formation`** = 该 agent 的**实际编队名**（`FormationClass` 真名；空编队写 `"Unset"`）。
+>   这是**新增字段**：既有字段名/顺序/取值域不变；**旧日志没有该字段**，分析侧按既有“缺字段兜底”策略处理。
+> - 新增事件 **`squad`**（**每组一行**，**仅当该方给了 `attackerGroups`/`defenderGroups` 时才出现**；旧 plan 不产生）：
+>   字段 `t / round / side / group / troop / count / formation / movement / spawned / source`。
+>   其中 `round` 是 1 基轮次、`group` 是 **0 基**组下标、`formation` 是该组的**实际**编队（**不是** DSL 里写的那个）、
+>   `movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量
+>   （`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）。
+> - 原则：**schema 1 内的新增字段/事件，旧日志仍可解析**（GC2）。
 
 ---
 
@@ -371,6 +384,33 @@ manifest_missing         旧版部署，没有清单
 | v0.2 | — | 新增 AI 推演与命令泵 | 见上 |
 | v0.3.0 | 战斗"加速"不可用 | ~~原版无加速键~~（**此判断已被外部审计推翻，见 §六 加速通道的修正记录**）。修正后的结论：原版只有**计分板 UI 入口**（`FastForwardButton` + `ScoreboardHotKeyCategory.ToggleFastForward`，默认 **F**），需要可见计分板 + 玩家操作，无程序化触发；第三方 RTSCamera 亦提供快进，但其 `Fastforward` 键位注册为空列表（`RTSCameraGameKeyCategory.CreateCategory`，反编译见 `..\tools\rts_src\RTSCamera.decompiled.cs:15224`），用户配置 `RTSCameraGameKeyConfig.xml` 里同样为空 → **该键当前无绑定**（"曾经绑过"未验证） | 自建加速通道：`Mission.IsFastForward` + 每帧重申（无键、无 UI、可编程）；新增 `bl_fast_forward` 工具与 `bl_cmd.py fastforward/speed` |
 | v0.4.0 | 幽灵请求 / 路径穿越 / 数据静默覆盖 / 部署静默失败 | 读 Coop 源码时照出我们自己 6 个缺陷（详见 `..\Coop源码对照_可复用清单.md` §1） | 新增 `RequestGuard`（过期作废 + id 白名单 + 大小上限）；`Jmini` 键查找改词法扫描；遥测文件名毫秒级 + `CreateNew`；浮点 round-trip + NaN 计数；超时三值归因 + 进程死亡早退；`build.ps1` 查进程 + 备份 + SHA256；新增 44 项离线单测 |
+
+---
+
+## 十一、编码约定（统一 UTF-8）
+
+**全链路 UTF-8，没有例外**（2026-09-25 统一）：
+
+| 环节 | 口径 |
+|---|---|
+| `tools/*.py` 的 stdout/stderr | `bl_common.safe_streams()` ⇒ `reconfigure(encoding="utf-8", errors="replace")`，**每个输出脚本入口显式调用** |
+| `tools/*.py` 文件读写 | `open(..., encoding="utf-8")`；容忍 BOM 的输入用 `utf-8-sig`；二进制一律 `"rb"`/`"wb"` |
+| 子进程 stdout 解码（离线自测） | 一律 `encoding="utf-8"`，且**不设** `PYTHONIOENCODING`（子进程自己钉），也别"设 gbk 再按 gbk 读" |
+| C# 控制台（`tools/jsontest/GuardTest.cs`） | `Console.OutputEncoding = Encoding.UTF8` |
+| C# 文件读写（日志 / 配置 / 命令通道） | `Encoding.UTF8` 或 `new UTF8Encoding(false)`（写文件不带 BOM） |
+| 战斗日志 JSONL | C# 写 UTF-8 无 BOM ⇄ Python `io.open(..., encoding="utf-8")` 读 |
+
+**为什么必须显式钉**：Windows 上 Python 的 stdio 默认按 **locale 编码**（简中 = cp936/GBK），
+C# 的 `Console` 默认按**控制台代码页**。写入编码 ≠ 读取编码 ⇒ 中文整片变成 `U+FFFD`。
+本项目的输出消费端是**调用这些工具的 AI / 管道**。**本机实测**：系统 `chcp 936` / ANSI `gb2312`，
+宿主 PowerShell（5.1）的 `[Console]::OutputEncoding` 是 `utf-8`，而 Python 默认按 locale(cp936) 写
+⇒ 写入/读取不一致就整片 `U+FFFD`。所以口径统一在 UTF-8，**不依赖控制台代码页**。
+
+**别再走回去**（2026-09-25 走过的弯路）：旧版 `safe_streams()` 只 `reconfigure(errors="replace")`
+不改 encoding，号称"GBK 控制台可读"—— 那只是把错配挪到另一边，一离开 GBK 就乱码；同类半吊子
+还有 `bl_sage.py` 里一份内联的 `reconfigure` 副本（已删，收敛到 `bl_common.safe_streams()`）。
+另一个反向的弯路是把中文**译制成英文**来"绕开乱码"—— 编码问题不该靠换语言解决，那些提交已 revert。
+改任何输出前，先读 `bl_common.safe_streams()` 的 docstring。
 | v0.5.0 | 无效样本无法识别 / 手动核对 DLL 版本 | 清单 §4 第 2 项（C20 引擎帧就绪判据 + A2 构建一致性） | 新增 `EngineProbe` + `ProbePolicy`（任务时间/tick/墙钟/暂停 → `readiness` 与 `end.validity`）；`BuildInfo` + `build_manifest.json` + `bl_build_check`（四段哈希链）；`bl_start_battle` 加构建 preflight；`bl_wait_for_state` 卡住早退；离线单测 44 → 57 项、Python 自测 36 项 |
 | v0.7.0 | 首场实测暴露：21 秒冻结无法定位 / 程序集版本恒为 0.0.0.0 / 构建检查用上一局数据下结论 | 见 `首场实测_20260923_220054.md` §五 | 新增 `t="ff"` 事件（记录 `IsFastForward` 每次变化 → 可一次判定"按钮是否接线"）+ `t="stall_start/stall_end"` 与 `validity.maxStallAtMissionTime`（定位冻结阶段）；`build.ps1` 生成版本源文件（`assemblyVersion` 0.7.0.0）并**自动同步 `module/SubModule.xml` 版本**；`build_check` 先确认状态文件属于当前会话（修掉 `game_running_other_build` 误报）；`bl_cmd.py fastforward` 不带参数改为查看状态；Python 自测 54 项 |
 | v0.7.3 | **镜像对局（同兵种 20v20）却一边倒**：攻方 13:0 / 6:0 全胜 | 引擎默认战术是「攻方进攻、守方原地防守」，冲锋方在混战中占优（实测攻方命中 407 次 vs 守方 285 次，且守方反而先命中）→ 该偏差足以掩盖真实兵种差异。官方 `CPUBenchmarkMissionLogic.AfterStart:160-175` 同样要对双方 `ClearTacticOptions()` | 场景默认改为**双方对称 `TacticCharge`**（+每个阵型 `MovementOrderCharge`）；新增 `--orders charge\|default` 与 `--player-side attacker\|defender` 两个实验开关；另外修正**伤害口径**：遥测 `dmg` 是实际扣血、`absorbedByArmor` 是另一路记账（被盾挡下的命中会带 267 而**一滴血不掉**），分析器改用 HP 真实变化计算，两局复核偏差均为 **0.0%**，新增"被挡下%"指标（盾臂 97% / 躯干 28%）；新增 `crashreport_probe.py`、`hit_semantics_probe.py`、`dump_agent_hits.py` 三个取证工具。**⚠️ 部署后 7 局实测的重要补充：战术对称化并没有消除偏差，真凶是 `playerSide` 标记**（——详见 §3.5）。

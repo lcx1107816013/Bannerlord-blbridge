@@ -155,6 +155,8 @@ namespace BlBridge
                 sb.Append(",\"isHero\":").Append(Jw.B(IsHero(agent)));
                 sb.Append(",\"isMounted\":").Append(Jw.B(agent.MountAgent != null));
                 sb.Append(",\"maxHp\":").Append(Jw.N(agent.HealthLimit));
+                // T7：该 agent 的**实际编队**（GC4）。追加在末尾，既有字段一个不删不改（GC2）。
+                sb.Append(",\"formation\":\"").Append(Jw.Esc(FormationOfActor(agent))).Append('"');
                 sb.Append('}');
                 Jw.Write(sb.ToString());
                 CountInitial(SideOf(agent));
@@ -877,6 +879,117 @@ namespace BlBridge
             {
                 if (_initDefender < 0) _initDefender = 0;
                 _initDefender++;
+            }
+        }
+
+        // ── T7：实际编队 + squad 事件 ──────────────────────────────────────
+
+        /// <summary>
+        /// T7：该 agent 的**实际编队**名（`EnumNames.Formation`）。
+        /// 取证（2026-09-24 反射 TaleWorlds.MountAndBlade.dll）：
+        ///   `Agent.Formation` : `TaleWorlds.MountAndBlade.Formation`（public）；
+        ///   但本机 DLL 里 **`Formation` 没有 `FormationIndex` 属性** —— 真身是
+        ///   `Formation.LogicalClass` / `PhysicalClass` / `RepresentativeClass`（皆 public `FormationClass`）。
+        ///   `FormationIndex` 是旧版 API 名，`LogicalClass` 是其现名 ⇒ 用 `LogicalClass`。
+        /// 回退链：`agent.Formation.LogicalClass` → `agent.Character.GetFormationClass()` → "Unset"。
+        /// 异常安全：任一步取不到都返回 "Unset"，绝不抛（遥测铁律）。
+        /// </summary>
+        private static string FormationOfActor(Agent a)
+        {
+            try
+            {
+                if (a != null)
+                {
+                    Formation f = a.Formation;
+                    if (f != null) return EnumNames.Formation(f.LogicalClass);
+                    BasicCharacterObject ch = a.Character;
+                    if (ch != null) return EnumNames.Formation(ch.GetFormationClass());
+                }
+                return "Unset";
+            }
+            catch
+            {
+                // 修复轮 1 · nit-1：外层 try 已覆盖 GetFormationClass() 回退，这里只需兜底常量。
+                return "Unset";
+            }
+        }
+
+        /// <summary>
+        /// T7：写"每组一行"的 `squad` 事件（GC4）。两处触发点都调它 —— **只写一份格式化代码**：
+        ///   1. 首轮入场完成（`ScenarioRunner.ScenarioProbe.OnMissionTick`，RunStateLoading→Running）：
+        ///      source="supplier"，spawned = `SquadTroopSupplier.ProvidedCounts[group]`（交给引擎的 origin 数）；
+        ///   2. 第 2 轮起重生完成（`RoundOrchestratorBehavior.Advance` 的 SpawnGroups 之后）：
+        ///      source="respawn"，spawned = 该组 `Mission.SpawnAgent` 成功次数。
+        /// spawned **不**按 troop 从 `Team.ActiveAgents` 统计：同一 troop 可出现在多个组里会算错，
+        /// 且"有 origin / 无 origin"两条路径口径无法统一。
+        /// 某侧 specs 为 null 或空 ⇒ 该侧不写任何 squad 事件（GC2：旧 plan 不产生新事件）。
+        /// 内部整体 try/catch，风格照 RoundLog —— 绝不抛。
+        /// </summary>
+        internal static void WriteSquadEvents(int round, string source,
+            List<SquadSpec> attackerSpecs, List<BasicCharacterObject> attackerTroops, int[] attackerSpawned,
+            List<SquadSpec> defenderSpecs, List<BasicCharacterObject> defenderTroops, int[] defenderSpawned)
+        {
+            if (!BridgeConfig.Enabled) return;
+            if (!Jw.IsOpen) return;
+            // 修复轮 1 · minor-1：两侧各自 try/catch —— Attacker 侧异常不得连带丢掉 Defender 侧事件。
+            try
+            {
+                WriteSquadSide("Attacker", round, source, attackerSpecs, attackerTroops, attackerSpawned);
+            }
+            catch
+            {
+            }
+            try
+            {
+                WriteSquadSide("Defender", round, source, defenderSpecs, defenderTroops, defenderSpawned);
+            }
+            catch
+            {
+            }
+        }
+
+        private static void WriteSquadSide(string side, int round, string source,
+            List<SquadSpec> specs, List<BasicCharacterObject> troops, int[] spawned)
+        {
+            if (specs == null) return;
+            if (specs.Count == 0) return;
+            for (int i = 0; i < specs.Count; i++)
+            {
+                SquadSpec s = specs[i];
+                if (s == null) continue;
+                int n = (spawned != null && i < spawned.Length) ? spawned[i] : 0;
+                string mv = (s.Movement == null) ? "charge" : s.Movement;
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"t\":\"squad\"");
+                sb.Append(",\"round\":").Append(Jw.N(round));
+                sb.Append(",\"side\":\"").Append(side).Append('"');
+                sb.Append(",\"group\":").Append(Jw.N(i));
+                sb.Append(",\"troop\":\"").Append(Jw.Esc(s.Troop)).Append('"');
+                sb.Append(",\"count\":").Append(Jw.N(s.Count));
+                sb.Append(",\"formation\":\"").Append(Jw.Esc(FormationNameOf(troops, i))).Append('"');
+                sb.Append(",\"movement\":\"").Append(Jw.Esc(mv)).Append('"');
+                sb.Append(",\"spawned\":").Append(Jw.N(n));
+                sb.Append(",\"source\":\"").Append(source).Append('"');
+                sb.Append('}');
+                Jw.Write(sb.ToString());
+            }
+        }
+
+        /// <summary>某组兵种的实际编队名（缺 troop 对象 ⇒ "Unset"，绝不抛）。</summary>
+        private static string FormationNameOf(List<BasicCharacterObject> troops, int i)
+        {
+            try
+            {
+                if (troops == null) return "Unset";
+                if (i < 0) return "Unset";
+                if (i >= troops.Count) return "Unset";
+                BasicCharacterObject t = troops[i];
+                if (t == null) return "Unset";
+                return EnumNames.Formation(t.GetFormationClass());
+            }
+            catch
+            {
+                return "Unset";
             }
         }
     }

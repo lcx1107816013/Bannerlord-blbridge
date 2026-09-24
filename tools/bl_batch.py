@@ -43,6 +43,7 @@ DEFAULT_TOOLS = os.path.dirname(os.path.abspath(__file__))
 if DEFAULT_TOOLS not in sys.path:
     sys.path.insert(0, DEFAULT_TOOLS)
 import bl_common  # noqa: E402
+import bl_sage  # noqa: E402
 
 DEFAULT_BATTLES = os.path.join(
     os.path.expanduser("~"), "Documents", "Mount and Blade II Bannerlord", "BlBridge", "battles"
@@ -58,6 +59,37 @@ DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor", 
 # 第 2 轮攻守互换后它当攻方 —— 两轮环境完全一致，比跑两批独立 mission 干净（2026-09-24）。
 ROUND_PLAN_KEYS = ("rounds", "roundEndAlive", "roundSwap",
                    "roundSpawnAttacker", "roundSpawnDefender")
+
+# ── 多兵种 / 战术组（v0.8.8）：plan 顶层默认 + 单配置覆盖 ─────────────
+# 值可以是 DSL 字符串，也可以是组列表（每项 dict：troop/count/formation/movement）——
+# 列表会先转成 DSL，保证**只有一条解析路径**（bl_common.parse_squad_groups）。
+SQUAD_PLAN_KEYS = ("attackerGroups", "defenderGroups")
+_SQUAD_FIELDS = ("troop", "count", "formation", "movement")
+
+
+def squads_to_dsl(groups):
+    """组列表 → DSL 字符串（缺省字段省略）；已是字符串则原样返回（交给 parse 校验）。
+
+    非法一律 ValueError（GC3）。注意 movement 是第 4 字段、不能跳过 formation：
+    给了 movement 却没给 formation 会拼出 `a:10:charge`，那是会被当成 formation 的。
+    """
+    if isinstance(groups, str):
+        return groups
+    if not isinstance(groups, list):
+        raise ValueError("组必须是 DSL 字符串或组列表，收到 %s" % type(groups).__name__)
+    parts = []
+    for i, g in enumerate(groups, 1):
+        if not isinstance(g, dict):
+            raise ValueError("第 %d 组不是对象：%r" % (i, g))
+        unknown = [k for k in g if k not in _SQUAD_FIELDS]
+        if unknown:
+            raise ValueError("第 %d 组含未知字段 %s（可用：%s）"
+                             % (i, unknown, ", ".join(_SQUAD_FIELDS)))
+        if g.get("movement") and not g.get("formation"):
+            raise ValueError("第 %d 组给了 movement 却没给 formation"
+                             "（DSL 里 movement 是第 4 字段，不能跳过第 3 个）" % i)
+        parts.append(":".join(str(g[k]) for k in _SQUAD_FIELDS if g.get(k) is not None))
+    return "|".join(parts)
 
 
 def resolve_dummy_params(plan, cfg, keys=DUMMY_PLAN_KEYS):
@@ -89,6 +121,11 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
         "--orders", orders,
         "--player-side", player_side,
     ]
+    # plan 顶层 skipTroopCheck=true 必须**同时**透传给 CLI：bl_batch 只跳过了它自己的预检，
+    # 而 `bl_cmd.py start` 里还有一道本地索引预检（bl_sage.check_troops），第三方模组兵种
+    # 不在索引里 ⇒ 会被它拦下、整批 start_failed（2026-09-24 实跑踩过，当时只能绕开 batch）。
+    if plan.get("skipTroopCheck"):
+        out.append("--skip-troop-check")
     side = dummy.get("dummySide")
     if side is not None and side not in ("none", "attacker", "defender"):
         raise ValueError("dummySide 只能是 none/attacker/defender，收到 %r" % (side,))
@@ -110,6 +147,18 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
     if body_item:
         # 物品 id 不做本地校验：不认识的 id 由游戏端报 item_not_found 并写进 dummy_swap
         out += ["--dummy-body-item", str(body_item)]
+    # ── 多兵种/战术组（v0.8.8）：组列表或 DSL ⇒ CLI 字符串 ─────────────
+    # ⚠️ 必须放在下面那个 `if n is None: return out` **之前** —— 否则"没给 rounds"时会整段被跳过
+    #    （这是本任务第一版差点踩到的坑：早退分支会吃掉后面的参数）。
+    squads = resolve_dummy_params(plan, cfg, SQUAD_PLAN_KEYS)
+    for key, flag in (("attackerGroups", "--attacker-groups"),
+                      ("defenderGroups", "--defender-groups")):
+        val = squads.get(key)
+        if val is None:
+            continue
+        dsl = squads_to_dsl(val)
+        bl_common.parse_squad_groups(dsl)   # GC3：非法在这里就报错，不透传给游戏端
+        out += [flag, dsl]
     # ── 多轮参数（③ 换边双跑）：同样"非法即报错、绝不静默丢弃" ────────
     rounds = resolve_dummy_params(plan, cfg, ROUND_PLAN_KEYS)
     n = rounds.get("rounds")
@@ -189,6 +238,10 @@ def preflight(plan, tools_dir, dry):
 
 
 def main():
+    # 必须在第一次 print 之前调：输出里有 ⇒/✅ 等符号，GBK 控制台下直接
+    # UnicodeEncodeError 崩掉（2026-09-24 实测：--dry-run 都跑不完；bl_metrics /
+    # bl_compare 中过同一招，见 PROGRESS 十三节）。
+    bl_common.safe_streams()
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True, help="跑批计划 JSON")
     ap.add_argument("--tools-dir", default=DEFAULT_TOOLS, help="BlBridge tools 目录（含 bl_cmd.py）")
@@ -223,6 +276,42 @@ def main():
     if not os.path.isfile(os.path.join(args.tools_dir, "bl_cmd.py")):
         print("!! 找不到 %s" % os.path.join(args.tools_dir, "bl_cmd.py"))
         return 2
+
+    # 兵种 id 预检：跑批一开就是 N 局，任何 id 打错 ⇒ 整批全是无效样本。
+    # dry-run 也做 —— 它本来就是"验证计划本身"的入口。索引不可用 ⇒ 警告放行
+    # （软依赖）；plan 顶层 skipTroopCheck=true 可跳过（第三方模组兵种不在索引里，
+    # 与 CLI --skip-troop-check / MCP skipTroopCheck 是同一个出口）。
+    if not plan.get("skipTroopCheck"):
+        # 与 bl_cmd.py 的校验语义对齐：某一侧给了 *Groups 时，同侧的单值兵种会被
+        # CLI/游戏端**忽略**（见 bl_cmd.py start 的 id 收集），所以这里也只收集
+        # 真正生效的那组 —— 否则被忽略的单值 id 会被误判 missing ⇒ 整批无谓中止。
+        ids = set()
+        for cfg in configs:
+            for single_key, group_key in (("attacker", "attackerGroups"),
+                                          ("defender", "defenderGroups")):
+                val = cfg.get(group_key, plan.get(group_key))
+                if val:
+                    try:
+                        dsl = val if isinstance(val, str) else squads_to_dsl(val)
+                        for g in bl_common.parse_squad_groups(dsl):
+                            ids.add(g["troop"])
+                    except ValueError:
+                        pass  # 语法错误由 build_start_args 正式报错，这里只负责收集 id
+                elif cfg.get(single_key):
+                    ids.add(str(cfg[single_key]))
+        # 没有需要校验的 id 时不要调 check_troops([])，否则会打出「未预检：没有需要
+        # 校验的兵种 id」这种看起来像出错的误导性警告（软依赖下本该静默放行）。
+        if ids:
+            chk = bl_sage.check_troops(sorted(ids))
+            if chk.get("available") and chk.get("missing"):
+                print("!! 兵种 id 在索引里不存在 —— 整批中止（否则 N 局全是无效样本）：")
+                for m in chk["missing"]:
+                    s = bl_sage.suggest_troops(m)
+                    print("   %s%s" % (m, ("  -> 近似候选: " + ", ".join(s)) if s else ""))
+                print("   （索引只覆盖官方 XML；第三方模组兵种在 plan 顶层加 \"skipTroopCheck\": true）")
+                return 1
+            if not chk.get("available"):
+                print("[warn] 兵种 id 未预检：%s" % (chk.get("reason") or "索引不可用"))
 
     if not preflight(plan, args.tools_dir, args.dry_run):
         print("\n[abort] preflight 未通过。修好后重跑（记得 --dry-run 可先验证计划本身）。")

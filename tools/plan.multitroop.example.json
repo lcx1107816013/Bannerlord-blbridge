@@ -1,0 +1,19 @@
+{
+  "label": "multitroop_tactics",
+  "runsPerConfig": 1,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 60,
+  "configs": [
+    {
+      "label": "two_groups_stop_vs_charge",
+      "attacker": "imperial_legionary",
+      "a": 15,
+      "defender": "battanian_wildling",
+      "d": 15,
+      "attackerGroups": "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge",
+      "defenderGroups": "battanian_wildling:15:Infantry:charge"
+    }
+  ]
+}

@@ -606,6 +606,67 @@ AttributeError: 'NoneType' object has no attribute 'splitlines'
 1. MCP 子进程的 env 里注入 `PYTHONIOENCODING = "utf-8"`（与父进程读的编码对齐；不依赖调用者环境）；
 2. `out is None` 时**显式 `check(False, …)` 并打印 stderr**，让根因可见，不再让症状跑到 `AttributeError`。
 
+## 十四、兵种 id 前置校验 —— 接通 BannerlordSage 索引（2026-09-24）
+
+**要解决的问题**：`bl_start_battle` 的兵种 id 敲错时，C# 侧**静默走 fallback**，日志里看不出来，
+代价是白等一整场对局才发现那场根本没按预期开局。
+
+**为什么不再写一遍 XML 解析**：BannerlordSage 已经把全量兵种索引进了一个 SQLite 文件 ——
+`F:\Program Files\BannerlordSage\dist\games\bannerlord\bannerlord.db`（见其 `src/utils/env.ts` 的 `dbPath`），
+1981 条兵种；实测 Python 标准库 `sqlite3` **只读直连**即可查询，无需启动 bun、无需走 MCP 套娃。
+
+**新增 `tools/bl_sage.py`（只读通道，软依赖）**：
+
+- `status()` / `lookup()` / `check_troops()` / `search()`，另带 CLI（`--status` / `--check` / `--search`）；
+- **只读**打开（`mode=ro`）：BannerlordSage 是长驻进程、持有写连接并设了 `busy_timeout`，我们写会撞锁；
+- **软依赖**：db 缺失 / schema 变了 ⇒ `available=False` + `reason`，**不抛异常、不阻断主流程**
+  （BlBridge 必须能在没装 BannerlordSage 的机器上独立使用）；
+- 只依赖业务表 `bannerlord_troops`，**不碰 `*_fts` 虚拟表**（FTS5 能否查询取决于 Python 编译选项，不稳）；
+- 启动时校验表 + 必需列齐全，schema 变了就报并把实际列名带回来，而不是抛 `KeyError` 让人猜。
+
+**`bl_mcp.py` 两处接入**：
+
+1. 新工具 `bl_lookup_troop`：校验 id / 按 id 模糊搜索 / 按文化筛选 / 索引可用性自检；
+2. `bl_start_battle` 在**发命令之前**校验双方 id，缺失即返回错误 + 近似候选（取首段前缀猜）；
+   新增 `skipTroopCheck` 出口 —— 索引只覆盖**官方 XML**（`xml_scope=official`），
+   第三方模组的兵种会被判成"不存在"，那种情况必须能跳过，否则等于误伤。
+
+**判据（均已实测）**：
+
+- `--check imperial_legionary battanian_fian_champion imperial_legionarry`
+  ⇒ 前两个 OK（L26 / L31），拼错的那个判 MISS；
+- `bl_start_battle` 传错 id ⇒ `ok=False`、`missing=['imperial_legionarry']`、给出 5 个 `imperial_*` 候选；
+- db 指向不存在的路径 ⇒ `available=False`、`missing=[]`（**不误报**），`bl_start_battle` 不被拦截；
+- `tools/bl_selftest.py` 全绿（工具数断言 15 → 16，并新增"bl_lookup_troop 已注册"一项）。
+
+**润色（同日，实测暴露后已修）**：
+
+1. 建议列表原按字母序取前 5 —— `imperial_legionarry` 的建议里**反而没有** `imperial_legionary`
+   （它按字母序排在后面）。改用 `difflib.SequenceMatcher`（标准库）按相似度重排，正确 id 排第一；
+2. 同一兵种 id 在官方 XML 里被多个文件重复定义（SandBoxCore 与 CustomBattle 都有
+   `imperial_infantryman`），`bl_sage.search` 已按 id 去重取首条，否则建议/搜索结果出现同名条目。
+
+**CLI / 跑批接入（同日续）**：
+
+- 读码发现 `bl_cmd.py start` 走 `send_command` **直通通道**、绕过 MCP 工具层校验
+  ⇒ CLI 与批量原先对错 id 完全裸奔；
+- `suggest_troops` 下沉到 `bl_sage.py`：`bl_batch.py` 按其文件头设计**不 import bl_mcp**、
+  只依赖数据通道，而批量预检同样需要给近似候选；
+- `bl_cmd.py start`：加同一语义校验（给了 `--attacker/--defender-groups` 时只校验组里的
+  troop —— 单兵种参数那时会被游戏端忽略）+ `--skip-troop-check` 出口；索引不可用 ⇒ 警告放行；
+- `bl_batch.py`：跑批前**一次性预检全部配置的兵种 id**（含 squad 组 DSL 展开），错一个**整批中止**
+  —— N 局全是无效样本比单场失败严重得多；**dry-run 也预检**（它本来就是"验证计划本身"的入口）；
+  plan 顶层 `"skipTroopCheck": true` 与 CLI / MCP 是同一个出口；
+- **顺带修掉一个既有 bug**：`bl_batch.py` 没调 `bl_common.safe_streams()`，纯净 shell 下打印 `⇒`
+  直接 `UnicodeEncodeError`（连 `--dry-run` 都跑不完）—— 与十三节里 bl_metrics / bl_compare
+  中过的是同一招；
+- 判据（均已实测）：`bl_cmd` 错 id ⇒ rc=2 + 候选（legionary 排第一）；加 `--skip-troop-check`
+  ⇒ 警告放行并到达发送阶段；`bl_batch` 坏 plan ⇒ 整批中止 rc=1、好 plan ⇒ dry-run 走完 rc=0；
+  `bl_selftest.py` 全绿。
+
+**注意**：MCP 工具列表是**连接时枚举**的 —— 改完 `bl_mcp.py` 后要**重启 blbridge MCP**，
+否则 IDE 侧看不到 `bl_lookup_troop`（改完首次验证时就是这个现象）。
+
 **连带修掉的同源缺陷**：`bl_selftest.py` 自己**没有** `bl_common.safe_streams()`（§六 #2 给
 `bl_metrics` / `bl_compare` / `bl_death_compare` 修过的那条）⇒ 默认中文控制台下，本文件里含 `⇒` 的
 `check()` 标签（⑩⑪ 段）会抛 `UnicodeEncodeError`。已在 `main()` 开头补上 —— 修①之后立刻暴露的就是它。
@@ -618,7 +679,7 @@ AttributeError: 'NoneType' object has no attribute 'splitlines'
 且读取路径上的异常必须能被看见 —— 线程里的 `UnicodeDecodeError` 就是一个把"编码问题"伪装成
 "`NoneType` 没有 `splitlines`"的完美烟幕。
 
-## 十四、材质对照：机理取证 + 两轮实测准备（2026-09-24 晚间续）
+## 十五、材质对照：机理取证 + 两轮实测准备（2026-09-24 晚间续）
 
 **起因**：§九/§十二 的材质对照（`--dummy-body-item` 换身甲）`Δ 中位 = 0.0`，当时的猜测是
 "Warbandlord 的 5 层串行把单层效应稀释了"。**反编译取证推翻了它** —— 真因是**改错了装备副本**。
@@ -1012,3 +1073,283 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 是这游戏的常态（随机 modifier）⇒ 换装实验里 `armorBody` 读回 **25 / 50**（两件甲 XML 都写 36）
 **很可能就是物品随机 modifier**。试穿探针要**每件甲跑多场、看 `armorBody` 是否波动**：
 波动 = 随机 modifier（好修：spawn 时固定或记录）；恒定 = Warbandlord 类**静态改写**（得换物品对）。
+
+## 十六、多兵种混编 + 战术命令（v0.8.8，T1–T8 已入库，T9 待验）
+
+> 本节由 **Task 10**（2026-09-25）产出；当时另一个任务正在改 `PROGRESS.md`，故先落独立草稿、收尾时并入（只调编号与元说明，正文未改）。
+> ⚠️ **T9（游戏内 5 条判据）尚未执行** ⇒ 判据结果一律写 `（待 T9）`，**不填任何数字**。
+
+### 1. DSL 语法
+
+`<troop>:<count>[:<formation>[:<movement>]]`，多组用 `|` 分隔。
+
+- `troop`：兵种 id（**不做本地校验**，由游戏端报 `unknown_troop`，与 `--dummy-body-item` 同策略）。
+- `count`：整数 ≥ 1。
+- `formation`：`FormationClass` 的引擎名，**大小写不敏感**；取值只允许
+  `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`。
+  省略 ⇒ 引擎按兵种决定编队。
+- `movement`：`charge | advance | fallback | stop | retreat`（小写）。省略 ⇒ `charge`。
+- plan 里值可以是 **DSL 字符串**或**组列表**（每项 dict 含 `troop/count/formation/movement`）；
+  是列表时先转成 DSL 字符串再解析（**只有一条解析路径**）。
+
+**两条能力边界（写死）**：
+
+1. **`formation` 不能下发** —— `IAgentOriginBase` 的 18 个成员里**没有 formation**；编队由
+   `BasicCharacterObject.GetFormationClass()` 按兵种决定（那是引擎 `virtual`，改它会污染共享的
+   `CharacterObject`，不可取）⇒ `formation` 只做**解析时校验 + 日志里记录实际编队**（GC4 观测量不受影响）。
+2. **`hold` 已移除**（2026-09-25，用户按编程规则批准）—— 写 `hold` 在解析期报错并提示改用 `stop`；引擎层 `hold` 本来就等于 `stop`（`MovementOrder` 无 Hold 实例）。
+
+### 2. Global Constraints（GC1–GC6，逐字照计划）
+
+- **GC1 DSL 格式（定死）**：`<troop>:<count>[:<formation>[:<movement>]]`，多组用 `|` 分隔。
+  - `troop`：兵种 id（**不做本地校验**，由游戏端报 `unknown_troop`，与 `--dummy-body-item` 同策略）
+  - `count`：整数 ≥ 1
+  - `formation`：`FormationClass` 的引擎名，**大小写不敏感**，取值只允许：
+    `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`
+    ⚠️ **修订（2026-09-24 23:5x，用户批准路 A）**：`IAgentOriginBase` 无 formation 成员、
+    编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定 ⇒ 该字段**不能下发**，
+    语义降级为"**解析时校验 + 日志里记录实际编队**"（GC4 的观测量不受影响）。
+  - `movement`：`charge | advance | fallback | stop | retreat`（小写；映射见 T4）
+  - 示例：`imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge`
+  - 缺省：省略 `formation` ⇒ 引擎默认编队；省略 `movement` ⇒ `charge`
+- **GC2 向后兼容**：旧 plan 字段 `attacker`/`a`/`defender`/`d` 的行为**逐字节不变**
+  （等价于单组：`formation` 缺省、`movement=charge`）。旧 plan 必须仍能跑出与今天一致的结果。
+- **GC3 非法即报错、绝不静默**：DSL 字段数 ∉ {2,3,4}、`count` 非正整数、未知 `formation`/`movement`
+  ⇒ **抛错并中止跑批**，错误信息里带上出错的那一组原文。这是本项目最贵教训（参数静默丢弃曾让 9 场实验作废）。
+- **GC4 可观测落点（每个新参数都要能被读回）**：
+  1. `unit` 事件新增 **`formation`** 字段（`FormationClass` 的**真名**，见 T7 别名坑）；
+  2. 新增 **`squad`** 事件，每组一行（字段见 T7）；
+  3. 分析侧必须能按 `formation` 分组（`bl_dummy_analyze --by` 加一项）。
+- **GC5 工程约束**：零 Harmony；`python tools/bl_selftest.py` 必须 **EXIT=0**；改后须
+  `build.ps1 -Deploy`（**游戏必须关闭**）且 `bl_cmd.py buildcheck` 文件链条一致。
+- **GC6 版本**：`src/BridgeConfig.cs` 的 `Version` 与 `module/SubModule.xml` → **0.8.8**（build.ps1 会自动同步后者）。
+
+### 3. 位置偏移量（确切值）
+
+多轮重生时，**第 i 组**的进场点 = 基点 `x + i*12f`（y/z 不变）；基点未指定 ⇒ 交回引擎默认。
+
+### 4. movement 落点裁决
+
+- 按该组兵种的**实际编队**下发 movement。
+- 同一**实际编队**被多组以**不同** movement 命中 ⇒ 报错 `conflicting_movements`。
+- `groups` 与 `orders != "charge"` 混用 ⇒ 报错 `conflicting_orders`。
+
+### 5. T9 判据清单（5 条，逐字照计划 §T9）
+
+1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
+   ⚠️ **核对口径（2026-09-25 实测，重要）**：`out\BlBridge.dll` **每次重编译的 sha256 都不同**（Roslyn 命令行默认
+   非确定性：嵌入 MVID / PE 时间戳）——同一份未改动的源码，多次 `build.ps1 -Deploy` 得到 `531AAB84…` / `19F66AD1…` / `2183A94B…`。
+   ⇒ **以 `python tools/bl_cmd.py buildcheck` 的 `deployedSha256` 为准**（它给出当前部署值；游戏跑起来后再看 `loadedSha256` 是否与之一致）。
+   **T9 开始前不要再跑 `build.ps1`**（会换成一个新 sha）。T9 所用部署值（2026-09-25 00:13:53，T12 修复后）：
+   `2183A94B94BBCF1175F2DDFAB21E3E01F1BA0D28B9E6C143FCA7C0CB5BE3B295`。
+   **结果：✅ 通过**（2026-09-25 00:15，游戏重开后）：`buildcheck` ⇒ `code=ok`、`builtVersion=0.8.8`、
+   `deployedSha256 = loadedSha256 = 2183a94b94bbcf11`、`loadedVersion=0.8.8`、`fileChangedSinceLoad=False`。
+2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:stop` + `khuzait_khans_guard:5:HorseArcher:charge`）
+   ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
+   **结果：✅ 通过** —— `battle_20260925_001508_814.jsonl`（2.42 MB）里共 **3 条** `squad`（双方都给了 groups ⇒ 每组一行；
+   判据本意即"每组一行"）：攻方 `group 0 imperial_legionary count=10 formation=Infantry movement=stop` + **`spawned=10`**、
+   攻方 `group 1 khuzait_khans_guard count=5 formation=HorseArcher movement=charge` + **`spawned=5`**、
+   守方 `group 0 battanian_wildling count=15 movement=charge spawned=15`。
+3. `unit` 事件的 `formation` 与 `squad` 一致（10 个 Infantry、5 个 HorseArcher）；
+   **结果：✅ 通过** —— 同一日志 `unit` 事件的 `(side, formation)` 计数：`Attacker/Infantry=10`、`Attacker/HorseArcher=5`、
+   `Defender/Infantry=15`，与三条 `squad` 逐一对应。
+4. **行为可辨**：`stop` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
+   **结果：✅ 通过** —— 开局 10 mission 秒（`state` 采样自 t≈2.03 s）按兵种位移均值：
+   `Attacker/imperial_legionary`（stop）**0.00 m**（max 0.00、均速 0.00，10 个 agent 全部原地）；
+   `Attacker/khuzait_khans_guard`（charge）**86.01 m**（均速 8.55）；`Defender/battanian_wildling`（charge）21.03 m。
+5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件 **0 条**（无 groups ⇒ 不产生新事件），
+   且 `end.validity.verdict = ok`、`nanCount = 0`、坏行 0。
+   ⚠️ 计划原文写"`squad` 事件为单组"；**实测 0 条** —— 比计划原文更严格，且这才是 GC2（旧 plan 不产生新事件）的正确含义。
+   **结果：✅ 通过** —— `battle_20260925_001613_812.jsonl`（单兵种 20v20，字段等价于旧 plan 的一个 config）：
+   `squad=0`、`bad lines=0`、`verdict=ok`、`nanCount=0`、`ioFailed=false`、`reason=defenderWiped`（守方全灭，正常结束）。
+
+**T9 结论：五条判据全部通过（2026-09-25 00:15–00:17，游戏内实测）。**
+⚠️ 首跑即暴露一个**离线测试发现不了**的缺陷（mission 之外访问 `MovementOrder` ⇒ `TypeInitializationException`，
+且永久污染该类型），已在 T12 修复（commit `dba3d01`）并重新部署后复测通过 —— 详见下方 §6。
+
+### 6. T9 首跑暴露并修复的缺陷（T12）
+
+**现象（2026-09-25 00:15，判据 2 第一次跑）**：`bl_cmd.py start --attacker-groups …` 返回
+`handler_exception: TypeInitializationException: The type initializer for 'TaleWorlds.MountAndBlade.MovementOrder' threw an exception.`
+（`MapMovement` ← `ValidateGroupedSide` ← `Start()`）。
+
+**根因**：`MovementOrder` 是 struct，其静态字段（`MovementOrderCharge/Stop/…`）在**类型初始化**时构造实例；
+而 `Start()` 跑在 **mission 之外**（游戏停在自定义战斗界面）⇒ 访问即抛。更严重：.NET 会把静态构造失败的类型
+**永久标记为不可用** ⇒ 同一进程内后续任何 `MovementOrder` 访问都抛（**连旧路径 `ApplyCharge` 也一起坏**）。
+T5 的 M2 修复（把冲突校验从"比字符串"改成"比落点"）首次在 `Start()` 里碰它 ⇒ 埋下此缺陷。
+
+**为什么之前全绿**：编译、`tools/jsontest`、`bl_selftest.py` 在 mission 之外**不执行**引擎类型初始化 ⇒
+**离线测试在结构上不可能发现它**；只有 T9（游戏内）能暴露。
+
+**修法（commit `dba3d01`）**：新增**纯字符串** `MovementKey(string)` 承担落点比较，彻底不碰 `MovementOrder`；
+错误码 / 消息文本 / 逐字回显 / `resolvedTroops` 输出**逐字未变**。T11 移除 `hold` 后 5 个 movement 与 5 个落点
+**一一对应** ⇒ 字符串比较 ≡ 落点比较（语义零变化）。`MapMovement` 的 doc 补上"**只允许在 mission 内调用**"。
+修后全仓 `MovementOrder` 出现点逐条自查 ⇒ 无 mission 之外的执行点。
+复测：重新部署（`2183A94B…`）+ 重开游戏 ⇒ **判据 2–5 全过**。
+
+**教训（可复用）**：任何"在 mission 之外访问引擎类型"的代码都可能在**离线全绿**的情况下炸，
+且后果是**进程级永久污染**（该类型在本次运行里再不可用）。这类缺陷只能靠游戏内判据兜住 ——
+这正是计划把 T9 定为必过项的价值。
+
+### 7. 提交记录
+
+- `ab5c3a3` —— **T5**：`src/ScenarioRunner.cs` 自定义 `IMissionTroopSupplier`（`SquadTroopSupplier`）按组建队/编队/下命令。
+- `20e8d1e` —— **T6**：`src/RoundOrchestratorBehavior.cs` 多轮重生与每轮命令重申按组（`x = base.x + i*12f`）。
+- `8af3989` —— **T7**：遥测落点 —— `unit.formation` 字段 + `squad` 事件 + `EnumNames.Formation` 别名映射（按真值写死）。
+- `d2c8623` —— **T8**：版本 `0.8.8`（`src/BridgeConfig.cs` + `module/SubModule.xml`）+ 编译部署
+  （`out\BlBridge.dll` 与模块目录 DLL sha256 逐字一致）。
+- `b775b08` —— **计划勘误**：§T5 规格段三处作废（self-spawn / 位置分段 / 指定编队）+ movement/`hold` 落点裁决。
+- `7fc8157` —— **T10**：文档与示例 plan（`README.md` §七 事件格式 + `tools/plan.multitroop.example.json`）。
+- **T11**：移除 DSL 的 `hold`（引擎层本就等同 `stop`）—— 写 `hold` 在解析期报错并提示改用 `stop`；连带删除 `OrderNotes`/`AppendOrderNote`/`orderNotes`（唯一用户消失）；文档/测试同步为 5 词。（commit `706b88f`）
+- `dba3d01` —— **T12**：修 T9 游戏内实测暴露的 `TypeInitializationException` —— `Start()` 不再触碰 `MovementOrder`，
+  改用**纯字符串** `MovementKey` 做落点比较（语义等价：5 词与 5 落点一一对应）。另 `676b23c` 记录"dll 非确定性编译"的核对口径。
+
+---
+
+## 十七、全兵种扫描：可用性判定 + 覆盖扫描（2026-09-25，T15）
+
+**要回答的两个问题**：① 3200 个候选 id 里游戏端认哪些？② 认的里面，哪些"通过校验却没真正生成出来"？
+前者是清单质量问题，**后者才是真正的兵种 bug**。
+
+**工具**：`tools/bl_troop_sweep.py`（新增，输出 UTF-8 中文）
+
+- `probe`（可用性判定）：每包 id **追加一个已知坏 id 当引信**，让每次 `start` 必然以 `unknown_troop`
+  收场 ⇒ **永不建 mission** ⇒ 绕开「成功 start 之后 abort 拉不回 loading」的引擎卡死（已复现 2 次）。
+  配合 v0.8.8 的 T14（错误消息**一次报出全部**坏 id），4 包就拿到完整清单 ——
+  不需要二分，也不需要像上一轮那样真去打 11 场战斗。
+- `cover`（覆盖扫描）：用可用 id 跑真战斗（每场 300 个 id、每方 150、每 id 1 人），等 `ended`
+  （**不 abort**），再从该场 JSONL 的 `unit` 事件取 `troop` 集合与期望集合比对。
+  判据可靠：`unit` 在 `OnAgentBuild` 对**每个** agent 写一行，不受 `state`/`ai` 采样限制。
+
+### probe 结果（3200 个 id → 4 包）
+
+| 包 | 坏 | 好 |
+|---|---|---|
+| 0..800 | 403 | 397 |
+| 800..1600 | 518 | 282 |
+| 1600..2400 | 20 | 780 |
+| 2400..3200 | 0 | 800 |
+| **合计** | **941** | **2259** |
+
+与 2026-09-24 的结论（941 / 2259）**逐包一致** —— 差别是这次拿到了**完整坏 id 清单**
+（上一轮只拿到每包前 8 条）。产物：`.sdd/2026-09-24-multitroop-tactics-plan/sweep_probe_full.json`。
+
+### cover 结果（8 场，2259 个可用 id 全量覆盖）
+
+```
+cover_01..07: 期望 300 / 实际 unit 兵种 300   缺 0、多 0
+cover_08:     期望 159 / 实际 unit 兵种 159   缺 0、多 0
+覆盖缺口合计 0 个
+```
+
+⇒ **零缺口：不存在"通过校验却没 spawn 出来"的兵种** ⇒ 本轮**没有真正的兵种 bug**。
+产物：`.sdd/.../sweep_coverage.json`。
+
+### 精确分类（修正上一轮"全是非战斗 NPC"的归纳）
+
+上一轮那句话**不准确**。用 Sage 索引的 `occupation` 字段对 941 个被拒 id 客观统计：
+
+| occupation | 个数 | 说明 |
+|---|---|---|
+| Lord | 500 | 领主/贵族（`lord_*`、`dead_lord_*`） |
+| Soldier | 146 | **战斗单位**，但挂在剧情/任务系统：`conspiracy_*`（阴谋部队）、`*_contender*`（竞技场对手）、`borrowed_troop`、`anti_imperial_conspiracy_boss` … |
+| Wanderer | 67 | 游荡者/同伴 |
+| Merchant | 55 | 商人 |
+| NotAssigned / Special / Bandit / Gangster / Mercenary | 79 | `spc_*`（特殊人名与装备模板）、帮派打手等 |
+| 平民职业 | 94 | Headman / Artisan / Preacher / RuralNotable / GangLeader / GoodsTrader / Townsfolk / Villager / None |
+
+**准确表述**：它们都不是「自定义战斗可用的兵种」，而是**剧情/任务/竞技场/领主/平民职业 NPC**。
+其中 225 个的 occupation 属战斗类，但全部挂在剧情或任务系统上
+（`conspiracy_*`、`contender_*`、`thug_*`、`storymode_*`、`tutorial_*`）。
+
+**机制**：`unknown_troop` = 游戏端 `Resolve` 返回 null ⇒ 这些 id **不在运行时对象表里**；
+而 BannerlordSage 索引是**静态读 `ModuleData/*.xml`**，于是收录了一批"写在 XML 里、但游戏运行时
+并不注册为兵种"的条目（如 `spspecialcharacters.xml` 里的特殊人物/装备模板）。
+⇒ 给 MCP 联动的建议不变：`bl_sage` / `bl_lookup_troop` 的说明要写明
+「**索引含非战斗条目，不等于可 spawn 的兵种**」。
+
+### 本轮修掉的 3 个自写工具 bug（都是"干跑绿灯、真跑才炸"）
+
+1. `bl_mcp.send_command` 的契约是 **`(响应 dict, 错误字符串)`**，第一版当裸 dict 用 ⇒ `AttributeError`。
+2. 控制通道的方法名是 **`start_battle`**（不是 CLI 子命令名 `start`）⇒ 游戏端 `unknown_method` 拒掉。
+3. 引信剔除：第一版把"等于引信 id 的条目"全剔除；而引信本身也在清单里（第 3 包第 1801 个），
+   游戏端把它当**两个坏组**分别报出 ⇒ 少算 1 个坏 id（19 vs 20）。改为**只跳过引信那一组**。
+
+### 一条口径修正
+
+`ended` 之后引擎**可能长时间不回 idle**（实测 120 秒仍未回，但 `busy` 已是 `false`），
+所以 `cover` 的等待改成「等 `ended` + 软等 idle（默认 10 秒，超时就继续）」，
+与 `bl_batch.py` 的实跑口径一致 —— 硬等 idle 会把扫描**卡死在第一场**（本次实际发生）。
+
+### 环境与产物
+
+- 部署：dll sha256 `fcca590bdc7a6472`（本会话重新构建并部署；`SubModule.xml` 同时统一为无 BOM + LF）。
+- 战斗日志：`battle_20260925_0214*.jsonl` … `battle_20260925_021822_999.jsonl`（cover 的 8 场）。
+- 窗口：8 场 × 约 30 秒（cap 20 游戏秒）。
+
+---
+
+## 十八、T13 复测（游戏内）：**未通过** —— 根因精确锁定 `ChargeToTarget`（2026-09-25）
+
+**复测配置**（攻守各一个 `stop` 组 + 一个 `charge` 组作对照）：
+
+```
+attacker-groups "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:10:HorseArcher:charge"
+defender-groups "battanian_wildling:10:Infantry:stop|battanian_fian_champion:10:Ranged:charge"
+```
+
+日志：`battle_20260925_023155_120.jsonl`；部署 dll `82bd8cec4938eb0f`（`AssemblyVersion` 0.8.8.0）。
+
+**判据与结果（未通过）**
+
+| side | troop | 组配置 | 平均速度 | 位移 | `order` 事件统计 |
+|---|---|---|---|---|---|
+| Attacker | imperial_legionary | **stop** | 0.186 | 72 m | **Stop 116/116** ✓ |
+| Attacker | khuzait_khans_guard | charge | 8.928 | 117 m | Charge（对照）✓ |
+| Defender | battanian_wildling | **stop** | **0.904** | **154 m** | **ChargeToTarget 59 / Stop 56** ✗ |
+| Defender | battanian_fian_champion | charge | 0.771 | 148 m | ChargeToTarget/Charge（对照）✓ |
+
+**根因（精确）**：守方编队的 order 被引擎的**防守战术 `ChargeToTarget`** 覆盖，而且**每 1–2 秒来回拉锯**：
+
+```
+t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5.43 ChargeToTarget → 7.43 Stop → …
+```
+
+⇒ T13 原来的修法（"组路径每 0.5 秒重申 order"）只能与它**拉锯**，净效果是守方一路走到 154 米外。
+攻方（非防御方）没有 `ChargeToTarget` 覆盖，所以 order 全程保持 `Stop`。
+
+**结论**
+
+1. 交接文档里"根因可能是 team 级 `TacticCharge` 覆盖"——**方向对、具体战术猜错了**：
+   实际是 `ChargeToTarget`（守方的防守战术）。
+2. "周期性重申 order"这条路**已被证伪**（拉锯无效）⇒ 修法应换成下面之一：
+   - **让该编队脱离 AI 战术**（首选：编队不再被 team 战术覆盖，只执行我们下发的 order）；
+   - **直接设置守方的战术**为"保持不动"，让引擎意图与我们要的**一致**，而不是持续对抗；
+   - 每**帧**重申 order（像 `--dummy-armor` 那样硬抗；代价是持续对抗与抖动）。
+3. 这类修复**必须走游戏内判据** —— 离线测试在结构上发现不了（与 T12 `TypeInitializationException` 同一教训）。
+
+**已具备的紧反馈循环**（`/diagnosing-bugs` 的第一步）：一次 `start`（约 60 秒）+ 读该场 JSONL 的
+`order` 事件与按 troop 的 `state.speed`/位移，即可判定"守方 stop 组是否被覆盖"。
+
+### T13 复测（第二次，修法①）：**通过** ✅
+
+修法①（`SetControlledByAI(false, false)`，提交 `ceafe6e`）部署（dll `27c3587f58bb904a`）后，
+用**完全相同的复测命令**重跑，日志 `battle_20260925_023826_544.jsonl`：
+
+| side | troop | 组配置 | 平均速度（修前→修后） | 位移（修前→修后） | `order` 事件（修前→修后） |
+|---|---|---|---|---|---|
+| Attacker | imperial_legionary | stop | 0.186 → **0.036** | 72 → **29 m** | Stop 116 → Stop **240/240** |
+| Attacker | khuzait_khans_guard | charge | 8.928 → 9.455 | 117 → 232 m | Charge（对照） |
+| **Defender** | **battanian_wildling** | **stop** | **0.904 → 0.000** | **154 → 8 m** | **ChargeToTarget 59 / Stop 56 → Stop 240/240** ✅ |
+| Defender | battanian_fian_champion | charge | 0.771 → 0.814 | 148 → 207 m | Charge（对照） |
+
+**判据全部满足**：
+
+1. 守方 stop 组的 `order` 事件**不再出现 `ChargeToTarget`**（240/240 全是 `Stop`）
+   ⇒ team 级 `TacticCharge` 再也改不动我们下发的 order；
+2. 守方 stop 组平均速度降到 **0.000 m/s**，位移从 154 m 降到 **8 m**（1/19）；
+3. 两个 **charge 组（对照）照常在冲** ⇒ 证明**没有冻住战斗** —— 这正是刻意不用官方那句
+   `SetIsAIPaused` 的原因（它会连士兵个人行为一起冻结，只有纯性能基准才需要）。
+
+⇒ **T13 缺陷关闭**。这条也再次印证：`MovementOrder`/编队 order 这类问题**只能靠游戏内判据**，
+离线编译与 jsontest 在结构上发现不了（与 T12 同一教训）。

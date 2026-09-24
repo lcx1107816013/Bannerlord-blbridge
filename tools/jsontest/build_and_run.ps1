@@ -13,7 +13,8 @@ $src = @(
     (Join-Path $Root 'src\BridgeConfig.cs'),
     (Join-Path $Root 'src\ProbePolicy.cs'),
     (Join-Path $Root 'src\BuildInfo.cs'),
-    (Join-Path $Root 'src\BridgeConfigFile.cs')
+    (Join-Path $Root 'src\BridgeConfigFile.cs'),
+    (Join-Path $Root 'src\SquadSpec.cs')       # T4：纯 BCL（不碰 TaleWorlds），故可离线单测
 )
 Write-Output ("[1/2] compile offline unit tests -> " + $out)
 & $csc /nologo /target:exe /out:$out @src

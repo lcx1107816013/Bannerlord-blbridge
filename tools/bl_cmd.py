@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bl_common  # noqa: E402
 import bl_mcp  # noqa: E402
+import bl_sage  # noqa: E402
 
 
 def _print(resp, err):
@@ -34,6 +35,7 @@ def _print(resp, err):
 
 
 def main(argv):
+    bl_common.safe_streams()
     ap = argparse.ArgumentParser(description="BlBridge 控制通道 CLI")
     sub = ap.add_subparsers(dest="cmd")
 
@@ -67,6 +69,12 @@ def main(argv):
     p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
                    help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
                         "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
+    p.add_argument("--attacker-groups", dest="attacker_groups", default=None,
+                   help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
+                        '如 "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
+                        "（给了它则 --attacker/--a 被忽略；非法直接报错，不静默跳过）")
+    p.add_argument("--defender-groups", dest="defender_groups", default=None,
+                   help="守方多兵种/战术组，语法同 --attacker-groups（给了它则 --defender/--d 被忽略）")
     p.add_argument("--rounds", type=int, default=None,
                    help="多轮连续实验：同一 mission 内跑 N 轮（每轮一个日志文件；默认 1 = 关闭）")
     p.add_argument("--round-end-alive", dest="round_end_alive", type=int, default=None,
@@ -79,6 +87,8 @@ def main(argv):
                    help="重生时守方进场点")
     p.add_argument("--random-seed", dest="random_seed", type=int, default=None,
                    help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
+    p.add_argument("--skip-troop-check", dest="skip_troop_check", action="store_true",
+                   help="跳过兵种 id 校验（索引只覆盖官方 XML；用第三方模组兵种时加它）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -144,6 +154,46 @@ def main(argv):
             params["dummyBodyItem"] = args.dummy_body_item
         if getattr(args, "random_seed", None) is not None:
             params["randomSeed"] = int(args.random_seed)
+        for attr, key in (("attacker_groups", "attackerGroups"),
+                          ("defender_groups", "defenderGroups")):
+            raw = getattr(args, attr, None)
+            if not raw:
+                continue
+            try:
+                # 在**本地**先校验（GC3）：非法绝不透传给游戏端 —— 那边只会静默用默认值。
+                bl_common.parse_squad_groups(raw)
+            except ValueError as e:
+                print("错误: --%s 解析失败：%s" % (attr.replace("_", "-"), e))
+                return 2
+            params[key] = raw
+        # 兵种 id 前置校验（与 MCP bl_start_battle 同一语义）：CLI 打错 id 同样会被
+        # 游戏端静默 fallback、白等一整场对局。给了 --attacker/--defender-groups 时
+        # 对应的单兵种参数会被游戏端忽略，所以只校验真正生效的那组。
+        # 索引不可用 ⇒ 警告但放行（软依赖：BlBridge 不因没装 BannerlordSage 而不能用）。
+        ids = []
+        if getattr(args, "attacker_groups", None):
+            ids += [g["troop"] for g in bl_common.parse_squad_groups(args.attacker_groups)]
+        else:
+            ids.append(args.attacker)
+        if getattr(args, "defender_groups", None):
+            ids += [g["troop"] for g in bl_common.parse_squad_groups(args.defender_groups)]
+        else:
+            ids.append(args.defender)
+        chk = bl_sage.check_troops(ids)
+        if chk.get("available") and chk.get("missing"):
+            if getattr(args, "skip_troop_check", False):
+                print("警告: 兵种 id 不在索引里（--skip-troop-check 放行）：%s"
+                      % ", ".join(chk["missing"]))
+            else:
+                print("错误: 兵种 id 在索引里不存在：%s" % ", ".join(chk["missing"]))
+                for m in chk["missing"]:
+                    s = bl_sage.suggest_troops(m)
+                    if s:
+                        print("  近似候选：%s -> %s" % (m, ", ".join(s)))
+                print("  （索引只覆盖官方 XML；第三方模组兵种请加 --skip-troop-check）")
+                return 2
+        elif not chk.get("available"):
+            print("警告: 兵种 id 未校验：%s" % (chk.get("reason") or "索引不可用"))
         if getattr(args, "rounds", None):
             params["rounds"] = int(args.rounds)
             if getattr(args, "round_end_alive", None) is not None:

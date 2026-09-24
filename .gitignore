@@ -1,4 +1,4 @@
-﻿# ── 构建产物（build.ps1 生成，可随时重建）──
+# ── 构建产物（build.ps1 生成，可随时重建）──
 /out/
 
 # ── Python 缓存 ──
@@ -11,3 +11,4 @@ __pycache__/
 # ── 本机运行时配置（入库的是 *.example.json）──
 /blbridge.json
 /blbridge_game.json
+.sdd/

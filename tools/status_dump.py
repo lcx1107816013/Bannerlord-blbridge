@@ -13,6 +13,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 import bl_analyze  # noqa: E402
 
 
@@ -22,6 +23,7 @@ def default_log_dir():
 
 
 def main():
+    bl_common.safe_streams()
     logdir = os.environ.get("BLBRIDGE_LOG_DIR") or default_log_dir()
     print("日志目录：%s\n" % logdir)
 

@@ -22,6 +22,10 @@ import sys
 # I/O 与目录扫描收拢在 bl_common（code-review 2026-09-24：三处重复合并成一处）。
 # 这里保留同名的公开入口 —— bl_mcp.py 与 bl_selftest.py 一直在用它们。
 from bl_common import battles_dir, default_log_dir, latest_battle, list_battles, load_events  # noqa: E402,F401
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 
 
 def _pct(vals, q):
@@ -247,6 +251,7 @@ def report(res):
 
 
 def main(argv):
+    bl_common.safe_streams()
     as_json = "--json" in argv
     argv = [a for a in argv if a != "--json"]
     if "--all" in argv:
