@@ -43,7 +43,7 @@ BlBridge/
   blbridge_game.example.json      游戏端配置模板
   tools/bl_mcp.py                 MCP server（stdio，15 个工具）
   tools/bl_analyze.py             分析器（可独立命令行运行）
-  tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径）
+  tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
   tools/bl_compare.py             A/B 对比报告：主指标=满编窗口 + 95%CI + 样本量门槛 + 换边双跑交叉验证（阶段 2④）
   tools/bl_cmd.py                 命令行：status / start / wait / batch / compare / buildcheck / fastforward / speed
@@ -53,7 +53,8 @@ BlBridge/
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
   tools/plan.example.json         跑批计划示例（换边双跑）
   tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
-  tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲）
+  tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲；两件甲护甲数值完全相同，只差材质）
+  tools/plan.material_r.example.json 跑批计划示例（改 Warbandlord MaterialResistance 的对照：跑 baseline / 改后两趟，各自产出 manifest 再用 --compare）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json

@@ -399,6 +399,111 @@ def test_death_compare_split():
     check(s3["n"] == 0 and s3["arrow_damaging_median"] is None, "空输入不崩", s3)
 
 
+def test_dummy_analyze_compare():
+    """跨档对比（材质/护甲对照）的纯函数 + 接入层。
+
+    为什么必须测：这是「两档差多少、显不显著」的唯一产出，而本项目最贵的教训
+    正是「参数静默失效 / 换装没生效却照样出数」（2026-09-24 材质对照 Δ=0 即如此）。
+    """
+    import bl_dummy_analyze as bda
+
+    # 1) Welch t 手算：a=[10,20,30]（mean 20, var 100）、b=[40,50,60]（mean 50, var 100）
+    #    se = sqrt(100/3 + 100/3) = 8.16497 ⇒ t = (20-50)/8.16497 = -3.6742
+    t = bda.welch_t([10, 20, 30], [40, 50, 60])
+    check(t is not None and abs(t + 3.6742) < 0.001, "welch_t 手算 = -3.674", t)
+    check(bda.welch_t([1.0], [2.0]) is None, "样本 <2 ⇒ t = None（不假装显著）")
+    check(bda.welch_t([5, 5, 5], [5, 5, 5]) is None, "合并标准误 0 ⇒ t = None")
+
+    # 2) 档名解析：没有 '=' 时用 basename
+    spec = bda.parse_compare_specs(["A=x.jsonl", r"C:\d\b"])
+    check(spec == [("A", "x.jsonl"), ("b", r"C:\d\b")], "parse_compare_specs：无 = 用 basename", spec)
+
+    # 3) 换装生效判据：四态都要能区分（"未知"绝不等于"生效"）
+    check(bda.swap_verdict({"swaps": [], "swapMissing": False}).startswith("未请求"),
+          "无 dummy_swap ⇒ 未请求换装")
+    check(bda.swap_verdict({"swaps": [{"item": "a"}], "swapMissing": True}).startswith("未知"),
+          "缺 actualItem ⇒ 未知（不默认生效）")
+    bad = bda.swap_verdict({"swaps": [{"item": "a", "actualItem": "b"}], "swapMissing": False})
+    check(bad.startswith("!! 未生效"), "actualItem != item ⇒ 未生效", bad)
+    ok = bda.swap_verdict({"swaps": [{"item": "a", "actualItem": "a", "material": "Cloth",
+                                      "armorBody": 4, "agents": 10}], "swapMissing": False})
+    check(ok.startswith("生效"), "actualItem == item ⇒ 生效", ok)
+
+    # 4) 逐击 rows：优先 bodyPartName，旧日志回退 bodyPart
+    ev = [{"t": "dummy_hit", "applied": 10.0, "blocked": False, "isMissile": False,
+           "bodyPartName": "Head", "bodyPart": "CriticalBodyPartsBegin"}]
+    r1 = bda.applied_from_range(ev)
+    check(r1[0]["bodypartname"] == "Head", "优先用 bodyPartName", r1[0]["bodypartname"])
+    r2 = bda.applied_from_range([{k: v for k, v in ev[0].items() if k != "bodyPartName"}])
+    check(r2[0]["bodypartname"] == "CriticalBodyPartsBegin",
+          "旧日志（无 bodyPartName）回退 bodyPart", r2[0]["bodypartname"])
+
+    # 5) 分组对比 + Δ% / t 手算：A=[10,20]（mean 15）、B=[20,30]（mean 25）⇒ +66.7%
+    def tier(label, vals):
+        return (label, {"files": [label], "versions": ["0.8.6"], "armor": None, "swaps": [],
+                        "swapMissing": False, "hasBlockedField": True,
+                        "rows": [dict(r1[0], applied=float(v)) for v in vals]})
+
+    table = bda.compare_tiers([tier("A", (10, 20)), tier("B", (20, 30))],
+                              "bodypartname", "applied", None, True)
+    st = table["Head"]["B"]
+    check(st["n"] == 2 and abs(st["mean"] - 25.0) < 1e-9, "B 组均值 = 25", st["mean"])
+    check(abs(st["median"] - 25.0) < 1e-9, "B 组中位 = 25", st["median"])
+    check(abs(st["deltaPct"] - 66.6667) < 0.01, "Δ% = +66.7", st["deltaPct"])
+    check(table["Head"]["A"]["deltaPct"] == 0.0, "基准档 Δ% = 0")
+    check(bda.compare_tiers([tier("A", (10, 20)), tier("B", (20, 30))],
+                            "bodypartname", "applied", None, True)["Head"]["B"]["t"] is None
+          or abs(bda.compare_tiers([tier("A", (10, 20)), tier("B", (20, 30))],
+                                   "bodypartname", "applied", None, True)["Head"]["B"]["t"]) > 0,
+          "两档 t 可算（n=2）")
+
+    # 6) 筛选口径（§七 教训：箭伤不筛 blocked 会得出反向结论）
+    rows = [{"applied": 1.0, "blocked": True, "missile": True, "bodypartname": "Head"},
+            {"applied": 2.0, "blocked": False, "missile": True, "bodypartname": "Head"},
+            {"applied": 3.0, "blocked": False, "missile": False, "bodypartname": "Head"}]
+    check(len(bda.select_rows(rows, "bodypartname", True, True)) == 1, "箭伤筛掉被挡下 ⇒ 1 条")
+    check(len(bda.select_rows(rows, "bodypartname", True, False)) == 2, "不筛 blocked ⇒ 2 条（对照口径）")
+    check(len(bda.select_rows(rows, "bodypartname", None, False)) == 3, "全部口径 ⇒ 3 条")
+
+    # 7) manifest 展开 + 接入层端到端（默认中文控制台 GBK 下也必须 exit 0）
+    tmp = tempfile.mkdtemp(prefix="bda_compare_")
+    try:
+        def write_tier(path, applied):
+            with io.open(path, "w", encoding="utf-8", newline="") as fh:
+                for side in ("Head", "Chest"):
+                    fh.write(json.dumps({"t": "dummy_hit", "applied": applied, "blocked": False,
+                                         "isMissile": False, "bodyPartName": side},
+                                        ensure_ascii=False) + "\n")
+
+        fa, fb = os.path.join(tmp, "a.jsonl"), os.path.join(tmp, "b.jsonl")
+        write_tier(fa, 10.0)
+        write_tier(fb, 12.0)
+        man = os.path.join(tmp, "runs.json")
+        with io.open(man, "w", encoding="utf-8", newline="") as fh:
+            json.dump({"configs": [{"label": "A_base", "runs": [{"file": fa}]},
+                                   {"label": "B_alt", "runs": [{"file": fb}]}]}, fh)
+        mt = bda.manifest_tiers(man)
+        check(mt == [("A_base", [fa]), ("B_alt", [fb])], "manifest 展开成两个档", mt)
+        check(bda.manifest_tiers(fa) is None, "非 manifest 的 jsonl ⇒ None（不误判）")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "gbk"      # 模拟默认中文控制台
+        # 子进程按 gbk 写 ⇒ 必须按 gbk 读；用 utf-8 读会在线程里抛 UnicodeDecodeError
+        # 且**被静默吞掉**，只留下 stdout=None（2026-09-24 的 MCP 段就栽在这里）。
+        proc = subprocess.run([sys.executable, os.path.join(HERE, "bl_dummy_analyze.py"),
+                               "--compare", "base=" + man, "--by", "bodypart"],
+                              capture_output=True, text=True, encoding="gbk",
+                              env=env, timeout=180)
+        check(proc.stdout is not None, "子进程 stdout 可读（None = 编码失配被吞）",
+              repr(proc.stdout)[:60])
+        proc_stdout = proc.stdout or ""
+        check(proc.returncode == 0, "跨档对比 CLI 在 GBK 控制台 exit 0", proc.returncode)
+        check("跨档对比" in proc_stdout and "Δ%" in proc_stdout, "输出含对比表",
+              proc_stdout[:90].replace("\n", " "))
+        check("+20.0%" in proc_stdout, "Δ% 手算 = +20.0%（10 → 12）")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     import bl_common
     bl_common.safe_streams()      # 默认中文控制台（GBK）下不因 ⇒/⚠️ 崩（同 bl_metrics/bl_compare 的修复）
@@ -743,6 +848,13 @@ def main():
     test_bl_batch_plan_args()
     test_bl_cmd_dummy_armor_strict()
     test_death_compare_split()
+
+    # ── ⑫ 跨档对比（材质/护甲对照：两档差多少 + 生效判据）──────────────
+    print()
+    print("=" * 90)
+    print("⑫ bl_dummy_analyze --compare：跨档对比（材质/护甲对照）")
+    print("=" * 90)
+    test_dummy_analyze_compare()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))

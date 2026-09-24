@@ -1,6 +1,6 @@
 # BlBridge 进度列表
 
-> **最后核实：2026-09-24 19:40**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37）
+> **最后核实：2026-09-24 21:07**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37；本轮只做机理取证与工具准备，见 §十四）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
 > 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
 > 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
@@ -617,3 +617,94 @@ AttributeError: 'NoneType' object has no attribute 'splitlines'
 **教训（本项目"静默失效"家族新成员）**：凡是"父进程按 A 编码读子进程输出"，**两端编码都要钉死**，
 且读取路径上的异常必须能被看见 —— 线程里的 `UnicodeDecodeError` 就是一个把"编码问题"伪装成
 "`NoneType` 没有 `splitlines`"的完美烟幕。
+
+## 十四、材质对照：机理取证 + 两轮实测准备（2026-09-24 晚间续）
+
+**起因**：§九/§十二 的材质对照（`--dummy-body-item` 换身甲）`Δ 中位 = 0.0`，当时的猜测是
+"Warbandlord 的 5 层串行把单层效应稀释了"。**反编译取证推翻了它** —— 真因是**改错了装备副本**。
+
+### 取证结论（`ilspycmd` 反编译 Warbandlord.dll → `%TEMP%\wb_decomp`）
+
+| 结论 | 证据（行号） |
+|---|---|
+| Warbandlord 的护甲/材质公式读 **`victim.SpawnEquipment`** | `Warbandlord.decompiled.cs:7311` `spawnEquipment.GetSpawnEquipmentArmorAmount(...)`；`:7372-7376`；`:11055` `TryGetFirstWarbandlordArmorEffect(this Equipment spawnEquipment, …)` |
+| 原版 `Agent.SpawnEquipment { get; private set; }`（返回对象引用） | `Agent.cs:863` |
+| §九 的换装写的是 `agent.Equipment`（= MissionEquipment）⇒ **公式根本看不见** | 旧 `DummyRangeBehavior.cs:439` `a.Equipment.FillFrom(eq, banner)` |
+| 取**第一个覆盖该部位的层**（Body(5)→Gloves(9)→Leg(8)→Head(7)→Cape(6)），**不是串行叠加** | `Warbandlord.decompiled.cs:5173-5180`、`:11055-11068` |
+| 公式：`Threshold = R×A_eff×0.6×随机×mult`、`PR = 0.125^(R·A_eff·0.0215+0.09)` | `:5268-5276`；`EffectiveArmorDefense = CalcScaledArmorDefense(layer.ArmorDefense×multiplier + extra)`（`:12811-12814`）；`multiplier = 引擎护甲 ÷ GetSpawnEquipmentArmorAmount(部位)`（`:7374-7376`） |
+| R 表（`config.xml`，路径 `DamageCalc/MaterialResistance/<材质>/PierceResistance`） | Cloth **0.55** / Leather 0.55 / Chainmail 0.6 / Plate **0.65** |
+
+### 干净对照的材料（都已查实）
+
+- **物品对**（护甲数值**完全相同**、只差材质）：
+  Cloth `leather_strips_over_padded_robe` vs Plate `aserai_scale_armor_on_cloth` —— 两件都是
+  `(body 36, leg 6, arm 7, head 0)`。
+  为什么必须数值全同：`armorEffectMultiplier` 的分母 `GetSpawnEquipmentArmorAmount(部位)` 读**物品自身**护甲，
+  数值差一点就会同时改动"护甲量"与"材质"两个变量（旧的 `nordic_tunic` 4 vs `plated_leather_coat` 60 就是 15 倍差）。
+- **靶子 `imperial_legionary`**：3 套 `EquipmentRoster` **完全相同且全部 Plate**（Body `imperial_lamellar` 等）
+  ⇒ 改 Plate 的 R 能 100% 影响它，没有"每场随机选一套 roster"的问题。
+- **攻方 `battanian_fian_champion` 20 人 vs 靶子 10 人**：靶子受击 5743 条/3 场，其中
+  **近战 Pierce 未被挡 1446 条**、近战 Cut 未挡 2719 条 ⇒ Pierce 样本主要在**近战**（箭大多被盾挡下，仅 47 条）。
+
+### 两轮实测设计（每轮只差一个变量）
+
+**第一轮（零 C# 改动：改 config 的 R 表）** —— `DamageCalc/MaterialResistance/Plate/PierceResistance`：0.65 → 0.85
+
+- 判据①：`bl_read_config` 回读 = `0.85`（`bl_apply_config` 的 dry-run 已预演，`missing: []`）
+- 判据②：**近战 Pierce（未挡）**的 `applied` 下降（方向：R↑ ⇒ 阈值↑ ⇒ 伤害↓）
+- 判据③：**Cut 不变** —— 阴性对照（本轮只动 Pierce 的 R；若 Cut 也变，说明有其它机制在动）
+- 判据④：箭伤（筛 `blocked=false`）方向一致（样本仅 ~47/档 ⇒ 只作辅助）
+- ⚠️ **改 config 必须重启游戏**：`ConfigManager` 在 SubModule 构造时读文件，`OnGameInitializationFinished`
+  只是把已读入的字典应用回去（工具描述里也写了这句）
+
+**第二轮（v0.8.7 的换装）** —— 用上面那对物品
+
+- 判据①：`dummy_swap.actualItem` == 请求的 item（v0.8.7 起从 **SpawnEquipment** 读回，与公式同源）
+- 判据②：**躯干类部位的 Δ ≠ 0，且头/腿/臂不变**（Body 甲只覆盖躯干 ⇒ 归因干净的正面证据）
+- 判据③：Cut 与 Pierce 分开看（两件甲 Cut R 都是 0.8、Pierce 0.55 vs 0.65 ⇒ 差异应只出现在 Pierce）
+
+### 本轮改动
+
+1. **`src/DummyRangeBehavior.cs`（v0.8.7）**：换装改走引擎公开 API
+   `Agent.UpdateSpawnEquipmentAndRefreshVisuals(Equipment)`（`Agent.cs:3685` 起）——
+   它一次做完 SpawnEquipment 赋值 + MissionEquipment 同步（内部 `FillFrom`）+ 驱动属性重算 + 视觉刷新；
+   传进去的是自己 Clone 的副本 ⇒ 不污染兵种模板。`dummy_swap.actualItem` 改为**从 SpawnEquipment 读回**。
+   顺带删掉手写 `FillFrom` 与为它绕出来的 `Banner` 查找（那段注释里记的坑一并消失）。
+2. **`tools/bl_dummy_analyze.py`**：新增 `--compare LABEL=PATH …` 跨档对比。每档先打**生效判据**
+   （`meta.version` / `dummy_meta.armor` / `dummy_swap` 的 `item` vs `actualItem` 四态），
+   再按部位给 n / 均值 / 中位 / Δ% / Welch t，并把**近战 / 箭伤（筛 blocked）/ 箭伤（不筛，对照）**
+   分开报 + 被挡下率。PATH 可为 jsonl / 目录 / 通配符 / `bl_batch` 的 manifest。
+   纯函数 seam：`welch_t` / `parse_compare_specs` / `manifest_tiers` / `explode_tiers` / `load_tier` /
+   `swap_verdict` / `select_rows` / `compare_tiers` / `render_compare`。
+3. **`tools/bl_selftest.py`**：新增 ⑫ 段 `test_dummy_analyze_compare`（welch_t 手算、Δ% 手算、
+   生效判据四态、筛选口径、manifest 展开、GBK 控制台端到端）⇒ 全量回归 **EXIT=0**。
+4. **plan**：`tools/plan.material_r.example.json`（第一轮）与 `tools/plan.material.example.json`
+   （第二轮，已换成上面的干净对）。
+5. **部署 v0.8.7**：`dll sha256 = 3EB3B767183E04FB…`，`bl_cmd.py buildcheck` = 文件链条一致
+   （源码 = out 产物 = 部署文件）；进程内 DLL 待下次开游戏核对（`bridge_status.json` 里应出现 `3eb3b767…`）。
+
+### 复现命令（下次开游戏用）
+
+```powershell
+cd C:\Users\LCGX\CodeBuddy\20260923171333\BlBridge
+# 第一轮：baseline（R=0.65，v0.8.7 进程）
+python tools/bl_batch.py --plan tools/plan.material_r.example.json --out runs_r065.json
+#   → 关游戏 → 改 config（MCP bl_apply_config：DamageCalc/MaterialResistance/Plate/PierceResistance = 0.85）→ 重开
+python tools/bl_batch.py --plan tools/plan.material_r.example.json --out runs_r085.json
+python tools/bl_dummy_analyze.py --compare base=runs_r065.json r085=runs_r085.json --by bodypart
+# 第二轮：换装（同一轮开游戏里可一起跑）
+python tools/bl_batch.py --plan tools/plan.material.example.json --out runs_swap.json
+python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   # manifest 自动展开成两档
+```
+
+### 踩坑（同源第 3 次，已升级教训）
+
+写新测试时又用 `encoding="utf-8"` 读一个带 `PYTHONIOENCODING=gbk` 的子进程 ⇒ 同一个
+"读取线程吞异常 ⇒ `stdout=None`" 的坑（正是 §十三 刚修的）。仓库里 `test_compare_manifest_runs`
+早有正确示范（子进程 gbk ⇒ 按 gbk 读）。**规则升级：只要父进程读子进程输出，两端编码都显式对齐。**
+
+### 待验证（下次开游戏）
+
+- v0.8.7 的进程内 DLL 一致（`loadedSha256` 应 = `3eb3b767…`）
+- 第一轮 baseline / 改后各 3 场（中间必须重启游戏）；第二轮换装 2 档 × 3 场
+- 仍**未做**：③ 的换边双跑（立项遗留）；战役层（`meta.mission=game` 未实测）

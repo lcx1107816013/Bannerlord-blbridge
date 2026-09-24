@@ -1,0 +1,19 @@
+{
+  "label": "plate_pierce_R",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "dummySide": "defender",
+  "unlimitedAmmo": true,
+  "configs": [
+    {
+      "label": "plate_pierce",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10
+    }
+  ]
+}
