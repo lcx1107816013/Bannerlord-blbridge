@@ -627,7 +627,8 @@ namespace BlBridge
         /// 逐组校验：兵种 id 可解析（否则 unknown_troop），以及"同一实际编队被多组以不同 movement
         /// **落点**命中"⇒ conflicting_movements（§3 用户裁决 A）。落点编队 = Resolve(troop).GetFormationClass()，
         /// 不是 DSL 里写的 formation 字段。
-        /// 冲突比较用 MapMovement 映射后的落点（修复轮 1 · M2）：不同 movement 若落同一点不算冲突。
+        /// 冲突比较用 `MovementKey` 的**落点名**比较（纯字符串：绝不能在此处碰 `MovementOrder`，
+        /// 见 §1 与 `MovementKey` 的 doc）—— 不同 movement 若落同一点不算冲突（修复轮 1 · M2）。
         /// rawSegments：该方 DSL 按 | 切分的原始片段（与 specs 下标一致），用于逐字回显（修复轮 1 · m2）。
         /// T6：resolvedTroops 带出逐组 Resolve 的兵种对象（下标与 specs 一一对应），
         /// 供多轮编排器按组重生复用，避免重复解析。
@@ -640,8 +641,8 @@ namespace BlBridge
             resolvedTroops = null;
             List<BasicCharacterObject> troops = new List<BasicCharacterObject>();
             bool triedLoad = false;
-            Dictionary<FormationClass, MovementOrder.MovementOrderEnum> orderByFormation =
-                new Dictionary<FormationClass, MovementOrder.MovementOrderEnum>();
+            Dictionary<FormationClass, string> orderByFormation =
+                new Dictionary<FormationClass, string>();
             Dictionary<FormationClass, string> movementByFormation = new Dictionary<FormationClass, string>();
             Dictionary<FormationClass, string> rawByFormation = new Dictionary<FormationClass, string>();
             for (int i = 0; i < specs.Count; i++)
@@ -663,9 +664,9 @@ namespace BlBridge
                 troops.Add(troop);
                 FormationClass fc = troop.GetFormationClass();
                 string mv = s.Movement == null ? "charge" : s.Movement;
-                MovementOrder.MovementOrderEnum ord = ScenarioProbe.MapMovement(mv).OrderEnum;
+                string ord = ScenarioProbe.MovementKey(mv);
                 string raw = RawSegment(rawSegments, i, s.Troop);
-                MovementOrder.MovementOrderEnum prevOrd;
+                string prevOrd;
                 if (orderByFormation.TryGetValue(fc, out prevOrd))
                 {
                     if (prevOrd != ord)
@@ -909,7 +910,35 @@ namespace BlBridge
             }
 
             /// <summary>
+            /// DSL movement → 规范化的「落点名」（纯字符串）。缺省 charge。
+            ///
+            /// ⚠️ 为什么不能用 `MovementOrder`：`MovementOrder` 是 struct，其静态字段
+            /// （`MovementOrderCharge` / `MovementOrderAdvance` / …）在**类型初始化**时构造实例；该初始化在
+            /// **mission 之外**（`Start()` 阶段，游戏停在「自定义战斗界面」）会抛 `TypeInitializationException`，
+            /// 且 .NET 会把该类型**永久标记为不可用** ⇒ 同一游戏进程内后续任何 `MovementOrder` 访问
+            /// （连旧路径 `ApplyCharge` 的 `MovementOrder.MovementOrderCharge`）也一起坏掉。
+            /// `ValidateGroupedSide` 在 `Start()` 阶段（mission 之外）判落点，**只能**用本方法。
+            ///
+            /// 与落点一一对应（charge→Charge、advance→Advance、fallback→FallBack、stop→Stop、retreat→Retreat，
+            /// T11 已移除 hold）⇒ 按此规范化字符串比较 ≡ 按落点比较，语义零变化。
+            /// </summary>
+            internal static string MovementKey(string movement)
+            {
+                switch (movement)
+                {
+                    case "advance": return "Advance";
+                    case "fallback": return "FallBack";
+                    case "stop": return "Stop";
+                    case "retreat": return "Retreat";
+                    case "charge":
+                    default: return "Charge";
+                }
+            }
+
+            /// <summary>
             /// DSL movement → 引擎 MovementOrder。缺省 charge。
+            /// ⚠️ 只允许在 **mission 内**调用（`ApplyOrders` / `AfterStart` 路径）；mission 之外需要判落点时用
+            /// `MovementKey`（见其 doc 与 §1：mission 外碰 `MovementOrder` 会抛并永久污染整个进程内的该类型）。
             /// </summary>
             internal static MovementOrder MapMovement(string movement)
             {
