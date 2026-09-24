@@ -53,11 +53,17 @@ DEFAULT_BATTLES = os.path.join(
 # 护甲的部位名清单只有一份，在 bl_common.DUMMY_ARMOR_PARTS。
 DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor", "dummyBodyItem")
 
+# ── 多轮参数（v0.8.5）：同样 plan 顶层默认 + 单配置覆盖 ────────────────
+# ③「换边双跑」靠它：`rounds: 2` + `roundSwap: true` ⇒ 同一 mission 内第 1 轮被测兵种当守方、
+# 第 2 轮攻守互换后它当攻方 —— 两轮环境完全一致，比跑两批独立 mission 干净（2026-09-24）。
+ROUND_PLAN_KEYS = ("rounds", "roundEndAlive", "roundSwap",
+                   "roundSpawnAttacker", "roundSpawnDefender")
 
-def resolve_dummy_params(plan, cfg):
+
+def resolve_dummy_params(plan, cfg, keys=DUMMY_PLAN_KEYS):
     """plan 顶层默认 + 单配置覆盖 ⇒ 只保留真正给了值的键。"""
     out = {}
-    for k in DUMMY_PLAN_KEYS:
+    for k in keys:
         if k in cfg:
             out[k] = cfg[k]
         elif k in plan:
@@ -104,6 +110,33 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
     if body_item:
         # 物品 id 不做本地校验：不认识的 id 由游戏端报 item_not_found 并写进 dummy_swap
         out += ["--dummy-body-item", str(body_item)]
+    # ── 多轮参数（③ 换边双跑）：同样"非法即报错、绝不静默丢弃" ────────
+    rounds = resolve_dummy_params(plan, cfg, ROUND_PLAN_KEYS)
+    n = rounds.get("rounds")
+    if n is None:
+        for k in ROUND_PLAN_KEYS[1:]:
+            if rounds.get(k) is not None:
+                # bl_cmd.py 只在给了 rounds 时才解析这些键 ⇒ 单独给会被**静默忽略**
+                raise ValueError("%s 需要同时给 rounds（多轮开关），否则会被 CLI 忽略" % (k,))
+        return out
+    if isinstance(n, bool) or not isinstance(n, int) or n < 2:
+        raise ValueError("rounds 必须是 ≥2 的整数（1 = 不启用多轮），收到 %r" % (n,))
+    out += ["--rounds", str(n)]
+    end_alive = rounds.get("roundEndAlive")
+    if end_alive is not None:
+        if isinstance(end_alive, bool) or not isinstance(end_alive, int) or end_alive < 0:
+            raise ValueError("roundEndAlive 必须是 ≥0 的整数，收到 %r" % (end_alive,))
+        out += ["--round-end-alive", str(end_alive)]
+    swap = rounds.get("roundSwap")
+    if swap is not None and not isinstance(swap, bool):
+        raise ValueError("roundSwap 必须是 true/false（JSON 布尔），收到 %r" % (swap,))
+    if swap is True:
+        out += ["--round-swap"]
+    for key, flag in (("roundSpawnAttacker", "--round-spawn-attacker"),
+                      ("roundSpawnDefender", "--round-spawn-defender")):
+        val = rounds.get(key)
+        if val:
+            out += [flag, str(val)]
     return out
 
 

@@ -354,6 +354,26 @@ def test_bl_batch_plan_args():
     except ValueError as e:
         check("字符串" in str(e), "plan 里对象形式给出可读提示", e)
 
+    # ── 多轮参数（v0.8.5；③「换边双跑」用它）：plan 透传 + 非法即报错，绝不静默 ──
+    R = bl_batch.build_start_args({"rounds": 2, "roundEndAlive": 1, "roundSwap": True},
+                                  base, scene, orders, ps, cap)
+    check(R[-1] == "--round-swap" and "--rounds" in R and "2" in R
+          and "--round-end-alive" in R, "plan 的 rounds/roundEndAlive/roundSwap 进 CLI", R[-6:])
+    # bl_cmd.py 只在给了 rounds 时才解析其余 round* 键 ⇒ 单独给会被静默忽略 ⇒ 必须报错
+    for bad in ({"roundSwap": True}, {"roundEndAlive": 1}, {"roundSpawnAttacker": "1,2"}):
+        try:
+            bl_batch.build_start_args(bad, base, scene, orders, ps, cap)
+            check(False, "只给 round* 不给 rounds 必须报错: %r" % (bad,))
+        except ValueError as e:
+            check("rounds" in str(e), "缺 rounds 时 round* 被拒", str(e)[:60])
+    for bad in ({"rounds": "2"}, {"rounds": 1}, {"rounds": True},
+                {"rounds": 2, "roundSwap": "true"}, {"rounds": 2, "roundEndAlive": -1}):
+        try:
+            bl_batch.build_start_args(bad, base, scene, orders, ps, cap)
+            check(False, "非法多轮参数必须报错: %r" % (bad,))
+        except ValueError as e:
+            check(True, "非法多轮参数被拒: %r" % (bad,))
+
 
 def test_bl_cmd_dummy_armor_strict():
     """bl_cmd.py 的 `--dummy-armor` 必须在**发命令之前**拒掉非法输入。
