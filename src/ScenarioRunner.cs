@@ -916,6 +916,12 @@ namespace BlBridge
                     }
                     string mv = s.Movement == null ? "charge" : s.Movement;
                     f.SetMovementOrder(MapMovement(mv));
+                    // T13：让该编队脱离 AI 战术控制。否则 team 级 TacticCharge 会周期性把 movement
+                    // 覆盖成 ChargeToTarget（游戏内实测：守方 stop 组被覆盖 59/115 次 ⇒ 位移 154 m，
+                    // 双方 order 每 1-2 秒拉锯）。官方同款做法见 CPUBenchmarkMissionLogic（AI 对战基准）：
+                    // `SetControlledByAI(false, false)`。它只关掉**编队级 order 的 AI 驱动**，
+                    // 不会冻结士兵个人行为（那要另调 SetIsAIPaused）。
+                    f.SetControlledByAI(false, false);
                 }
             }
 
@@ -1053,6 +1059,8 @@ namespace BlBridge
                     }
                     string mv = s.Movement == null ? "charge" : s.Movement;
                     f.SetMovementOrder(MapMovement(mv));
+                    // 重申时也钉一次（短路成本≈0），防引擎或其它逻辑中途把控制权还回去。
+                    f.SetControlledByAI(false, false);
                 }
             }
 
