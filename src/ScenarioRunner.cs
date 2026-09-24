@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using TaleWorlds.Core;
+using TaleWorlds.Library;
 using TaleWorlds.Localization;
 using TaleWorlds.MountAndBlade;
 using TaleWorlds.MountAndBlade.MissionSpawnHandlers;
@@ -186,6 +187,12 @@ namespace BlBridge
             string bodyItem = Jmini.Str(raw, "dummyBodyItem", "");
             // v0.8.4：随机种子（-1 = 不设）。见下方设置处的说明。
             int randomSeed = Jmini.Int(raw, "randomSeed", -1);
+            // v0.8.5：多轮连续实验（同一 mission 内跑 N 轮，省掉每轮的场景加载）
+            int rounds = Jmini.Int(raw, "rounds", 1);
+            int roundEndAlive = Jmini.Int(raw, "roundEndAlive", 1);
+            bool roundSwap = Jmini.Str(raw, "roundSwap", "false") == "true";
+            string roundSpawnA = Jmini.Str(raw, "roundSpawnAttacker", "");
+            string roundSpawnD = Jmini.Str(raw, "roundSpawnDefender", "");
 
             // 1) 必须处于自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）
             string stateName = "";
@@ -281,6 +288,16 @@ namespace BlBridge
                 {
                     SubModule.PendingRandomSeed = -1;
                 }
+                // v0.8.5：多轮连续实验的配置（见 RoundOrchestratorBehavior）
+                RoundOrchestratorBehavior.Rounds = rounds < 1 ? 1 : rounds;
+                RoundOrchestratorBehavior.EndAlive = roundEndAlive < 0 ? 0 : roundEndAlive;
+                RoundOrchestratorBehavior.SwapSides = roundSwap;
+                RoundOrchestratorBehavior.SpawnAttacker = ParseVec3(roundSpawnA);
+                RoundOrchestratorBehavior.SpawnDefender = ParseVec3(roundSpawnD);
+                RoundOrchestratorBehavior.AttackerChar = attackerTroop;
+                RoundOrchestratorBehavior.DefenderChar = defenderTroop;
+                RoundOrchestratorBehavior.AttackerCount = aCount;
+                RoundOrchestratorBehavior.DefenderCount = dCount;
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;
@@ -324,6 +341,26 @@ namespace BlBridge
         }
 
         // ── 内部实现 ─────────────────────────────────────────────────────
+
+        /// <summary>解析 "x,z" 或 "x,y,z" → Vec3?（空串/格式错 = null，表示用引擎默认生成点）。</summary>
+        private static Vec3? ParseVec3(string s)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(s)) return null;
+                string[] p = s.Split(',');
+                if (p.Length < 2 || p.Length > 3) return null;
+                float x = float.Parse(p[0].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                float y = p.Length == 3
+                    ? float.Parse(p[1].Trim(), System.Globalization.CultureInfo.InvariantCulture) : 0f;
+                float z = float.Parse(p[p.Length - 1].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                return new Vec3(x, y, z);
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         private static BasicCharacterObject Resolve(string troopId)
         {
@@ -431,7 +468,16 @@ namespace BlBridge
             list.Add(new CustomBattleMissionSpawnHandler(_pendingDefender, _pendingAttacker));
             list.Add(new BattlePowerCalculationLogic());
             list.Add(new AgentHumanAILogic());
-            list.Add(new AgentVictoryLogic());
+            // v0.8.5：多轮模式下**不能挂 AgentVictoryLogic** —— 它会在"一方全灭"时结束 mission，
+            // 而多轮恰恰要在一方全灭之后继续（见 RoundOrchestratorBehavior 的说明）。
+            if (RoundOrchestratorBehavior.Enabled)
+            {
+                list.Add(new RoundOrchestratorBehavior());
+            }
+            else
+            {
+                list.Add(new AgentVictoryLogic());
+            }
             list.Add(new MissionHardBorderPlacer());
             list.Add(new MissionBoundaryPlacer());
             list.Add(new MissionBoundaryCrossingHandler(10f));

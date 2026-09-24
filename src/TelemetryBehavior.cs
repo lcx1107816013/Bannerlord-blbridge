@@ -88,6 +88,8 @@ namespace BlBridge
                 sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin));
                 // v0.8.4：随机种子（-1 = 未指定）。同种子两场逐值可复现 ⇒ 重放可行（见 PROGRESS §十）
                 sb.Append("\",\"randomSeed\":").Append(Jw.N(SubModule.PendingRandomSeed));
+                // v0.8.5：轮次（多轮连续实验时 > 1；每轮一个独立文件）
+                sb.Append("\",\"round\":").Append(Jw.N(_round));
                 sb.Append("\",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
                 Jw.Write(sb.ToString());
             }
@@ -104,10 +106,33 @@ namespace BlBridge
         /// </summary>
         private readonly string _origin;
 
+        /// <summary>v0.8.5：当前轮次（1 = 单轮，多轮时由 RoundOrchestratorBehavior 递增）。</summary>
+        private int _round = 1;
+
         public TelemetryBehavior()
         {
             _origin = SubModule.MissionOrigin;
             SubModule.MissionOrigin = "game";
+        }
+
+        /// <summary>
+        /// v0.8.5 多轮：切到新一轮 —— **换一个日志文件**、计数器归零、meta 带 round。
+        /// 由 `RoundOrchestratorBehavior` 在清场之后调用。
+        /// 每轮独立文件是刻意的：多轮挤进同一个文件，第 2 轮的箭会被算进第 1 轮的「到死挨箭数」。
+        /// </summary>
+        internal void BeginNewRound(int round)
+        {
+            if (_closed || !BridgeConfig.Enabled) return;
+            _round = round;
+            _elapsed = 0f;
+            _nextSampleAt = BridgeConfig.SampleIntervalSeconds;
+            _nextStateAt = BridgeConfig.StateIntervalSeconds;
+            _hitSeq = _killSeq = _shotSeq = _unitSeq = _fleeSeq = _stateSeq = 0;
+            _aiDumped.Clear();
+            _initAttacker = -1;
+            _initDefender = -1;
+            _opened = false;      // 让 EnsureOpen 重新开一个新文件（含新的 meta）
+            EnsureOpen();
         }
 
         public override void OnAgentBuild(Agent agent, Banner banner)

@@ -509,3 +509,24 @@ ARMS `191459_538` / `191534_790` / `191610_398`
 - A / B **同种子** ⇒ `hit.damagedHp` 序列、`kill` 时刻、`unit` 初始位置应**逐值一致**
 - C 换种子 ⇒ 应与 A 不同
 - 若 A/B 也一致不了，说明剩余随机源在 native 层（则该路只到"部分可复现"）
+
+## 十一、多轮连续实验（v0.8.5，**已编译部署，待游戏内验证**）
+
+**动机**（学自 OpenRA-RL v2 的"降低重置开销"＋用户构想）：现在每场都 `MissionState.OpenNew`
+⇒ 每场约 3~6 秒花在加载/卸载上，更关键的是**每轮的运行环境都是新的**（地形加载、光照、初始站位、AI 状态），
+跨轮比较混着环境差异。同一 mission 连跑就把这一层消掉。
+
+**实现**（零 Harmony，全部公开 API）：
+- 新 `src/RoundOrchestratorBehavior.cs`：每 0.5 秒查双方存活，某方 ≤ `EndAlive` ⇒ 本轮结束
+- 结束处理：写 `round_cleanup` → 残兵 `Agent.Die(default(Blow))` 清场 → 通知遥测**换一个新文件** →
+  `Mission.SpawnAgent(AgentBuildData.Team/InitialPosition/InitialDirection)` 重生 → 重设 `TacticCharge`
+- ⚠️ **多轮模式不挂 `AgentVictoryLogic`** —— 它会在"一方全灭"时结束 mission，与多轮直接冲突
+- **每轮一个独立日志文件**（零污染），`meta.round` 标记轮次
+- CLI：`--rounds N` / `--round-end-alive N` / `--round-swap` / `--round-spawn-attacker|defender "x,z"`
+
+**判据（待游戏内验证）**：
+1. `--rounds 3` ⇒ 产出 **3 个 jsonl**，`meta.round` = 1/2/3；
+2. 每轮交界有 `round_cleanup`（带 `cleanedUp` 人数）+ `round_start`；
+3. 末轮结束有 `round_all_done`，mission 正常结束（不卡死）；
+4. `--round-swap` ⇒ 第 2 轮攻守兵种与第 1 轮**对调**；
+5. **补刀死的样本**落在 `round_cleanup` 之后 —— 分析必须排除（与「死因偏差」同类）

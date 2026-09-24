@@ -67,6 +67,16 @@ def main(argv):
     p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
                    help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
                         "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
+    p.add_argument("--rounds", type=int, default=None,
+                   help="多轮连续实验：同一 mission 内跑 N 轮（每轮一个日志文件；默认 1 = 关闭）")
+    p.add_argument("--round-end-alive", dest="round_end_alive", type=int, default=None,
+                   help="某方存活 ≤ 此值即判定本轮结束（默认 1）")
+    p.add_argument("--round-swap", action="store_true",
+                   help="每轮交换攻守（第 2、4…轮把原守方放到攻方位置）")
+    p.add_argument("--round-spawn-attacker", dest="round_spawn_attacker", default=None,
+                   help='重生时攻方进场点，如 "100,0,200"（x,y,z 或 x,z；不给则用引擎默认）')
+    p.add_argument("--round-spawn-defender", dest="round_spawn_defender", default=None,
+                   help="重生时守方进场点")
     p.add_argument("--random-seed", dest="random_seed", type=int, default=None,
                    help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
     p.add_argument("--timeout", type=float, default=60.0)
@@ -134,6 +144,16 @@ def main(argv):
             params["dummyBodyItem"] = args.dummy_body_item
         if getattr(args, "random_seed", None) is not None:
             params["randomSeed"] = int(args.random_seed)
+        if getattr(args, "rounds", None):
+            params["rounds"] = int(args.rounds)
+            if getattr(args, "round_end_alive", None) is not None:
+                params["roundEndAlive"] = int(args.round_end_alive)
+            if getattr(args, "round_swap", False):
+                params["roundSwap"] = "true"
+            if getattr(args, "round_spawn_attacker", None):
+                params["roundSpawnAttacker"] = args.round_spawn_attacker
+            if getattr(args, "round_spawn_defender", None):
+                params["roundSpawnDefender"] = args.round_spawn_defender
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":
