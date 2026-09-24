@@ -752,3 +752,31 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 **结果**：`battles/` 147 → **39 个文件**，635 → **110 MB**。
 ⚠️ 归档在项目 git **之外**（游戏日志目录旁），git 历史里看不到 —— 后来人若发现 PROGRESS
 引用的场次不在 `battles/`，先看 `battles_archive/README.md`。
+
+### 第一轮实测：只改 Warbandlord 的 R 表（2026-09-24 21:27，进行中）
+
+**设计**：唯一变量 = `DamageCalc/MaterialResistance/Plate/PierceResistance`（靶子 legionary 全是 Plate 装备；
+本批**不覆盖** `--dummy-armor`，所以护甲值两批都由兵种装备决定、完全相同）
+
+| 批 | 场次 | R（Plate 刺） |
+|---|---|---|
+| baseline | `battle_20260924_211728_844` / `211801_170` / `211832_808`（v0.8.7，`dummy_meta.armor` 全 -1） | 0.65 |
+| 改后 | 待跑 | **0.85** |
+
+**判据① 已通过**：
+- `bl_apply_config` dry-run 预演（`missing: []`）→ 实写 `0.65 → 0.85`，工具自带 `verified: 0.85`
+- **独立回读**（`bl_mcp.read_config`）：`Plate/Pierce = 0.85`，其余 5 键（Cut 0.8 / Blunt 0.5 /
+  Cloth 0.55 / Chainmail 0.6 / Leather 0.55）**逐一与 baseline 相同** ⇒ 无误伤
+- 备份 `config.xml.bak_20260924_212718`
+
+**判据②③（待跑）**：近战 **Pierce（筛 blocked）应下降**（R↑ ⇒ 阈值↑）；
+**Cut 应不变**（阴性对照 —— 本轮没动 Cut 的 R；若它也变，说明有别的机制在动）。
+样本量参考（材质那批 3 场实测）：近战 Pierce 未挡 ~1446、Cut 未挡 ~2719 ⇒ 两档都够。
+
+**顺带确认（换装实验）**：v0.8.7 的换装**在游戏内真的生效了** —— `dummy_swap.actualItem` 与请求值
+**6/6 场一致**（Cloth `leather_strips_over_padded_robe` ×3、Plate `aserai_scale_armor_on_cloth` ×3，
+`agents=10`）。部位归因也对：**Head 完全不动**（+0.3%，t=0.28），躯干/肩弱显著（`ShoulderLeft` +7.5%，t=3.71）。
+⚠️ **但该批对照不干净**：运行时 `armorBody` 是 **25 vs 50**（两件甲的 XML 都写 36 —— 说明加载期有东西
+改写了物品护甲，可能是 Warbandlord/平衡 mod 的覆写），所以同时改了"护甲值 2 倍差"与"材质"两个变量
+⇒ **只能当"机制生效 + 部位归因"的定性证据，不能当材质效应的定量结论**。要干净对照需按**运行时**
+`armorBody` 配对（用 `dummy_swap.armorBody` 做一次"试穿探针"建表）。
