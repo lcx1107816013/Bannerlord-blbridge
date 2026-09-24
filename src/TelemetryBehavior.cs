@@ -86,6 +86,8 @@ namespace BlBridge
                 // v0.8.3：来源标记 —— BlBridge 自建靶场为 "bridge"，玩家在战役/沙盒里打的仗为 "game"。
                 // 没有它，battles/ 目录里"靶场实验"与"玩家实战"混在一起，事后无法分辨。
                 sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin));
+                // v0.8.4：随机种子（-1 = 未指定）。同种子两场逐值可复现 ⇒ 重放可行（见 PROGRESS §十）
+                sb.Append("\",\"randomSeed\":").Append(Jw.N(SubModule.PendingRandomSeed));
                 sb.Append("\",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
                 Jw.Write(sb.ToString());
             }

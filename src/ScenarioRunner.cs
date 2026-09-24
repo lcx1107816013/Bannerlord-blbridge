@@ -184,6 +184,8 @@ namespace BlBridge
             // 用于"同兵种、同护甲数值、只换材质"的对照：材质抗性 R 只来自物品，
             // 数值仍由上面四个覆盖值对齐。见 DummyRangeBehavior.BodyItemId。
             string bodyItem = Jmini.Str(raw, "dummyBodyItem", "");
+            // v0.8.4：随机种子（-1 = 不设）。见下方设置处的说明。
+            int randomSeed = Jmini.Int(raw, "randomSeed", -1);
 
             // 1) 必须处于自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）
             string stateName = "";
@@ -265,6 +267,20 @@ namespace BlBridge
 
                 // v0.8.3：标记本场来源，供 meta 事件区分靶场实验与玩家实战
                 SubModule.MissionOrigin = "bridge";
+                // v0.8.4：随机种子（-1 = 不设）。MBRandom 是 C# 侧唯一随机门面
+                // （RandomFloat/RandomInt/ChooseWeighted/RoundRandomized 全走它），
+                // 设它即可钉住 C# 侧的随机流 ⇒ 为"同种子重放"提供可能。
+                // ⚠️ 伤害公式里的随机命中因子 PRF 在 native 层掷（Agent.ApplyDamage 是引擎 C++），
+                //    能否被它管住**只能实测**——同种子跑两场比对逐值一致性即可判定。
+                if (randomSeed >= 0)
+                {
+                    SubModule.PendingRandomSeed = randomSeed;
+                    MBRandom.SetSeed((uint)randomSeed, (uint)(randomSeed ^ 0x9E3779B9));
+                }
+                else
+                {
+                    SubModule.PendingRandomSeed = -1;
+                }
                 OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;

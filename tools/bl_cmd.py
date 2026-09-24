@@ -67,6 +67,8 @@ def main(argv):
     p.add_argument("--dummy-body-item", dest="dummy_body_item", default=None,
                    help="把靶子的身甲换成该物品 id（材质对照实验用；空=不换。"
                         "材质抗性只来自物品，数值仍由 --dummy-armor 对齐）")
+    p.add_argument("--random-seed", dest="random_seed", type=int, default=None,
+                   help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -130,6 +132,8 @@ def main(argv):
                 return 2
         if getattr(args, "dummy_body_item", None):
             params["dummyBodyItem"] = args.dummy_body_item
+        if getattr(args, "random_seed", None) is not None:
+            params["randomSeed"] = int(args.random_seed)
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

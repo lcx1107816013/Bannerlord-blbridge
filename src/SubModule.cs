@@ -23,6 +23,12 @@ namespace BlBridge
         /// </summary>
         internal static string MissionOrigin = "game";
 
+        /// <summary>
+        /// v0.8.4：本场的随机种子（-1 = 未指定）。只用于**记录**（写进 meta）；
+        /// 真正设种子由 `ScenarioRunner` 在开战前调 `MBRandom.SetSeed` 完成。
+        /// </summary>
+        internal static int PendingRandomSeed = -1;
+
         // A9：崩溃检测所需的三态标记
         //   cleanExit=false 写于加载时，true 写于 OnSubModuleUnloaded（引擎的模块卸载钩子）
         //   missionInProgress 标记"退出时正在战斗中"

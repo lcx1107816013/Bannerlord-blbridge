@@ -488,3 +488,24 @@ ARMS `191459_538` / `191534_790` / `191610_398`
   口径与 `bl_cmd.py` 完全一致（布尔发字符串 `"true"`、护甲发**数字**）
 - 新增 `tools/plan.material.example.json`（材质对照示例）
 - 编译部署 **0.8.3**（`dll sha256 = 822AC5409555470A…`）
+
+## 十、随机种子与「同种子重放」（v0.8.4）
+
+**动机**（学自 OpenRA-RL 的 `.orarep` 重放）：BlBridge 只记录**结果**、不记录**输入种子**
+⇒ 同一配置两次跑结果不同，只能靠多跑取统计；这也是"改护甲会改变整场战斗演化"那类混淆的根源。
+
+**取证**（反编译核实，`TaleWorlds.Core.MBRandom`）：
+- `public static void SetSeed(uint seed, uint seed2)` —— **公开可用**；
+  `MBRandom.Random` 在游戏内取 `Game.Current.RandomGenerator` ⇒ C# 侧随机流可被钉住
+- `MBRandom` 是 C# 侧**唯一**随机门面（`RandomFloat` / `RandomInt` / `ChooseWeighted` / `RoundRandomized` 全走它）
+- `MissionInitializerRecord.RandomTerrainSeed` 只管**地形**生成，不是战斗随机
+- ⚠️ **未知项**：伤害公式的随机命中因子 `PRF` 在 **native 层**掷（`Agent.ApplyDamage` 是引擎 C++），
+  C# 设种子**未必**管得住它 —— 只能实测判定
+
+**实现**：`--random-seed N` → 开战前 `MBRandom.SetSeed((uint)N, (uint)(N ^ 0x9E3779B9))`；
+`meta` 事件记录实际用的 `randomSeed`（-1 = 未指定，即引擎默认行为不变）。
+
+**待游戏内验证（3 场，判据）**：
+- A / B **同种子** ⇒ `hit.damagedHp` 序列、`kill` 时刻、`unit` 初始位置应**逐值一致**
+- C 换种子 ⇒ 应与 A 不同
+- 若 A/B 也一致不了，说明剩余随机源在 native 层（则该路只到"部分可复现"）
