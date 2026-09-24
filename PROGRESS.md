@@ -1137,6 +1137,11 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 ### 5. T9 判据清单（5 条，逐字照计划 §T9）
 
 1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
+   ⚠️ **核对口径（2026-09-25 实测，重要）**：`out\BlBridge.dll` **每次重编译的 sha256 都不同**（Roslyn 命令行默认
+   非确定性：嵌入 MVID / PE 时间戳）——同一份未改动的源码，两次 `build.ps1 -Deploy` 得到 `531AAB84…` 与 `19F66AD1…`。
+   ⇒ **以 `python tools/bl_cmd.py buildcheck` 的 `deployedSha256` 为准**（它给出当前部署值；游戏跑起来后再看 `loadedSha256` 是否与之一致）。
+   **T9 开始前不要再跑 `build.ps1`**（会换成一个新 sha）。本次部署值（2026-09-25 00:07:41）：
+   `19F66AD1C637BC54BED14FA0E0CC05678B7552A355F0C10B0F564DF71AE62B89`。
    结果：（待 T9）
 2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:stop` + `khuzait_khans_guard:5:HorseArcher:charge`）
    ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
