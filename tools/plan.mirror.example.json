@@ -1,0 +1,24 @@
+{
+  "label": "mirror_legionary_wildling",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "configs": [
+    {
+      "label": "A_legionary_att",
+      "attacker": "imperial_legionary",
+      "a": 20,
+      "defender": "battanian_wildling",
+      "d": 20
+    },
+    {
+      "label": "B_wildling_att",
+      "attacker": "battanian_wildling",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 20
+    }
+  ]
+}

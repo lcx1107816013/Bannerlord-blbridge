@@ -1,0 +1,24 @@
+{
+  "label": "mirror_cataphract_fian",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "configs": [
+    {
+      "label": "A_cataphract_att",
+      "attacker": "imperial_cataphract",
+      "a": 20,
+      "defender": "battanian_fian_champion",
+      "d": 20
+    },
+    {
+      "label": "B_fian_att",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_cataphract",
+      "d": 20
+    }
+  ]
+}
