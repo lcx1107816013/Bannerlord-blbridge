@@ -124,7 +124,11 @@ def main(argv):
                 k, v = part.split("=", 1)
                 key = part_keys.get(k.strip().lower())
                 if key:
-                    params[key] = v.strip()
+                    try:
+                        # 必须传**数字**：C# 侧 Jmini.Num 只吃数字字符，字符串值会被判成"读不到"
+                        params[key] = float(v.strip())
+                    except ValueError:
+                        pass
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

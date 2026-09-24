@@ -248,3 +248,20 @@ CLI：`python tools/bl_cmd.py start ... --dummy-armor head=45,torso=35,legs=20,a
 **另一条已勘察的路线（未实施）**：真"换装备/材质" —— 参照 `CharacterReload`（本机，Vortex 部署）的姿势：
 `Equipment.Clone(false)` + 槽位赋值 + `CalculateEquipmentCode()`，或 `Equipment.AddEquipmentToSlotWithoutAgent`；
 作用于**开战前**的靶子 `CharacterObject`，同样零 Harmony。它才是"材质差异 7%"要的路。
+
+### 首次实测（2026-09-24）暴露的坑：参数被**静默丢弃**
+
+9 场护甲对照**全部无效**，且**没有任何报错**：`dummy_meta.armor` 恒为 `-1`，三档的每击扣血无差异
+（25.13 / 24.96 / 25.31）。根因不在 C#，而在**参数类型**：
+
+- `bl_cmd.py` 把 `--dummy-armor head=25` 解析成**字符串** `"25"` 发出去；
+- C# 侧 `Jmini.Num`（`Jmini.cs:146-164`）从值的位置**只接受数字字符**（digit / `-` / `+` / `.` / `e` / `E`），
+  碰到字符串的引号首字符 ⇒ `p == start` ⇒ **直接返回 fallback** ⇒ 参数被静默丢弃。
+- **修法**：`bl_cmd.py` 改传 `float`。
+
+**教训（值得记住）**：`Jmini` 的 `Str` 读字符串，而 `Num` / `Int` / `Bool` 只读**裸值** ——
+给它们传字符串**不会报错，只会静默用默认值**。这类"静默失效"正是本项目一直在猎杀的东西，
+所以**每个新参数都必须有可观测的落点**（本次就是靠 `dummy_meta.armor` 才发现的）。
+
+**顺带澄清一条既有文档偏差**：`--cap` 传的是 int ⇒ 生效，但它的单位是**真实秒**
+（`--cap 120` ⇒ 游戏内约 1200 秒，正好 10 倍速），与 `--help` 文案写的"游戏内秒"不符。
