@@ -780,3 +780,31 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 改写了物品护甲，可能是 Warbandlord/平衡 mod 的覆写），所以同时改了"护甲值 2 倍差"与"材质"两个变量
 ⇒ **只能当"机制生效 + 部位归因"的定性证据，不能当材质效应的定量结论**。要干净对照需按**运行时**
 `armorBody` 配对（用 `dummy_swap.armorBody` 做一次"试穿探针"建表）。
+
+### 候选扩展（已评估，**暂不做** —— 2026-09-24，用户裁定先收尾实测）
+
+用户提议借鉴两个 mod 扩大可测的实验类型。**已查：本机均未安装**（`Modules/` 里只有内置 `CustomBattle`）。
+
+- **Enhanced Battle Test**（[Nexus mods/2](https://www.nexusmods.com/mountandblade2bannerlord/mods/2?tab=docs)、
+  [GitHub](https://github.com/lzh-mb-mod/EnhancedBattleTest)）：每方 **8 组部队 × 8 阵型**（多兵种混编）、
+  可导入战役部队、**装备修饰符 Random / Average（去随机，"同装备即同护甲"）/ None**、Tactic Level（AI 战术档）、
+  战斗 AI 0–100 可调、Training / Undead mode、攻城（含部署）、地图与**日期/时刻/天气**。
+  ⚠️ 开战会**改战役数据 + 禁存档**（需弃档）；纯 UI 交互 ⇒ 对"无人值守自动化"没有直接帮助。
+- **Arena Overhaul**（[Nexus mods/3477](https://www.nexusmods.com/mountandblade2bannerlord/mods/3477?tab=description)）：
+  三种练习模式（Expansive / Team / Parry）、可调**比赛强度、AI 队伍数量、防御装备类型** ⇒ 面向上手训练，非数据。
+
+**值得搬进 plan 的维度**（按价值排序）：
+1. **多兵种混编** —— 现在只能"**单兵种 × 全场 charge**"，这是"能多测类型"的**真瓶颈**（`ScenarioRunner` + plan schema）
+2. **装备修饰符去随机 / 至少记录实际值** —— 直接消掉一个混杂源（见下）
+3. AI 队伍数 / 多队混战（v0.8.5 多轮是地基）
+4. 阵型与命令参数（现在只有 `charge`）、初始站位
+5. 战斗 AI 档位**可设**（现在只能观测 26 个 ai 参数）
+（1v1 对练**现在就能做**：`--a 1 --d 1` + 不朽靶子，无需扩展。）
+
+**为什么排在实测之后**：扩展要动 `ScenarioRunner`＝**实验仪器** ⇒ 一旦改，已跑的 baseline 口径与之后不可比；
+而且**现在装 mod 会立刻污染进行中的实测**（EBT 依赖 Harmony、改战役数据、禁存档）。
+
+**顺带线索（下一批实验要查）**：EBT 的 "Average" 选项说明"**同一件甲在不同士兵身上护甲值会不同**"
+是这游戏的常态（随机 modifier）⇒ 换装实验里 `armorBody` 读回 **25 / 50**（两件甲 XML 都写 36）
+**很可能就是物品随机 modifier**。试穿探针要**每件甲跑多场、看 `armorBody` 是否波动**：
+波动 = 随机 modifier（好修：spawn 时固定或记录）；恒定 = Warbandlord 类**静态改写**（得换物品对）。
