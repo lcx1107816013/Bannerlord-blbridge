@@ -15,8 +15,9 @@
 | PowerShell 写文本文件 | **别用** `Set-Content -Encoding UTF8`（PS 5.1 会加 BOM）⇒ `[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding $false))` |
 
 **核心判据**：乱码的根因是**写入编码 ≠ 读取编码**，不是文案语言。
-本项目的输出消费端是调用这些工具的 AI / 管道（实测 PowerShell 7 的
-`[Console]::OutputEncoding` 默认就是 utf-8），所以口径钉死在 UTF-8，**不依赖控制台代码页**。
+本项目的输出消费端是调用这些工具的 AI / 管道。**本机实测**：系统 `chcp 936` / ANSI `gb2312`，
+而宿主 PowerShell（5.1）的 `[Console]::OutputEncoding` 是 `utf-8`，Python 却默认按 locale(cp936) 写
+⇒ 写入/读取不一致就整片 `U+FFFD`。所以口径钉死在 UTF-8，**不依赖控制台代码页**。
 
 > 改任何输出前，先读 `bl_common.safe_streams()` 的 docstring。
 

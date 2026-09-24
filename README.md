@@ -402,8 +402,9 @@ manifest_missing         旧版部署，没有清单
 
 **为什么必须显式钉**：Windows 上 Python 的 stdio 默认按 **locale 编码**（简中 = cp936/GBK），
 C# 的 `Console` 默认按**控制台代码页**。写入编码 ≠ 读取编码 ⇒ 中文整片变成 `U+FFFD`。
-本项目的输出消费端是**调用这些工具的 AI / 管道**（实测 PowerShell 7 的
-`[Console]::OutputEncoding` 默认就是 utf-8），所以口径统一在 UTF-8，**不依赖控制台代码页**。
+本项目的输出消费端是**调用这些工具的 AI / 管道**。**本机实测**：系统 `chcp 936` / ANSI `gb2312`，
+宿主 PowerShell（5.1）的 `[Console]::OutputEncoding` 是 `utf-8`，而 Python 默认按 locale(cp936) 写
+⇒ 写入/读取不一致就整片 `U+FFFD`。所以口径统一在 UTF-8，**不依赖控制台代码页**。
 
 **别再走回去**（2026-09-25 走过的弯路）：旧版 `safe_streams()` 只 `reconfigure(errors="replace")`
 不改 encoding，号称"GBK 控制台可读"—— 那只是把错配挪到另一边，一离开 GBK 就乱码；同类半吊子

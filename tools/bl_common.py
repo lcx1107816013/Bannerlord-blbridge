@@ -79,8 +79,9 @@ def safe_streams():
 
     为什么必须显式设：Windows 上 Python 的 stdout 默认用 **locale 编码**（简中是 cp936），
     于是脚本写出的是 GBK 字节。而本项目的输出消费端是**调用这些工具的 AI / 管道**
-    （实测 PowerShell 7 的 `[Console]::OutputEncoding` 默认就是 utf-8；重定向、CI、
-    别的 agent 捕获同理）—— **写入编码 ≠ 读取编码，中文就整片变成 U+FFFD**。
+    （**本机实测**：系统 `chcp 936` / ANSI `gb2312`，而宿主 PowerShell 5.1 的
+    `[Console]::OutputEncoding` 是 `utf-8`，Python 却默认按 locale(cp936) 写 ⇒ 写入/读取不一致；
+    重定向、CI、别的 agent 捕获同理）—— **写入编码 ≠ 读取编码，中文就整片变成 U+FFFD**。
     所以这里统一按 UTF-8 写，与 `bl_mcp.py` 的入口口径一致（那里一开始就是 utf-8）。
 
     历史（别再走回去）：旧版只 `reconfigure(errors="replace")`、宣称"中文照常可读"——

@@ -183,13 +183,26 @@ if ($Deploy) {
     $targetBin = Join-Path $target 'bin\Win64_Shipping_Client'
     $dllTarget = Join-Path $targetBin ($ModuleId + '.dll')
 
-    # Refuse to deploy while the game is running: the loaded DLL is locked by the
-    # game process, so Copy-Item either fails or half-completes -- and a deploy that
-    # "looks successful" is exactly how a whole evening gets spent on a stale DLL.
-    # (Same rule as Coop's DeploymentEnvironment: confirm idle before AND during deploy.)
+    # The RELIABLE signal is whether the DLL is *loaded* (= locked). Name matching alone gave
+    # false positives: stale "Bannerlord.BLSE.Launcher" processes left over from earlier sessions
+    # (CPU 0, no game body) kept `-Deploy` refusing to run, and the DLL had to be synced by hand.
+    # So: lock wins, process names only warn. (Same rule as Coop's DeploymentEnvironment:
+    # confirm idle before AND during deploy.)
     $active = Get-ActiveGameProcess
+    $dllBusy = $false
+    if (Test-Path $dllTarget) {
+        try {
+            $fs = [System.IO.File]::Open($dllTarget, 'Open', 'ReadWrite', 'None')
+            $fs.Close()
+        } catch {
+            $dllBusy = $true
+        }
+    }
+    if ($dllBusy) {
+        throw "The deployed DLL is locked (some process has it loaded) -- close the game before deploying."
+    }
     if ($active.Count -gt 0) {
-        throw ("Game process is running (PID {0}) -- close the game completely before deploying." -f ($active -join ', '))
+        Write-Warning ("Bannerlord* process(es) present (PID {0}) but the DLL is NOT locked -- treating them as stale leftovers, deploying anyway." -f ($active -join ', '))
     }
 
     if (-not (Test-Path $targetBin)) { New-Item -ItemType Directory -Path $targetBin -Force | Out-Null }
@@ -230,10 +243,16 @@ if ($Deploy) {
     # ship the manifest next to the DLL so the MCP can verify what is deployed
     Copy-Item $manifestPath (Join-Path $target 'build_manifest.json') -Force
 
-    # the user may have launched the game while we were copying -- check once more
-    $active2 = Get-ActiveGameProcess
-    if ($active2.Count -gt 0) {
-        throw ("Game process appeared during deploy (PID {0}) -- deploy may be incomplete, rerun after closing the game." -f ($active2 -join ', '))
+    # the user may have launched the game while we were copying -- check once more (by lock, not name)
+    $dllBusy2 = $false
+    try {
+        $fs2 = [System.IO.File]::Open($dllTarget, 'Open', 'ReadWrite', 'None')
+        $fs2.Close()
+    } catch {
+        $dllBusy2 = $true
+    }
+    if ($dllBusy2) {
+        throw "The deployed DLL got locked during the copy -- the game may have started mid-deploy. Rerun after closing it."
     }
 
     Copy-Item $outDll $dllTarget -Force
