@@ -1330,3 +1330,26 @@ t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5
 
 **已具备的紧反馈循环**（`/diagnosing-bugs` 的第一步）：一次 `start`（约 60 秒）+ 读该场 JSONL 的
 `order` 事件与按 troop 的 `state.speed`/位移，即可判定"守方 stop 组是否被覆盖"。
+
+### T13 复测（第二次，修法①）：**通过** ✅
+
+修法①（`SetControlledByAI(false, false)`，提交 `ceafe6e`）部署（dll `27c3587f58bb904a`）后，
+用**完全相同的复测命令**重跑，日志 `battle_20260925_023826_544.jsonl`：
+
+| side | troop | 组配置 | 平均速度（修前→修后） | 位移（修前→修后） | `order` 事件（修前→修后） |
+|---|---|---|---|---|---|
+| Attacker | imperial_legionary | stop | 0.186 → **0.036** | 72 → **29 m** | Stop 116 → Stop **240/240** |
+| Attacker | khuzait_khans_guard | charge | 8.928 → 9.455 | 117 → 232 m | Charge（对照） |
+| **Defender** | **battanian_wildling** | **stop** | **0.904 → 0.000** | **154 → 8 m** | **ChargeToTarget 59 / Stop 56 → Stop 240/240** ✅ |
+| Defender | battanian_fian_champion | charge | 0.771 → 0.814 | 148 → 207 m | Charge（对照） |
+
+**判据全部满足**：
+
+1. 守方 stop 组的 `order` 事件**不再出现 `ChargeToTarget`**（240/240 全是 `Stop`）
+   ⇒ team 级 `TacticCharge` 再也改不动我们下发的 order；
+2. 守方 stop 组平均速度降到 **0.000 m/s**，位移从 154 m 降到 **8 m**（1/19）；
+3. 两个 **charge 组（对照）照常在冲** ⇒ 证明**没有冻住战斗** —— 这正是刻意不用官方那句
+   `SetIsAIPaused` 的原因（它会连士兵个人行为一起冻结，只有纯性能基准才需要）。
+
+⇒ **T13 缺陷关闭**。这条也再次印证：`MovementOrder`/编队 order 这类问题**只能靠游戏内判据**，
+离线编译与 jsontest 在结构上发现不了（与 T12 同一教训）。
