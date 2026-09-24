@@ -288,8 +288,17 @@ def swap_verdict(tier):
         return "!! 未生效：%d/%d 场 actualItem != item（例 %r → %r）" % (
             len(bad), len(tier["swaps"]), bad[0].get("item"), bad[0].get("actualItem"))
     s = tier["swaps"][0]
-    return "生效：item=%s material=%s armorBody=%s agents=%s（%d 场一致）" % (
-        s.get("item"), s.get("material"), s.get("armorBody"), s.get("agents"), len(tier["swaps"]))
+    bodies = sorted(set(str(x.get("armorBody")) for x in tier["swaps"]))
+    mats = sorted(set(str(x.get("material")) for x in tier["swaps"]))
+    note = "%d 场" % len(tier["swaps"])
+    if len(bodies) > 1 or len(mats) > 1:
+        # 同一档里 item 相同、但**运行时的材质/护甲值逐场不同** ⇒ 随机 modifier（或别的每场抖动）。
+        # 这类抖动会直接污染"按护甲值/材质配对"的对照实验 —— 2026-09-24 的换装对照就栽在这上面，
+        # 所以必须当场报出来，不能只显示第一场的值（那会把抖动掩盖成"一致"）。
+        return ("!! 场间抖动：item=%s 但 material=%s armorBody=%s（%s）⇒ 该批不能当干净对照"
+                % (s.get("item"), "/".join(mats), "/".join(bodies), note))
+    return "生效：item=%s material=%s armorBody=%s agents=%s（%s，逐场一致）" % (
+        s.get("item"), mats[0], bodies[0], s.get("agents"), note)
 
 
 def _group_of(row, key):

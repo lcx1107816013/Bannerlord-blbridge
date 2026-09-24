@@ -820,6 +820,43 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 ⇒ **只能当"机制生效 + 部位归因"的定性证据，不能当材质效应的定量结论**。要干净对照需按**运行时**
 `armorBody` 配对（用 `dummy_swap.armorBody` 做一次"试穿探针"建表）。
 
+### 第二轮（换装）结案 + 换装探针（2026-09-24 21:46–21:50）
+
+**探针设计**：同一件甲跑 3 场（看运行时 `armorBody` 是否波动，即"随机 modifier"假设）+ 建表。
+9 场：`battle_20260924_214617_459` … `215029_891`（`runs/runs_probe.json`）
+
+| 档 | item | 材质 | **运行时 armorBody** | XML body_armor | 逐场一致？ |
+|---|---|---|---|---|---|
+| probe_cloth_36 | `leather_strips_over_padded_robe` | Cloth | **25** | 36 | ✅ 3/3 |
+| probe_plate_36 | `aserai_scale_armor_on_cloth` | Plate | **50** | 36 | ✅ 3/3 |
+| probe_default_plate48 | `imperial_lamellar`（靶子自带甲） | Plate | **60** | 33 | ✅ 3/3 |
+
+**两条硬结论**：
+1. **`armorBody` 是确定性的**（3/3 逐场一致）⇒ **不是随机 modifier** ⇒ "试穿建表"可行（每件跑 1 场就读回真实值）
+2. **XML 值不可信、也不能用来配对**：同一个 XML `body_armor=36` 得到 **25** 与 **50**；
+   `imperial_lamellar` 在 `body_armors.xml` 里出现两次（33 / 48），运行时却是 **60**
+   ⇒ 有 mod 覆写了物品数据（很可能是 Warbandlord 的护甲大修）⇒ **只能信运行时值**。
+
+**② 的判定：换装路线不能用于护甲/材质对照（实测判定）**
+
+| 档 | 运行时 armorBody | 近战 Pierce 均值 | Δ% vs 第一档 | Welch t |
+|---|---|---|---|---|
+| Cloth 甲 | 25 | 29.35（n=1244） | — | — |
+| Plate 甲 | 50 | 28.44（n=1418） | −3.1% | −1.54 |
+| 靶子自带甲 | 60 | 28.82（n=1649） | −1.8% | −0.94 |
+
+护甲值 25 → 60（**>2 倍**）而伤害**无显著变化** ⇒ 换装**没有进 Warbandlord 的护甲计算路径**
+（对照：§七 改**驱动属性**时护甲 ×1.15 就有 −12.8% ⇒ 那条路径才通）。
+
+**⚠️ 未解（诚实标注，不猜）**：已取证 `ArmorCollection.Create()` 按**全部物品**建 `_armorDict[StringId]`、
+`TryGetWarbandlordArmorArea` 是**按 item 查表**（换装后本该查到新甲的 ArmorArea）、
+且两件甲都 `covers_body="true"` ⇒ **理论上应当生效**。剩下未查的环节：
+`ArmorEffect.CreateArmorEffect` 里 `armorArea.ArmorDefense` 的实际取值、`AttackInformation.ArmorAmountFloat` 的语义。
+⇒ **不再深挖** —— 材质/护甲对照已由第一轮那条路（改 R 表 / 覆盖驱动属性）干净回答。
+
+**② 收尾结论**：护甲与材质的对照**一律走第一轮那条路**；换装路线的价值仅剩
+"验证换装机制本身可用"（已达成：`dummy_swap.actualItem` 6/6 一致 + `armorBody` 逐场一致）。
+
 ### 候选扩展（已评估，**暂不做** —— 2026-09-24，用户裁定先收尾实测）
 
 用户提议借鉴两个 mod 扩大可测的实验类型。**已查：本机均未安装**（`Modules/` 里只有内置 `CustomBattle`）。

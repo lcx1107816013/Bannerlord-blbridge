@@ -428,6 +428,17 @@ def test_dummy_analyze_compare():
     ok = bda.swap_verdict({"swaps": [{"item": "a", "actualItem": "a", "material": "Cloth",
                                       "armorBody": 4, "agents": 10}], "swapMissing": False})
     check(ok.startswith("生效"), "actualItem == item ⇒ 生效", ok)
+    # 同一档内 item 一致、但运行时 armorBody 逐场不同 ⇒ 必须报"抖动"（那是换装对照栽过的坑）
+    jitter = bda.swap_verdict({"swaps": [{"item": "a", "actualItem": "a", "material": "Cloth",
+                                          "armorBody": 25, "agents": 10},
+                                         {"item": "a", "actualItem": "a", "material": "Cloth",
+                                          "armorBody": 50, "agents": 10}], "swapMissing": False})
+    check(jitter.startswith("!! 场间抖动"), "armorBody 逐场不同 ⇒ 报抖动，不当干净对照", jitter)
+    same = bda.swap_verdict({"swaps": [{"item": "a", "actualItem": "a", "material": "Plate",
+                                        "armorBody": 50, "agents": 10},
+                                       {"item": "a", "actualItem": "a", "material": "Plate",
+                                        "armorBody": 50, "agents": 10}], "swapMissing": False})
+    check("逐场一致" in same, "armorBody/material 逐场一致 ⇒ 报一致", same)
 
     # 4) 逐击 rows：优先 bodyPartName，旧日志回退 bodyPart
     ev = [{"t": "dummy_hit", "applied": 10.0, "blocked": False, "isMissile": False,

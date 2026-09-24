@@ -1,0 +1,36 @@
+{
+  "label": "swap_probe_armor_body",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "dummySide": "defender",
+  "unlimitedAmmo": true,
+  "configs": [
+    {
+      "label": "probe_cloth_36",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10,
+      "dummyBodyItem": "leather_strips_over_padded_robe"
+    },
+    {
+      "label": "probe_plate_36",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10,
+      "dummyBodyItem": "aserai_scale_armor_on_cloth"
+    },
+    {
+      "label": "probe_default_plate48",
+      "attacker": "battanian_fian_champion",
+      "a": 20,
+      "defender": "imperial_legionary",
+      "d": 10,
+      "dummyBodyItem": "imperial_lamellar"
+    }
+  ]
+}
