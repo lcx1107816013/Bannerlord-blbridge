@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """按兵种对照「到死挨几箭」（③ 立项校验用）。
 
@@ -72,10 +72,10 @@ def main():
     if not files:
         files = bl_common.list_battle_files()
     if not files:
-        print("没有 JSONL 可分析。")
+        print("no JSONL to analyze.")
         return 2
     agg = collect(files)
-    print("源自 %d 个战斗文件" % len(files))
+    print("from %d battle files" % len(files))
     rows = [(k, summarize(v)) for k, v in agg.items()]
     # 主排序口径 = 「死于箭」样本的扣血箭中位（拿不到数的排最后）
     rows.sort(key=lambda kv: (kv[1]["arrow_damaging_median"] is None,
@@ -85,17 +85,17 @@ def main():
         return "-" if v is None else "%.1f" % v
 
     print("%-28s%-8s%5s%9s%10s%7s%12s%12s%10s" % (
-        "troop", "侧", "N", "死于箭%", "箭/近战", "满血", "扣血箭中位", "箭命中中位", "旧口径"))
+        "troop", "side", "N", "died_to_arrows%", "arrow/melee", "full_hp", "hp_loss_arrows_median", "arrow_hits_median", "legacy"))
     for (side, troop), s in rows:
         print("%-28s%-8s%5d%8.0f%%%10s%7.0f%12s%12s%10s" % (
             troop[:28], side[:7], s["n"], s["arrow_rate_pct"],
             "%d/%d" % (s["n_arrow"], s["n_melee"]), s["maxHp"] or 0.0,
             _f(s["arrow_damaging_median"]), _f(s["arrow_hits_median"]),
             _f(s["all_damaging_median"])))
-    print("\n口径：**扣血箭中位只取「死于箭」的样本**（不足 %d 个则拒绝给数，显示 -）；"
-          "「死于近战」的样本不计入主口径。" % MIN_ARROW_SAMPLES)
-    print("      「旧口径」= 全样本中位，仅供对照，不要用它下结论（选择偏差）。")
-    print("提示：每兵种样本量 = 场数 x 靶子数；1 场 5 靶不足以支撑「必然」结论。")
+    print("\nMethod: **the hp-loss-arrow median uses only samples that died to arrows** (below %d samples we refuse to report a number, shown as -); "
+          "samples that died in melee are excluded from the main metric." % MIN_ARROW_SAMPLES)
+    print("      'legacy' = median over all samples, for reference only -- do not draw conclusions from it (selection bias).")
+    print("note: samples per troop = battles x dummies; one battle with 5 dummies cannot support a 'must' conclusion.")
     return 0
 
 
