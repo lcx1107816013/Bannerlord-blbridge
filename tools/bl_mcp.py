@@ -1097,7 +1097,27 @@ def handle(req):
     _error(req_id, -32601, "method not found: %s" % method)
 
 
+def _force_utf8_stdio():
+    """把 stdin/stdout/stderr 钉成 UTF-8 —— MCP over stdio 的协议要求。
+
+    不钉死时 Python 按 **locale 编码**（中文 Windows = GBK）写 stdout，而宿主按
+    UTF-8 解码 ⇒ `tools/list` 里所有中文（工具描述）变成 U+FFFD 乱码。
+    2026-09-24 实测复现：`tools/list` 的 7680 字节里有 **1489 个替换字符**，
+    同一批字节按 GBK 解码则完全正常。
+
+    ⚠️ 只在入口调用（`main()`），**不要**放在模块级：`bl_selftest.py` 会
+    `import bl_mcp`，模块级改 stdio 会连带改掉调用方的编码。
+    """
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     for line in sys.stdin:
         line = line.strip()
         if not line:

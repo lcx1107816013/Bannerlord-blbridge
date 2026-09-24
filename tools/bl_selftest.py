@@ -545,13 +545,10 @@ def main():
     print("=" * 90)
     env = dict(os.environ)
     env["BLBRIDGE_LOG_DIR"] = logdir
-    # 2026-09-24 踩坑：本段按 utf-8 读子进程 stdout，但子进程的 stdout 被重定向到管道时
-    # 用的是 **locale 编码**（中文 Windows = GBK）⇒ 中文 JSON 以 GBK 字节写出 ⇒
-    # `_readerthread` 抛 UnicodeDecodeError 且**被线程静默吞掉** ⇒ subprocess 的
-    # `stdout = stdout[0] if stdout else None` 直接变成 None。
-    # 症状是 `'NoneType' object has no attribute 'splitlines'`，与根因毫无关系。
-    # ⇒ 把子进程输出编码钉成 utf-8，不依赖调用者环境里有没有 PYTHONIOENCODING。
-    env["PYTHONIOENCODING"] = "utf-8"
+    # 这里**故意不设 PYTHONIOENCODING**：bl_mcp.py 自己把 stdio 钉成 UTF-8
+    # （`_force_utf8_stdio()`，MCP over stdio 的协议要求），而本段按 utf-8 读。
+    # 不设环境变量，正好让"哪天 bl_mcp 又没钉编码"这种回归在**继承 GBK locale**
+    # 的条件下被下面的乱码断言抓住（2026-09-24 宿主里工具描述全是问号就是这个 bug）。
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "bl_mcp.py")],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, universal_newlines=True, encoding="utf-8")
@@ -578,6 +575,12 @@ def main():
         check(False, "MCP 子进程 stdout 可读（编码须与 PYTHONIOENCODING 对齐）",
               "stdout=None; stderr=%r" % err[:200])
         out = ""
+    # 编码回归：宿主按 UTF-8 解码响应，所以里面**不许**出现替换字符，中文必须可读。
+    # （2026-09-24 实测：未钉 stdio 时 tools/list 的 7680 字节里有 1489 个 U+FFFD ——
+    #   Reasonix 的 MCP 页面上就是"工具描述全是问号"。判据不绑具体文案，只看有无中文。）
+    check("\ufffd" not in out, "MCP 响应无乱码（U+FFFD = 子进程按 locale 编码写了中文）")
+    check(any("\u4e00" <= c <= "\u9fff" for c in out),
+          "响应含可读中文（描述未被编码搞坏）")
     responses = [json.loads(l) for l in out.splitlines() if l.strip()]
     by_id = dict((r.get("id"), r) for r in responses)
 
