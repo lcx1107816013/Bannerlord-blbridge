@@ -384,6 +384,32 @@ manifest_missing         旧版部署，没有清单
 | v0.2 | — | 新增 AI 推演与命令泵 | 见上 |
 | v0.3.0 | 战斗"加速"不可用 | ~~原版无加速键~~（**此判断已被外部审计推翻，见 §六 加速通道的修正记录**）。修正后的结论：原版只有**计分板 UI 入口**（`FastForwardButton` + `ScoreboardHotKeyCategory.ToggleFastForward`，默认 **F**），需要可见计分板 + 玩家操作，无程序化触发；第三方 RTSCamera 亦提供快进，但其 `Fastforward` 键位注册为空列表（`RTSCameraGameKeyCategory.CreateCategory`，反编译见 `..\tools\rts_src\RTSCamera.decompiled.cs:15224`），用户配置 `RTSCameraGameKeyConfig.xml` 里同样为空 → **该键当前无绑定**（"曾经绑过"未验证） | 自建加速通道：`Mission.IsFastForward` + 每帧重申（无键、无 UI、可编程）；新增 `bl_fast_forward` 工具与 `bl_cmd.py fastforward/speed` |
 | v0.4.0 | 幽灵请求 / 路径穿越 / 数据静默覆盖 / 部署静默失败 | 读 Coop 源码时照出我们自己 6 个缺陷（详见 `..\Coop源码对照_可复用清单.md` §1） | 新增 `RequestGuard`（过期作废 + id 白名单 + 大小上限）；`Jmini` 键查找改词法扫描；遥测文件名毫秒级 + `CreateNew`；浮点 round-trip + NaN 计数；超时三值归因 + 进程死亡早退；`build.ps1` 查进程 + 备份 + SHA256；新增 44 项离线单测 |
+
+---
+
+## 十一、编码约定（统一 UTF-8）
+
+**全链路 UTF-8，没有例外**（2026-09-25 统一）：
+
+| 环节 | 口径 |
+|---|---|
+| `tools/*.py` 的 stdout/stderr | `bl_common.safe_streams()` ⇒ `reconfigure(encoding="utf-8", errors="replace")`，**每个输出脚本入口显式调用** |
+| `tools/*.py` 文件读写 | `open(..., encoding="utf-8")`；容忍 BOM 的输入用 `utf-8-sig`；二进制一律 `"rb"`/`"wb"` |
+| 子进程 stdout 解码（离线自测） | 一律 `encoding="utf-8"`，且**不设** `PYTHONIOENCODING`（子进程自己钉），也别"设 gbk 再按 gbk 读" |
+| C# 控制台（`tools/jsontest/GuardTest.cs`） | `Console.OutputEncoding = Encoding.UTF8` |
+| C# 文件读写（日志 / 配置 / 命令通道） | `Encoding.UTF8` 或 `new UTF8Encoding(false)`（写文件不带 BOM） |
+| 战斗日志 JSONL | C# 写 UTF-8 无 BOM ⇄ Python `io.open(..., encoding="utf-8")` 读 |
+
+**为什么必须显式钉**：Windows 上 Python 的 stdio 默认按 **locale 编码**（简中 = cp936/GBK），
+C# 的 `Console` 默认按**控制台代码页**。写入编码 ≠ 读取编码 ⇒ 中文整片变成 `U+FFFD`。
+本项目的输出消费端是**调用这些工具的 AI / 管道**（实测 PowerShell 7 的
+`[Console]::OutputEncoding` 默认就是 utf-8），所以口径统一在 UTF-8，**不依赖控制台代码页**。
+
+**别再走回去**（2026-09-25 走过的弯路）：旧版 `safe_streams()` 只 `reconfigure(errors="replace")`
+不改 encoding，号称"GBK 控制台可读"—— 那只是把错配挪到另一边，一离开 GBK 就乱码；同类半吊子
+还有 `bl_sage.py` 里一份内联的 `reconfigure` 副本（已删，收敛到 `bl_common.safe_streams()`）。
+另一个反向的弯路是把中文**译制成英文**来"绕开乱码"—— 编码问题不该靠换语言解决，那些提交已 revert。
+改任何输出前，先读 `bl_common.safe_streams()` 的 docstring。
 | v0.5.0 | 无效样本无法识别 / 手动核对 DLL 版本 | 清单 §4 第 2 项（C20 引擎帧就绪判据 + A2 构建一致性） | 新增 `EngineProbe` + `ProbePolicy`（任务时间/tick/墙钟/暂停 → `readiness` 与 `end.validity`）；`BuildInfo` + `build_manifest.json` + `bl_build_check`（四段哈希链）；`bl_start_battle` 加构建 preflight；`bl_wait_for_state` 卡住早退；离线单测 44 → 57 项、Python 自测 36 项 |
 | v0.7.0 | 首场实测暴露：21 秒冻结无法定位 / 程序集版本恒为 0.0.0.0 / 构建检查用上一局数据下结论 | 见 `首场实测_20260923_220054.md` §五 | 新增 `t="ff"` 事件（记录 `IsFastForward` 每次变化 → 可一次判定"按钮是否接线"）+ `t="stall_start/stall_end"` 与 `validity.maxStallAtMissionTime`（定位冻结阶段）；`build.ps1` 生成版本源文件（`assemblyVersion` 0.7.0.0）并**自动同步 `module/SubModule.xml` 版本**；`build_check` 先确认状态文件属于当前会话（修掉 `game_running_other_build` 误报）；`bl_cmd.py fastforward` 不带参数改为查看状态；Python 自测 54 项 |
 | v0.7.3 | **镜像对局（同兵种 20v20）却一边倒**：攻方 13:0 / 6:0 全胜 | 引擎默认战术是「攻方进攻、守方原地防守」，冲锋方在混战中占优（实测攻方命中 407 次 vs 守方 285 次，且守方反而先命中）→ 该偏差足以掩盖真实兵种差异。官方 `CPUBenchmarkMissionLogic.AfterStart:160-175` 同样要对双方 `ClearTacticOptions()` | 场景默认改为**双方对称 `TacticCharge`**（+每个阵型 `MovementOrderCharge`）；新增 `--orders charge\|default` 与 `--player-side attacker\|defender` 两个实验开关；另外修正**伤害口径**：遥测 `dmg` 是实际扣血、`absorbedByArmor` 是另一路记账（被盾挡下的命中会带 267 而**一滴血不掉**），分析器改用 HP 真实变化计算，两局复核偏差均为 **0.0%**，新增"被挡下%"指标（盾臂 97% / 躯干 28%）；新增 `crashreport_probe.py`、`hit_semantics_probe.py`、`dump_agent_hits.py` 三个取证工具。**⚠️ 部署后 7 局实测的重要补充：战术对称化并没有消除偏差，真凶是 `playerSide` 标记**（——详见 §3.5）。
