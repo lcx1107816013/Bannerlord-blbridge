@@ -1,0 +1,24 @@
+{
+  "label": "scale_gradient_50_100",
+  "runsPerConfig": 3,
+  "scene": "battle_terrain_a",
+  "orders": "charge",
+  "playerSide": "attacker",
+  "capSec": 30,
+  "configs": [
+    {
+      "label": "s50_legionary_att",
+      "attacker": "imperial_legionary",
+      "a": 50,
+      "defender": "battanian_wildling",
+      "d": 50
+    },
+    {
+      "label": "s100_legionary_att",
+      "attacker": "imperial_legionary",
+      "a": 100,
+      "defender": "battanian_wildling",
+      "d": 100
+    }
+  ]
+}
