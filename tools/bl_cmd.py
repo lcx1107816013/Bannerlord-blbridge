@@ -21,6 +21,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 import bl_mcp  # noqa: E402
 
 
@@ -61,7 +62,8 @@ def main(argv):
                    help="给射手补满弹药（长测不中断；靶子的弹药不补，它是被测对象）")
     p.add_argument("--dummy-armor", default=None,
                    help="靶子护甲数值覆盖，如 head=45,torso=35,legs=20,arms=25"
-                        "（只作用于靶子；未写的部位不动；每帧重申，零 Harmony）")
+                        "（只作用于靶子；未写的部位不动；每帧重申，零 Harmony；"
+                        "未知部位名/非数字会直接报错，不静默跳过）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -116,19 +118,13 @@ def main(argv):
             "unlimitedAmmo": "true" if args.unlimited_ammo else "false",
             }
         if getattr(args, "dummy_armor", None):
-            part_keys = {"head": "dummyArmorHead", "torso": "dummyArmorTorso",
-                         "legs": "dummyArmorLegs", "arms": "dummyArmorArms"}
-            for part in args.dummy_armor.split(","):
-                if "=" not in part:
-                    continue
-                k, v = part.split("=", 1)
-                key = part_keys.get(k.strip().lower())
-                if key:
-                    try:
-                        # 必须传**数字**：C# 侧 Jmini.Num 只吃数字字符，字符串值会被判成"读不到"
-                        params[key] = float(v.strip())
-                    except ValueError:
-                        pass
+            try:
+                # 必须传**数字**：C# 侧 Jmini.Num 只吃数字字符，字符串值会被判成"读不到"。
+                # 解析失败一律报错退出 —— 静默跳过曾让 9 场实验整批作废（2026-09-24）。
+                params.update(bl_common.parse_dummy_armor(args.dummy_armor))
+            except ValueError as e:
+                print("错误: --dummy-armor 解析失败：%s" % e)
+                return 2
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

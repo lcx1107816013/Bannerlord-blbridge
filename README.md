@@ -44,7 +44,7 @@ BlBridge/
   tools/bl_mcp.py                 MCP server（stdio，15 个工具）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径）
-  tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④）
+  tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
   tools/bl_compare.py             A/B 对比报告：主指标=满编窗口 + 95%CI + 样本量门槛 + 换边双跑交叉验证（阶段 2④）
   tools/bl_cmd.py                 命令行：status / start / wait / batch / compare / buildcheck / fastforward / speed
   tools/bl_selftest.py            自测（合成数据 + MCP 协议 + 控制通道 + 假游戏端 + 构建链 + 配置 + 崩溃判定）
@@ -52,6 +52,7 @@ BlBridge/
   tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
   tools/plan.example.json         跑批计划示例（换边双跑）
+  tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
   tools/runs.example.json         跑批清单示例（供 bl_compare --manifest）
   tools/jsontest/                 离线单测（Jmini/RequestGuard/ProbePolicy/BuildInfo/配置，69 项断言）
   tools/register_mcp.py           把 blbridge 登记进 CodeBuddy 的 mcp.json

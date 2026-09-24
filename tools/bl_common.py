@@ -88,3 +88,51 @@ def safe_streams():
             stream.reconfigure(errors="replace")
         except Exception:
             pass
+
+
+# ── 靶子护甲覆盖（v0.8.0）：部位名 → C# 侧参数名 ──────────────────────
+# 单一真相：bl_cmd.py（--dummy-armor）与 bl_batch.py（plan）共用这一份，
+# 避免两处清单各自漂移（那正是"写对了名字却静默无效"的温床）。
+DUMMY_ARMOR_PARTS = {
+    "head": "dummyArmorHead",
+    "torso": "dummyArmorTorso",
+    "legs": "dummyArmorLegs",
+    "arms": "dummyArmorArms",
+}
+
+
+def parse_dummy_armor(text):
+    """把 ``head=45,torso=35`` 解析成 ``{dummyArmorHead: 45.0, ...}``；**非法即抛 ValueError**。
+
+    绝不静默跳过：2026-09-24 有 9 场实验因为参数被静默丢弃而整批作废
+    （`Jmini.Num` 只吃数字字符，字符串值被判成"读不到"，没有任何报错）。
+    未知部位名 / 非数字 / 缺 `=` / 缺值 / 对象形式 —— 全部报错，把问题挡在发命令之前。
+
+    空串与纯空白 ⇒ 空 dict（= 不覆盖任何部位，与 CLI 默认一致）。
+    """
+    if isinstance(text, dict):
+        raise ValueError('dummyArmor 请用字符串形式（如 "head=45,torso=35"），不要用对象')
+    if text is None:
+        return {}
+    if not isinstance(text, str):
+        raise ValueError("dummyArmor 必须是字符串，收到 %s" % type(text).__name__)
+    out = {}
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError("dummyArmor 片段缺少 '='：%r（应为 head=45,torso=35 形式）" % part)
+        k, v = part.split("=", 1)
+        k = k.strip().lower()
+        if not k:
+            raise ValueError("dummyArmor 片段缺少部位名：%r" % part)
+        if k not in DUMMY_ARMOR_PARTS:
+            raise ValueError("未知部位名 %r（可用：%s）"
+                             % (k, ", ".join(sorted(DUMMY_ARMOR_PARTS))))
+        v = v.strip()
+        try:
+            out[DUMMY_ARMOR_PARTS[k]] = float(v)
+        except ValueError:
+            raise ValueError("部位 %s 的值不是数字：%r" % (k, v))
+    return out

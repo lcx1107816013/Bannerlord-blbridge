@@ -14,6 +14,19 @@
     python bl_batch.py --plan plan.json                 # 真跑（需游戏在跑 + 停在自定义战斗界面）
     python bl_batch.py --plan plan.json --dry-run       # 只打印计划，不碰游戏
     python bl_batch.py --plan plan.json --out runs.json # 产出给 bl_compare.py 的清单
+
+plan 字段（顶层给默认值，单个 config 可覆盖）：
+    label / runsPerConfig / scene / orders / playerSide / capSec
+    configs[] = { label, attacker, a, defender, d, ...靶场参数 }
+
+靶场参数（v0.8.0，可选；键名与 `bl_cmd.py start` 的开关一一对应）：
+    dummySide       none|attacker|defender —— 把该方设为"永不倒下"的靶子
+    dummyArmor      "head=45,torso=35"（字符串；只作用于靶子，每帧重申）
+    freezeDummies   true/false
+    unlimitedAmmo   true/false
+    —— 以上任一非法（未知部位名 / 非数字 / 字符串布尔 / 非法阵营名）都会**直接报错中止**
+    整批跑批，绝不静默跳过（静默丢弃曾让 9 场护甲实验整批作废，2026-09-24）。
+    示例见同目录 plan.armor.example.json。
 """
 
 import argparse
@@ -27,9 +40,67 @@ import time
 # 并入 BlBridge\tools\ 之后 bl_cmd.py 就在本脚本旁边 —— 用自身目录，
 # 不再硬编码 CodeBuddy 的工作区路径。
 DEFAULT_TOOLS = os.path.dirname(os.path.abspath(__file__))
+if DEFAULT_TOOLS not in sys.path:
+    sys.path.insert(0, DEFAULT_TOOLS)
+import bl_common  # noqa: E402
+
 DEFAULT_BATTLES = os.path.join(
     os.path.expanduser("~"), "Documents", "Mount and Blade II Bannerlord", "BlBridge", "battles"
 )
+
+# ── 靶场参数（v0.8.0）：plan 顶层给默认值，单配置可覆盖 ────────────────
+# 键名与 `bl_cmd.py start` 的开关一一对应，值直接透传给 CLI（零翻译层）；
+# 护甲的部位名清单只有一份，在 bl_common.DUMMY_ARMOR_PARTS。
+DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor")
+
+
+def resolve_dummy_params(plan, cfg):
+    """plan 顶层默认 + 单配置覆盖 ⇒ 只保留真正给了值的键。"""
+    out = {}
+    for k in DUMMY_PLAN_KEYS:
+        if k in cfg:
+            out[k] = cfg[k]
+        elif k in plan:
+            out[k] = plan[k]
+    return out
+
+
+def build_start_args(plan, cfg, scene, orders, player_side, cap):
+    """组装 `bl_cmd.py start` 的 CLI 参数（纯函数，故可在 bl_selftest 里手算断言）。
+
+    靶场参数非法（未知部位名 / 非数字 / 对象形式）⇒ **抛 ValueError**，由调用方给出可读报错。
+    **绝不静默丢弃** —— 那正是 9 场护甲实验整批作废的根因（2026-09-24）。
+    """
+    dummy = resolve_dummy_params(plan, cfg)
+    out = [
+        "start",
+        "--attacker", str(cfg.get("attacker")),
+        "--defender", str(cfg.get("defender")),
+        "--a", str(cfg.get("a", 20)),
+        "--d", str(cfg.get("d", 20)),
+        "--scene", scene,
+        "--cap", str(cap),
+        "--orders", orders,
+        "--player-side", player_side,
+    ]
+    side = dummy.get("dummySide")
+    if side is not None and side not in ("none", "attacker", "defender"):
+        raise ValueError("dummySide 只能是 none/attacker/defender，收到 %r" % (side,))
+    if side and side != "none":
+        out += ["--dummy-side", str(side)]
+    # 布尔必须真是 JSON 布尔：`"false"` 在 Python 里是**真值**，静默当成 true 会把开关写反
+    for key, flag in (("freezeDummies", "--freeze-dummies"),
+                      ("unlimitedAmmo", "--unlimited-ammo")):
+        val = dummy.get(key)
+        if val is not None and not isinstance(val, bool):
+            raise ValueError("%s 必须是 true/false（JSON 布尔），收到 %r" % (key, val))
+        if val is True:
+            out += [flag]
+    armor = dummy.get("dummyArmor")
+    if armor:
+        bl_common.parse_dummy_armor(armor)   # 只校验；值原样透传给 CLI
+        out += ["--dummy-armor", armor]
+    return out
 
 
 def run_cli(tools_dir, args, timeout):
@@ -130,6 +201,13 @@ def main():
 
     for cfg in configs:
         label = cfg.get("label", "?")
+        try:
+            start_args = build_start_args(plan, cfg, scene, orders, player_side, cap)
+        except ValueError as e:
+            print("!! 配置 %s 的靶场参数非法：%s" % (label, e))
+            print("   -> 中止跑批（靶场参数绝不静默跳过，否则整批数据作废）")
+            return 1
+        dummy = resolve_dummy_params(plan, cfg)
         entry = {
             "label": label,
             "attacker": cfg.get("attacker"),
@@ -138,21 +216,14 @@ def main():
             "orders": orders,
             "runs": [],
         }
+        if dummy:
+            entry["dummy"] = dummy
         print("\n---- 配置 %s: %s(%s) vs %s(%s) ----"
               % (label, cfg.get("attacker"), cfg.get("a", 20), cfg.get("defender"), cfg.get("d", 20)))
+        if dummy:
+            print("     靶场参数：%s" % json.dumps(dummy, ensure_ascii=False))
 
         for i in range(runs_per):
-            start_args = [
-                "start",
-                "--attacker", str(cfg.get("attacker")),
-                "--defender", str(cfg.get("defender")),
-                "--a", str(cfg.get("a", 20)),
-                "--d", str(cfg.get("d", 20)),
-                "--scene", scene,
-                "--cap", str(cap),
-                "--orders", orders,
-                "--player-side", player_side,
-            ]
             wait_args = ["wait", "--state", "ended", "--timeout", str(args.wait_timeout)]
 
             if args.dry_run:

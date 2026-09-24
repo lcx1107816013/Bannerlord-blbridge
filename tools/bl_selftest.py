@@ -252,6 +252,119 @@ def test_compare_manifest_runs():
         os.unlink(path)
 
 
+def test_parse_dummy_armor():
+    """bl_common.parse_dummy_armor：严格解析，绝不静默丢弃。
+
+    2026-09-24 §七 教训：`--dummy-armor` 曾因参数类型写错被**静默丢弃**整整 9 场实验。
+    所以解析层必须"不认识就报错"，而不是跳过 —— 本测试就是钉住这条性质。
+    """
+    import bl_common
+    check(bl_common.parse_dummy_armor("head=45,torso=35") ==
+          {"dummyArmorHead": 45.0, "dummyArmorTorso": 35.0}, "四部位名 → C# 参数名")
+    check(bl_common.parse_dummy_armor(" head = 45 , arms=25.5 ") ==
+          {"dummyArmorHead": 45.0, "dummyArmorArms": 25.5}, "容忍空白")
+    check(bl_common.parse_dummy_armor("") == {}, "空串 → 空 dict（= 不覆盖）")
+    check(bl_common.parse_dummy_armor("   ") == {}, "纯空白 → 空 dict")
+    for bad, why in (("hed=45", "未知部位名"),
+                     ("head=abc", "值非数字"),
+                     ("head", "缺 = 号"),
+                     ("head=", "缺值"),
+                     ("=45", "缺部位名")):
+        try:
+            bl_common.parse_dummy_armor(bad)
+            check(False, "非法输入必须报错（%s）: %s" % (why, bad))
+        except ValueError as e:
+            check(True, "非法输入报错（%s）: %s" % (why, e))
+    try:
+        bl_common.parse_dummy_armor({"head": 45})
+        check(False, "对象形式必须报错并提示用字符串")
+    except ValueError as e:
+        check("字符串" in str(e), "对象形式给出可读提示", e)
+
+
+def test_bl_batch_plan_args():
+    """bl_batch 的 plan → CLI 参数组装（纯函数，不需要游戏）。
+
+    覆盖：顶层默认 / 单配置覆盖 / none 不追加 / 护甲字符串透传 / 布尔开关 / 非法即报错。
+    """
+    import bl_batch
+    base = {"attacker": "imperial_legionary", "defender": "battanian_wildling", "a": 20, "d": 10}
+    scene, orders, ps, cap = "battle_terrain_a", "charge", "attacker", 30
+
+    A = bl_batch.build_start_args({}, base, scene, orders, ps, cap)
+    check(A[0] == "start" and A[1:5] == ["--attacker", "imperial_legionary",
+                                        "--defender", "battanian_wildling"],
+          "基础参数顺序不变", A[:6])
+    check("--dummy-side" not in A and "--dummy-armor" not in A and
+          "--unlimited-ammo" not in A and "--freeze-dummies" not in A,
+          "未指定靶场参数时一个开关都不追加", A)
+
+    A = bl_batch.build_start_args({"dummySide": "defender"}, base, scene, orders, ps, cap)
+    check(A[A.index("--dummy-side") + 1] == "defender", "plan 顶层 dummySide 生效", A)
+
+    A = bl_batch.build_start_args({"dummySide": "defender"}, dict(base, dummySide="attacker"),
+                                  scene, orders, ps, cap)
+    check(A[A.index("--dummy-side") + 1] == "attacker", "单配置覆盖顶层默认", A)
+
+    A = bl_batch.build_start_args({}, dict(base, dummySide="none"), scene, orders, ps, cap)
+    check("--dummy-side" not in A, "dummySide=none 不追加（与 CLI 默认一致）")
+
+    A = bl_batch.build_start_args({}, dict(base, dummyArmor="head=45,torso=35"),
+                                  scene, orders, ps, cap)
+    check(A[A.index("--dummy-armor") + 1] == "head=45,torso=35", "护甲字符串原样透传（零翻译）", A)
+
+    A = bl_batch.build_start_args({"unlimitedAmmo": True, "freezeDummies": True},
+                                  base, scene, orders, ps, cap)
+    check("--unlimited-ammo" in A and "--freeze-dummies" in A, "布尔靶场开关被追加", A)
+
+    for bad, why in (("hed=45", "未知部位名"), ("head=abc", "值非数字"), ("head", "缺 = 号")):
+        try:
+            bl_batch.build_start_args({}, dict(base, dummyArmor=bad), scene, orders, ps, cap)
+            check(False, "plan 里非法护甲必须报错（%s）" % why)
+        except ValueError as e:
+            check(True, "plan 里非法护甲报错（%s）: %s" % (why, e))
+
+    # 非法 dummySide：CLI 的 choices 能拦，但跑批应在**发命令之前**中止（否则每局都要先连一次游戏）
+    try:
+        bl_batch.build_start_args({}, dict(base, dummySide="bogus"), scene, orders, ps, cap)
+        check(False, "plan 里非法 dummySide 必须报错")
+    except ValueError as e:
+        check(True, "plan 里非法 dummySide 报错: %s" % e)
+
+    # 字符串布尔是把开关写反的经典坑：`"false"` 在 Python 里是真值 ⇒ 必须拒绝，不能静默当真
+    for key in ("unlimitedAmmo", "freezeDummies"):
+        try:
+            bl_batch.build_start_args({}, dict(base, **{key: "false"}), scene, orders, ps, cap)
+            check(False, "plan 里 %s 用字符串必须报错" % key)
+        except ValueError as e:
+            check(True, "plan 里 %s 的字符串布尔被拒: %s" % (key, e))
+    A = bl_batch.build_start_args({}, dict(base, unlimitedAmmo=False, freezeDummies=False),
+                                  scene, orders, ps, cap)
+    check("--unlimited-ammo" not in A and "--freeze-dummies" not in A, "显式 false 不追加开关", A)
+
+    try:
+        bl_batch.build_start_args({}, dict(base, dummyArmor={"head": 45}), scene, orders, ps, cap)
+        check(False, "plan 里对象形式护甲必须报错")
+    except ValueError as e:
+        check("字符串" in str(e), "plan 里对象形式给出可读提示", e)
+
+
+def test_bl_cmd_dummy_armor_strict():
+    """bl_cmd.py 的 `--dummy-armor` 必须在**发命令之前**拒掉非法输入。
+
+    否则就是又一次"静默失效"（9 场无效实验的根因）。合法输入这里不测（那要真连游戏）；
+    非法输入不会走到游戏。
+    """
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(HERE, "bl_cmd.py"), "start",
+                        "--attacker", "imperial_legionary", "--defender", "battanian_wildling",
+                        "--dummy-armor", "hed=45"],
+                       capture_output=True, cwd=HERE)
+    out = (r.stdout + r.stderr).decode("utf-8", "replace")
+    check(r.returncode != 0, "未知部位名 → 非 0 退出", r.returncode)
+    check("未知部位" in out or "hed" in out, "报错信息指名道姓", out.strip()[:200])
+
+
 def main():
 
 
@@ -572,6 +685,15 @@ def main():
     print("=" * 90)
     test_mirror_cross_check()
     test_compare_manifest_runs()
+
+    # ── ⑪ 跑批 plan → CLI 参数（⑤：靶场参数必须能进 plan，且非法输入不许静默）──
+    print()
+    print("=" * 90)
+    print("⑪ bl_batch plan → CLI 参数 + bl_common 护甲解析（严格）")
+    print("=" * 90)
+    test_parse_dummy_armor()
+    test_bl_batch_plan_args()
+    test_bl_cmd_dummy_armor_strict()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))
