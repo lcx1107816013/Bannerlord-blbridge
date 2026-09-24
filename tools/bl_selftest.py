@@ -211,7 +211,7 @@ def test_mirror_cross_check():
 
 
 def test_compare_manifest_runs():
-    """bl_compare 的**接入层**必须跑得通，且在默认中文控制台（GBK）下也不能崩。
+    """bl_compare 的**接入层**必须跑得通，且在不设编码环境变量时也不能崩（子进程自己钉 UTF-8）。
 
     2026-09-24 踩坑：只测纯函数 mirror_cross_check 远远不够 —— main() 里
     `stats` 结构改了（多了 cfg）却漏改一处解包，纯函数测试全绿而 CLI 直接崩。
@@ -237,14 +237,14 @@ def test_compare_manifest_runs():
         with io.open(path, "w", encoding="utf-8") as fh:
             json.dump(man, fh, ensure_ascii=False)
         env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "gbk"          # 默认中文 Windows 控制台
-        # 子进程带着 PYTHONIOENCODING=gbk ⇒ 它的输出是 **GBK 字节**，必须按 gbk 解码；
-        # 按 utf-8 解码会让中文全成乱码、断言假失败（2026-09-24 自己踩过）。
+        env.pop("PYTHONIOENCODING", None)        # 不设编码环境变量：子进程自己钉 UTF-8
+        # 子进程由 bl_common.safe_streams() 固定按 UTF-8 写 ⇒ 这里必须按 utf-8 解码
+        # （旧口径是"设 gbk 环境变量 + 按 gbk 读"；统一 UTF-8 后方向正好反过来）。
         r = subprocess.run([sys.executable, os.path.join(HERE, "bl_compare.py"), "--manifest", path],
                            capture_output=True, env=env, cwd=HERE)
-        err = r.stderr.decode("gbk", "replace")[-200:]
-        check(r.returncode == 0, "bl_compare --manifest 在 GBK 控制台下 exit 0", err)
-        out = r.stdout.decode("gbk", "replace")
+        err = r.stderr.decode("utf-8", "replace")[-200:]
+        check(r.returncode == 0, "bl_compare --manifest exit 0", err)
+        out = r.stdout.decode("utf-8", "replace")
         check("换边双跑交叉验证" in out, "输出含交叉验证小节")
         check("识别为镜像双跑" in out, "两组互换攻守 ⇒ 识别为镜像双跑")
         check("位置效应" in out and "兵种差异" in out, "位置效应与兵种差异都被分离出来")
@@ -486,9 +486,8 @@ def test_bl_cmd_squad_strict():
     helptext = (help_out.stdout + help_out.stderr).decode("utf-8", "replace")
     check("--attacker-groups" in helptext and "--defender-groups" in helptext,
           "start 子命令暴露 --attacker-groups/--defender-groups")
-    # ⚠️ 断言用 **ASCII 关键词**：子进程在未设 PYTHONIOENCODING 时按 locale(GBK) 写 stdout，
-    #    这里若按 utf-8 解码，中文就是乱码 ⇒ 只查中文会**假失败**（本任务第一版正是这么栽的）。
-    #    ASCII 字节在 GBK/UTF-8 下解码一致 ⇒ 用它做判据最稳（既有测试的 `or "hed"` 同一思路）。
+    # 断言用 ASCII 关键词：tools/ 的输出统一走 UTF-8（bl_common.safe_streams），直查中文
+    # 关键词也稳；保留 ASCII 关键词只是让断言在任何解码口径下都不误报（`or "hed"` 同一思路）。
     for bad, kw in (("a:0", "count"),
                     ("a:1:Infantryy", "formation"),
                     ("a:1:Infantry:jump", "movement")):
@@ -625,7 +624,7 @@ def test_dummy_analyze_compare():
     check(abs(t_dt["Cut"]["A"]["mean"] - 35.0) < 1e-9,
           "按 damagetype 分组：Cut 均值=35", t_dt["Cut"]["A"]["mean"])
 
-    # 7) manifest 展开 + 接入层端到端（默认中文控制台 GBK 下也必须 exit 0）
+    # 7) manifest 展开 + 接入层端到端（不设编码环境变量时也必须 exit 0）
     tmp = tempfile.mkdtemp(prefix="bda_compare_")
     try:
         def write_tier(path, applied):
@@ -646,17 +645,17 @@ def test_dummy_analyze_compare():
         check(mt == [("A_base", [fa]), ("B_alt", [fb])], "manifest 展开成两个档", mt)
         check(bda.manifest_tiers(fa) is None, "非 manifest 的 jsonl ⇒ None（不误判）")
         env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "gbk"      # 模拟默认中文控制台
-        # 子进程按 gbk 写 ⇒ 必须按 gbk 读；用 utf-8 读会在线程里抛 UnicodeDecodeError
+        env.pop("PYTHONIOENCODING", None)    # 不设编码环境变量：子进程自己钉 UTF-8
+        # 子进程按 UTF-8 写 ⇒ 必须按 utf-8 读；读错编码会在线程里抛 UnicodeDecodeError
         # 且**被静默吞掉**，只留下 stdout=None（2026-09-24 的 MCP 段就栽在这里）。
         proc = subprocess.run([sys.executable, os.path.join(HERE, "bl_dummy_analyze.py"),
                                "--compare", "base=" + man, "--by", "bodypart"],
-                              capture_output=True, text=True, encoding="gbk",
+                              capture_output=True, text=True, encoding="utf-8",
                               env=env, timeout=180)
         check(proc.stdout is not None, "子进程 stdout 可读（None = 编码失配被吞）",
               repr(proc.stdout)[:60])
         proc_stdout = proc.stdout or ""
-        check(proc.returncode == 0, "跨档对比 CLI 在 GBK 控制台 exit 0", proc.returncode)
+        check(proc.returncode == 0, "跨档对比 CLI exit 0", proc.returncode)
         check("跨档对比" in proc_stdout and "Δ%" in proc_stdout, "输出含对比表",
               proc_stdout[:90].replace("\n", " "))
         check("+20.0%" in proc_stdout, "Δ% 手算 = +20.0%（10 → 12）")
@@ -666,7 +665,7 @@ def test_dummy_analyze_compare():
 
 def main():
     import bl_common
-    bl_common.safe_streams()      # 默认中文控制台（GBK）下不因 ⇒/⚠️ 崩（同 bl_metrics/bl_compare 的修复）
+    bl_common.safe_streams()      # 输出统一 UTF-8（见其 docstring：消费端是 UTF-8 管道）
 
     tmp = tempfile.mkdtemp(prefix="blbridge_selftest_")
     logdir = os.path.join(tmp, "logs")
@@ -707,8 +706,8 @@ def main():
     env["BLBRIDGE_LOG_DIR"] = logdir
     # 这里**故意不设 PYTHONIOENCODING**：bl_mcp.py 自己把 stdio 钉成 UTF-8
     # （`_force_utf8_stdio()`，MCP over stdio 的协议要求），而本段按 utf-8 读。
-    # 不设环境变量，正好让"哪天 bl_mcp 又没钉编码"这种回归在**继承 GBK locale**
-    # 的条件下被下面的乱码断言抓住（2026-09-24 宿主里工具描述全是问号就是这个 bug）。
+    # 不设环境变量，正好让"哪天 bl_mcp 又没钉编码"这种回归被下面的乱码断言抓住
+    # （2026-09-24 宿主里工具描述全是问号就是这个 bug）。
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "bl_mcp.py")],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=env, universal_newlines=True, encoding="utf-8")

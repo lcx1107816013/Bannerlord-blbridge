@@ -35,6 +35,7 @@ def _print(resp, err):
 
 
 def main(argv):
+    bl_common.safe_streams()
     ap = argparse.ArgumentParser(description="BlBridge 控制通道 CLI")
     sub = ap.add_subparsers(dest="cmd")
 

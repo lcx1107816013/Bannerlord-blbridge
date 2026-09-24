@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """按兵种对照「到死挨几箭」（③ 立项校验用）。
 

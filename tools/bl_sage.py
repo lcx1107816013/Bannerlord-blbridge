@@ -46,6 +46,12 @@ import re
 import sqlite3
 import sys
 
+# 与其它 tools 脚本同一口径：输出走 UTF-8（见 bl_common.safe_streams 的说明）。
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+import bl_common  # noqa: E402
+
 # BannerlordSage 的 src/utils/env.ts: dbPath = dist/games/<gameId>/<gameId>.db
 DEFAULT_DB_PATH = os.path.join("F:\\", "Program Files", "BannerlordSage",
                                "dist", "games", "bannerlord", "bannerlord.db")
@@ -298,12 +304,7 @@ def suggest_troops(bad_id, limit=5):
 
 
 def _main(argv=None):
-    for name in ("stdout", "stderr"):
-        stream = getattr(sys, name, None)
-        try:
-            stream.reconfigure(errors="replace")
-        except Exception:
-            pass
+    bl_common.safe_streams()
 
     ap = argparse.ArgumentParser(description="BlBridge → BannerlordSage 只读数据通道")
     ap.add_argument("--status", action="store_true", help="可用性自检")

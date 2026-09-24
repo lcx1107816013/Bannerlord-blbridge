@@ -14,6 +14,9 @@ import json
 import os
 import shutil
 import sys
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 
 MCP_JSON = os.path.join(os.path.expanduser("~"), ".codebuddy", "mcp.json")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +49,7 @@ def save(path, data):
 
 
 def main(argv):
+    bl_common.safe_streams()
     data = load(MCP_JSON)
     servers = data.setdefault("mcpServers", {})
 

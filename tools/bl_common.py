@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 各工具共享的 I/O 与格式化小函数（不含任何指标逻辑）。
 
@@ -75,17 +75,21 @@ def fmt(v, nd=1, dash="-"):
     return str(v)
 
 def safe_streams():
-    """让 stdout/stderr 在 GBK 控制台下不因无法编码的字符而崩溃。
+    """把 stdout/stderr 固定为 **UTF-8 输出**（errors="replace" 只兜底极端字符）。
 
-    默认中文 Windows 控制台（locale=gbk）下，输出里的 ⚠️ / ✅ / 箭头符号会抛
-    UnicodeEncodeError，整个 CLI exit 1（2026-09-24 实测：bl_metrics.py 与
-    bl_compare.py 都中过）。只改 errors 不改 encoding：中文照常可读，
-    编不出的字符降级成问号。
+    为什么必须显式设：Windows 上 Python 的 stdout 默认用 **locale 编码**（简中是 cp936），
+    于是脚本写出的是 GBK 字节。而本项目的输出消费端是**调用这些工具的 AI / 管道**
+    （实测 PowerShell 7 的 `[Console]::OutputEncoding` 默认就是 utf-8；重定向、CI、
+    别的 agent 捕获同理）—— **写入编码 ≠ 读取编码，中文就整片变成 U+FFFD**。
+    所以这里统一按 UTF-8 写，与 `bl_mcp.py` 的入口口径一致（那里一开始就是 utf-8）。
+
+    历史（别再走回去）：旧版只 `reconfigure(errors="replace")`、宣称"中文照常可读"——
+    那只在 GBK 控制台成立，一离开就乱码（2026-09-25 实测：GBK 字节被按 UTF-8 解 ⇒ 满屏 U+FFFD）。
     """
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         try:
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
 

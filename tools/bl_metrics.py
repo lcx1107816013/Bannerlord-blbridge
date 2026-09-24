@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 0.7.9 遥测指标分析器（纯计算层：无打印、无 I/O）。
 

@@ -18,9 +18,14 @@ import os
 import statistics
 import sys
 from collections import defaultdict
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import bl_common  # noqa: E402
 
 
 def main():
+    bl_common.safe_streams()
     if len(sys.argv) < 2:
         print("用法: python hit_semantics_probe.py <battle_xxx.jsonl>")
         return 1
