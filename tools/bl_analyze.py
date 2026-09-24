@@ -209,14 +209,14 @@ def _f(v, nd=1, dash="-"):
 def report(res):
     L = []
     s = res["summary"]
-    L.append("battle file: %s" % os.path.basename(res["file"]))
-    L.append("  duration %ss | units spawned %s | hits %s | kills %s | flee/panic %s" % (
+    L.append("战斗文件: %s" % os.path.basename(res["file"]))
+    L.append("  时长 %s 秒 | 单位入场 %s | 命中 %s 次 | 阵亡 %s | 溃逃/恐慌 %s 次" % (
         _f(s.get("duration_sec"), 0), s.get("units_seen"), s.get("hits"), s.get("kills"), s.get("flees")))
-    L.append("  attacker %s->%s men | defender %s->%s men" % (
+    L.append("  攻方 %s→%s 人 | 守方 %s→%s 人" % (
         s.get("a_initial"), s.get("a_alive"), s.get("d_initial"), s.get("d_alive")))
     L.append("")
-    L.append("1) HP model check (cumulative **actual hp loss** should ~= max hp; a large deviation means the hp or damage bookkeeping is off)")
-    L.append("   %-34s %-6s %-7s %-12s %-12s %-9s" % ("troop", "spawned", "killed%", "max_hp_median", "hp_loss_total", "dev%"))
+    L.append("① 血量模型校验（累计**实际扣血** 应≈ 最大血量；偏差大说明血量或伤害记账有问题）")
+    L.append("   %-34s %-6s %-7s %-12s %-12s %-9s" % ("兵种", "入场", "阵亡%", "最大血量中位", "累计实际扣血", "偏差%"))
     for r in res["troops"]:
         if not r["killed"]:
             continue
@@ -224,20 +224,20 @@ def report(res):
             r["troop"][:34], r["units"], _f(r["killed_pct"], 0),
             _f(r["max_hp_median"], 1), _f(r["mean_lethal_damage"], 1), _f(r["lethal_dev_pct"], 1)))
     L.append("")
-    L.append("2) damage taken (actual = real HP change; nominal = including shield/armor absorption, reference only)")
+    L.append("② 挨打成本（实际=按 HP 真实变化；名义=含被盾/甲吸收，仅对照）")
     L.append("   %-30s %-8s %-10s %-10s %-9s %-10s %-8s" % (
-        "troop", "hits_taken", "per_hit_actual", "per_hit_nominal", "blocked%", "hits_per_kill", "kills"))
+        "兵种", "被命中", "每击实际", "每击名义", "被挡下%", "每击杀需击数", "阵亡数"))
     for r in sorted(res["troops"], key=lambda x: -x["hits_taken"])[:20]:
         L.append("   %-30s %-8d %-10s %-10s %-9s %-10s %-8d" % (
             r["troop"][:30], r["hits_taken"], _f(r["mean_dmg_per_hit"], 2),
             _f(r["mean_raw_per_hit"], 2), _f(r["blocked_pct"], 1),
             _f(r["hits_per_kill"], 2), r["killed"]))
-    for title, key in (("3) by damage type", "damage_by_type"), ("4) by body part", "damage_by_bodypart"),
-                       ("5) by weapon class", "damage_by_weapon"), ("6) ranged/melee", "damage_by_range")):
+    for title, key in (("③ 按伤害类型", "damage_by_type"), ("④ 按命中部位", "damage_by_bodypart"),
+                       ("⑤ 按武器类别", "damage_by_weapon"), ("⑥ 远程/近战", "damage_by_range")):
         L.append("")
         L.append(title)
         L.append("   %-20s %-7s %-9s %-8s %-8s %-8s %-8s %-8s %-8s" % (
-            "group", "count", "mean_actual", "mean_nominal", "blocked%", "p10", "p50", "p90", "max"))
+            "分组", "次数", "均伤实际", "均伤名义", "被挡%", "p10", "p50", "p90", "最大"))
         for r in res[key]:
             L.append("   %-20s %-7d %-9s %-8s %-8s %-8s %-8s %-8s %-8s" % (
                 str(r["key"])[:20], r["n"], _f(r["mean"], 2), _f(r.get("mean_raw"), 2),
@@ -256,11 +256,11 @@ def main(argv):
     else:
         f = latest_battle()
         if not f:
-            print("no battle logs found. log dir: %s" % battles_dir())
+            print("没有找到战斗日志。日志目录: %s" % battles_dir())
             return 2
         files = [f]
     if not files:
-        print("no battle logs to analyze.")
+        print("没有战斗日志可分析。")
         return 2
 
     if as_json:
@@ -272,7 +272,7 @@ def main(argv):
         try:
             print(report(analyze(f)))
         except Exception as exc:  # noqa: BLE001
-            print("analysis failed %s: %r" % (f, exc))
+            print("分析失败 %s: %r" % (f, exc))
         print()
     return 0
 

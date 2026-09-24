@@ -305,13 +305,12 @@ def _main(argv=None):
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(description="BlBridge -> BannerlordSage read-only data channel")
-    ap.add_argument("--status", action="store_true", help="availability self-check")
-    ap.add_argument("--check", nargs="+", metavar="TROOP_ID", help="validate troop ids")
-    ap.add_argument("--search", metavar="PATTERN", help="fuzzy search by id (%% wildcard)")
-    ap.add_argument("--culture", help="with --search, filter by culture; case-sensitive, must match "
-                                      "the db exactly (empire or Culture.empire)")
-    ap.add_argument("--limit", type=int, default=20, help="rows returned by --search (default 20)")
+    ap = argparse.ArgumentParser(description="BlBridge → BannerlordSage 只读数据通道")
+    ap.add_argument("--status", action="store_true", help="可用性自检")
+    ap.add_argument("--check", nargs="+", metavar="TROOP_ID", help="校验兵种 id 是否存在")
+    ap.add_argument("--search", metavar="PATTERN", help="按 id 模糊搜索（%% 通配）")
+    ap.add_argument("--culture", help="配合 --search，按文化过滤；区分大小写，需与库中一致（empire 或 Culture.empire）")
+    ap.add_argument("--limit", type=int, default=20, help="--search 返回条数，默认 20")
     args = ap.parse_args(argv)
 
     if not (args.status or args.check or args.search):
@@ -331,17 +330,17 @@ def _main(argv=None):
     if args.check:
         chk = check_troops(args.check)
         if not chk["available"]:
-            print("index unavailable: %s" % chk["reason"])
+            print("索引不可用：%s" % chk["reason"])
             return 2
         for t in chk["found"]:
             print("OK    %-32s L%-4s %-18s %s" % (t["id"], t["level"], t["culture"], t["name"]))
         for m in chk["missing"]:
-            print("MISS  %-32s (troop id not in the index)" % m)
+            print("MISS  %-32s （索引里没有这个兵种 id）" % m)
         return 0 if not chk["missing"] else 1
 
     rows = search(args.search, args.culture, args.limit)
     if not rows:
-        print("(no match, or the index is unavailable -- confirm with --status first)")
+        print("（没有匹配，或索引不可用 —— 先用 --status 确认）")
         return 2
     for t in rows:
         print("%-34s L%-4s %-18s %s" % (t["id"], t["level"], t["culture"], t["name"]))

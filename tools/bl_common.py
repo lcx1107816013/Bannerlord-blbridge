@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 各工具共享的 I/O 与格式化小函数（不含任何指标逻辑）。
 
@@ -111,30 +111,30 @@ def parse_dummy_armor(text):
     空串与纯空白 ⇒ 空 dict（= 不覆盖任何部位，与 CLI 默认一致）。
     """
     if isinstance(text, dict):
-        raise ValueError('dummyArmor must be a string (e.g. "head=45,torso=35"), not an object')
+        raise ValueError('dummyArmor 请用字符串形式（如 "head=45,torso=35"），不要用对象')
     if text is None:
         return {}
     if not isinstance(text, str):
-        raise ValueError("dummyArmor must be a string, got %s" % type(text).__name__)
+        raise ValueError("dummyArmor 必须是字符串，收到 %s" % type(text).__name__)
     out = {}
     for part in text.split(","):
         part = part.strip()
         if not part:
             continue
         if "=" not in part:
-            raise ValueError("dummyArmor segment has no '=': %r (expected head=45,torso=35)" % part)
+            raise ValueError("dummyArmor 片段缺少 '='：%r（应为 head=45,torso=35 形式）" % part)
         k, v = part.split("=", 1)
         k = k.strip().lower()
         if not k:
-            raise ValueError("dummyArmor segment has no part name: %r" % part)
+            raise ValueError("dummyArmor 片段缺少部位名：%r" % part)
         if k not in DUMMY_ARMOR_PARTS:
-            raise ValueError("unknown armor part %r (available: %s)"
+            raise ValueError("未知部位名 %r（可用：%s）"
                              % (k, ", ".join(sorted(DUMMY_ARMOR_PARTS))))
         v = v.strip()
         try:
             out[DUMMY_ARMOR_PARTS[k]] = float(v)
         except ValueError:
-            raise ValueError("armor part %s has a non-numeric value: %r" % (k, v))
+            raise ValueError("部位 %s 的值不是数字：%r" % (k, v))
     return out
 
 
@@ -161,33 +161,32 @@ def parse_squad_groups(text):
     if text is None:
         return []
     if not isinstance(text, str):
-        raise ValueError("group string must be a string, got %s" % type(text).__name__)
+        raise ValueError("组串必须是字符串，收到 %s" % type(text).__name__)
     if not text.strip():
         return []
     out = []
     for idx, part in enumerate(text.split("|"), 1):
         part = part.strip()
         if not part:
-            raise ValueError("group %d is empty (expected troop:count[:formation[:movement]], "
-                             "groups separated by |)" % idx)
+            raise ValueError("第 %d 组为空（应为 troop:count[:formation[:movement]]，多组用 | 分隔）" % idx)
         fields = [f.strip() for f in part.split(":")]
         if len(fields) not in (2, 3, 4):
-            raise ValueError("group %d %r has %d fields; expected troop:count[:formation[:movement]]"
+            raise ValueError("第 %d 组 %r 的字段数 = %d，应为 troop:count[:formation[:movement]]"
                              % (idx, part, len(fields)))
         troop, cnt = fields[0], fields[1]
         if not troop:
-            raise ValueError("group %d %r has no troop id" % (idx, part))
+            raise ValueError("第 %d 组 %r 缺少兵种 id" % (idx, part))
         try:
             count = int(cnt)
         except ValueError:
-            raise ValueError("group %d %r has a non-integer count: %r" % (idx, part, cnt))
+            raise ValueError("第 %d 组 %r 的 count 不是整数：%r" % (idx, part, cnt))
         if count < 1:
-            raise ValueError("group %d %r count must be >= 1, got %d" % (idx, part, count))
+            raise ValueError("第 %d 组 %r 的 count 必须 ≥1，收到 %d" % (idx, part, count))
         formation = None
         if len(fields) >= 3 and fields[2]:
             formation = _FORMATION_BY_LOWER.get(fields[2].lower())
             if formation is None:
-                raise ValueError("group %d %r has an unknown formation: %r (available: %s)"
+                raise ValueError("第 %d 组 %r 的 formation 未知：%r（可用：%s）"
                                  % (idx, part, fields[2], ", ".join(SQUAD_FORMATIONS)))
         movement = None
         if len(fields) == 4 and fields[3]:
@@ -196,9 +195,8 @@ def parse_squad_groups(text):
                 hint = ""
                 if movement in REMOVED_MOVEMENTS:
                     repl = REMOVED_MOVEMENTS[movement]
-                    hint = " -- %s was removed (at the engine level it equals %s); use %s" % (
-                        movement, repl, repl)
-                raise ValueError("group %d %r has an unknown movement: %r (available: %s)%s"
+                    hint = "—— %s 已移除（引擎层它本就等同 %s），请改用 %s" % (movement, repl, repl)
+                raise ValueError("第 %d 组 %r 的 movement 未知：%r（可用：%s）%s"
                                  % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS), hint))
         out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
     return out

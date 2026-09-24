@@ -76,19 +76,18 @@ def squads_to_dsl(groups):
     if isinstance(groups, str):
         return groups
     if not isinstance(groups, list):
-        raise ValueError("groups must be a DSL string or a list of groups, got %s"
-                         % type(groups).__name__)
+        raise ValueError("组必须是 DSL 字符串或组列表，收到 %s" % type(groups).__name__)
     parts = []
     for i, g in enumerate(groups, 1):
         if not isinstance(g, dict):
-            raise ValueError("group %d is not an object: %r" % (i, g))
+            raise ValueError("第 %d 组不是对象：%r" % (i, g))
         unknown = [k for k in g if k not in _SQUAD_FIELDS]
         if unknown:
-            raise ValueError("group %d has unknown field(s) %s (available: %s)"
+            raise ValueError("第 %d 组含未知字段 %s（可用：%s）"
                              % (i, unknown, ", ".join(_SQUAD_FIELDS)))
         if g.get("movement") and not g.get("formation"):
-            raise ValueError("group %d has movement but no formation (in the DSL movement is "
-                             "field 4; field 3 cannot be skipped)" % i)
+            raise ValueError("第 %d 组给了 movement 却没给 formation"
+                             "（DSL 里 movement 是第 4 字段，不能跳过第 3 个）" % i)
         parts.append(":".join(str(g[k]) for k in _SQUAD_FIELDS if g.get(k) is not None))
     return "|".join(parts)
 
@@ -124,7 +123,7 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
     ]
     side = dummy.get("dummySide")
     if side is not None and side not in ("none", "attacker", "defender"):
-        raise ValueError("dummySide must be none/attacker/defender, got %r" % (side,))
+        raise ValueError("dummySide 只能是 none/attacker/defender，收到 %r" % (side,))
     if side and side != "none":
         out += ["--dummy-side", str(side)]
     # 布尔必须真是 JSON 布尔：`"false"` 在 Python 里是**真值**，静默当成 true 会把开关写反
@@ -132,7 +131,7 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
                       ("unlimitedAmmo", "--unlimited-ammo")):
         val = dummy.get(key)
         if val is not None and not isinstance(val, bool):
-            raise ValueError("%s must be true/false (JSON boolean), got %r" % (key, val))
+            raise ValueError("%s 必须是 true/false（JSON 布尔），收到 %r" % (key, val))
         if val is True:
             out += [flag]
     armor = dummy.get("dummyArmor")
@@ -162,20 +161,19 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
         for k in ROUND_PLAN_KEYS[1:]:
             if rounds.get(k) is not None:
                 # bl_cmd.py 只在给了 rounds 时才解析这些键 ⇒ 单独给会被**静默忽略**
-                raise ValueError("%s also needs 'rounds' (the multi-round switch); "
-                                 "otherwise the CLI ignores it" % (k,))
+                raise ValueError("%s 需要同时给 rounds（多轮开关），否则会被 CLI 忽略" % (k,))
         return out
     if isinstance(n, bool) or not isinstance(n, int) or n < 2:
-        raise ValueError("rounds must be an integer >= 2 (1 = multi-round off), got %r" % (n,))
+        raise ValueError("rounds 必须是 ≥2 的整数（1 = 不启用多轮），收到 %r" % (n,))
     out += ["--rounds", str(n)]
     end_alive = rounds.get("roundEndAlive")
     if end_alive is not None:
         if isinstance(end_alive, bool) or not isinstance(end_alive, int) or end_alive < 0:
-            raise ValueError("roundEndAlive must be an integer >= 0, got %r" % (end_alive,))
+            raise ValueError("roundEndAlive 必须是 ≥0 的整数，收到 %r" % (end_alive,))
         out += ["--round-end-alive", str(end_alive)]
     swap = rounds.get("roundSwap")
     if swap is not None and not isinstance(swap, bool):
-        raise ValueError("roundSwap must be true/false (JSON boolean), got %r" % (swap,))
+        raise ValueError("roundSwap 必须是 true/false（JSON 布尔），收到 %r" % (swap,))
     if swap is True:
         out += ["--round-swap"]
     for key, flag in (("roundSpawnAttacker", "--round-spawn-attacker"),
@@ -220,17 +218,17 @@ def preflight(plan, tools_dir, dry):
     （初版这里去 status 输出里找 "custombattle"，是个恒假的判据，实测暴露。）
     """
     if dry:
-        print("[dry-run] skipping preflight")
+        print("[dry-run] 跳过 preflight")
         return True
     code, out, err = run_cli(tools_dir, ["status"], timeout=20)
     print("[preflight] bl_cmd.py status -> rc=%d" % code)
     if err.strip():
         print("  stderr: %s" % err.strip()[:300])
     if code != 0 or '"ok": true' not in out:
-        print("  !! status failed -- is the game running with the BlBridge module enabled?")
-        print("     output snippet: %s" % out.strip()[:300])
+        print("  !! status 未成功 —— 游戏没在跑 / BlBridge 模块未启用？")
+        print("     输出片段：%s" % out.strip()[:300])
         return False
-    print("  OK: bridge is ready (the screen name is decided by start itself)")
+    print("  OK：桥已就绪（界面名由 start 自己判定）")
     return True
 
 
@@ -240,14 +238,12 @@ def main():
     # bl_compare 中过同一招，见 PROGRESS 十三节）。
     bl_common.safe_streams()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--plan", required=True, help="batch plan JSON")
-    ap.add_argument("--tools-dir", default=DEFAULT_TOOLS,
-                    help="BlBridge tools directory (contains bl_cmd.py)")
+    ap.add_argument("--plan", required=True, help="跑批计划 JSON")
+    ap.add_argument("--tools-dir", default=DEFAULT_TOOLS, help="BlBridge tools 目录（含 bl_cmd.py）")
     ap.add_argument("--battles-dir", default=DEFAULT_BATTLES)
-    ap.add_argument("--out", help="write runs.json to this path (for bl_compare.py)")
+    ap.add_argument("--out", help="把 runs.json 写到该路径（供 bl_compare.py 用）")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--wait-timeout", type=float, default=300.0,
-                    help="per-battle wait limit (sec)")
+    ap.add_argument("--wait-timeout", type=float, default=300.0, help="单场等待上限（秒）")
     args = ap.parse_args()
 
     with open(args.plan, encoding="utf-8") as fh:
@@ -260,22 +256,20 @@ def main():
     cap = int(plan.get("capSec", 600))
     configs = plan.get("configs", [])
     if not configs:
-        print("plan has no configs")
+        print("plan 里没有 configs")
         return 1
 
     print("=" * 88)
-    print("batch plan: %s" % plan.get("label", "(unnamed)"))
-    print("  %d runs per config; scene=%s orders=%s playerSide=%s cap=%ds"
-          % (runs_per, scene, orders, player_side, cap))
+    print("跑批计划：%s" % plan.get("label", "(未命名)"))
+    print("  每个配置 %d 局；scene=%s orders=%s playerSide=%s cap=%ds" % (runs_per, scene, orders, player_side, cap))
     total = runs_per * len(configs)
-    print("  %d runs total; at 10x speed a 20v20 takes ~20-40s => roughly %.0f-%.0f minutes"
+    print("  合计 %d 局；10 倍速下 20v20 约 20~40s/局 ⇒ 预计 %.0f~%.0f 分钟"
           % (total, total * 20 / 60.0, total * 45 / 60.0))
-    print("  side-swap protocol: playerSide=%s fixed; swap attacker/defender to cancel "
-          "attack/defense effects" % player_side)
+    print("  换边协议：固定 playerSide=%s，用 attacker/defender 对调抵消攻守效应" % player_side)
     print("=" * 88)
 
     if not os.path.isfile(os.path.join(args.tools_dir, "bl_cmd.py")):
-        print("!! cannot find %s" % os.path.join(args.tools_dir, "bl_cmd.py"))
+        print("!! 找不到 %s" % os.path.join(args.tools_dir, "bl_cmd.py"))
         return 2
 
     # 兵种 id 预检：跑批一开就是 N 局，任何 id 打错 ⇒ 整批全是无效样本。
@@ -305,28 +299,24 @@ def main():
         if ids:
             chk = bl_sage.check_troops(sorted(ids))
             if chk.get("available") and chk.get("missing"):
-                print("!! troop id(s) not in the index -- aborting the whole batch "
-                      "(otherwise all N runs are invalid samples):")
+                print("!! 兵种 id 在索引里不存在 —— 整批中止（否则 N 局全是无效样本）：")
                 for m in chk["missing"]:
                     s = bl_sage.suggest_troops(m)
-                    print("   %s%s" % (m, ("  -> similar candidates: " + ", ".join(s)) if s else ""))
-                print("   (the index covers official XML only; for third-party mod troops add "
-                      "\"skipTroopCheck\": true at the plan top level)")
+                    print("   %s%s" % (m, ("  -> 近似候选: " + ", ".join(s)) if s else ""))
+                print("   （索引只覆盖官方 XML；第三方模组兵种在 plan 顶层加 \"skipTroopCheck\": true）")
                 return 1
             if not chk.get("available"):
-                print("[warn] troop ids not pre-checked: %s"
-                      % (chk.get("reason") or "index unavailable"))
+                print("[warn] 兵种 id 未预检：%s" % (chk.get("reason") or "索引不可用"))
 
     if not preflight(plan, args.tools_dir, args.dry_run):
-        print("\n[abort] preflight failed. Fix it and rerun "
-              "(--dry-run validates the plan itself first).")
+        print("\n[abort] preflight 未通过。修好后重跑（记得 --dry-run 可先验证计划本身）。")
         return 1
 
     manifest = {
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "plan": plan.get("label", ""),
         "runsPerConfig": runs_per,
-        "protocol": "playerSide=%s fixed; troop sides swapped; >=3 runs per config" % player_side,
+        "protocol": "固定 playerSide=%s；兵种换边双跑；每配置 >=3 局" % player_side,
         "configs": [],
     }
 
@@ -335,9 +325,8 @@ def main():
         try:
             start_args = build_start_args(plan, cfg, scene, orders, player_side, cap)
         except ValueError as e:
-            print("!! config %s has invalid dummy-range params: %s" % (label, e))
-            print("   -> aborting the batch (dummy-range params are never skipped silently, "
-                  "otherwise the whole batch is invalid)")
+            print("!! 配置 %s 的靶场参数非法：%s" % (label, e))
+            print("   -> 中止跑批（靶场参数绝不静默跳过，否则整批数据作废）")
             return 1
         dummy = resolve_dummy_params(plan, cfg)
         entry = {
@@ -350,10 +339,10 @@ def main():
         }
         if dummy:
             entry["dummy"] = dummy
-        print("\n---- config %s: %s(%s) vs %s(%s) ----"
+        print("\n---- 配置 %s: %s(%s) vs %s(%s) ----"
               % (label, cfg.get("attacker"), cfg.get("a", 20), cfg.get("defender"), cfg.get("d", 20)))
         if dummy:
-            print("     dummy-range params: %s" % json.dumps(dummy, ensure_ascii=False))
+            print("     靶场参数：%s" % json.dumps(dummy, ensure_ascii=False))
 
         for i in range(runs_per):
             wait_args = ["wait", "--state", "ended", "--timeout", str(args.wait_timeout)]
@@ -368,20 +357,20 @@ def main():
             code, out, err = run_cli(args.tools_dir, start_args, timeout=90)
             print("  [%d/%d] start rc=%d" % (i + 1, runs_per, code))
             if code != 0:
-                print("        start failed: %s%s" % (out.strip()[:200], err.strip()[:200]))
-                print("        -> skipping this run (do not blindly retry; read the error above)")
+                print("        start 失败：%s%s" % (out.strip()[:200], err.strip()[:200]))
+                print("        -> 跳过本局（不要盲重试；先看上面错误）")
                 entry["runs"].append({"file": None, "error": "start_failed"})
                 continue
 
             code, out, err = run_cli(args.tools_dir, wait_args, timeout=args.wait_timeout + 60)
             print("  [%d/%d] wait  rc=%d" % (i + 1, runs_per, code))
             if code != 0:
-                print("        wait rc != 0: %s%s" % (out.strip()[-300:], err.strip()[:200]))
+                print("        wait 非 0：%s%s" % (out.strip()[-300:], err.strip()[:200]))
                 entry["runs"].append({"file": None, "error": "wait_failed"})
                 continue
 
             f = latest_battle(args.battles_dir, t0)
-            print("        battle file: %s" % (os.path.basename(f) if f else "(not found)"))
+            print("        战斗文件：%s" % (os.path.basename(f) if f else "(未找到)"))
             entry["runs"].append({"file": f, "dryRun": False})
 
         manifest["configs"].append(entry)
@@ -391,9 +380,9 @@ def main():
         with open(out_path, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, ensure_ascii=False, indent=1)
         print("\n[written] %s" % out_path)
-        print("next: python bl_compare.py --manifest \"%s\"" % out_path)
+        print("下一步： python bl_compare.py --manifest \"%s\"" % out_path)
     else:
-        print("\n[dry-run] no command executed, no file written.")
+        print("\n[dry-run] 未执行任何命令、未写文件。")
     return 0
 
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """BlBridge 0.7.9 遥测指标分析器（纯计算层：无打印、无 I/O）。
 
@@ -359,64 +359,64 @@ def render(events, top=8):
     counts = {}
     for e in events:
         counts[e.get("t")] = counts.get(e.get("t"), 0) + 1
-    L = ["BlBridge metrics report - v%s - %s" % (meta.get("version", "?"), meta.get("file", "")),
-         "  events: " + "  ".join("%s=%d" % kv for kv in sorted(counts.items(), key=lambda x: -x[1])), ""]
+    L = ["BlBridge 指标报告 · v%s · %s" % (meta.get("version", "?"), meta.get("file", "")),
+         "  事件：" + "  ".join("%s=%d" % kv for kv in sorted(counts.items(), key=lambda x: -x[1])), ""]
 
     sh = res["shields"]
-    L.append("1) shield HP curve: %d agents have shield records" % len(sh))
+    L.append("① 盾 HP 曲线：%d 个 agent 有盾记录" % len(sh))
     if sh:
         maxes = sorted({c["shield_max"] for c in sh.values() if c["shield_max"] is not None})
-        L.append("   shield max values: %s" % ", ".join(_fmt(m, 0) for m in maxes))
+        L.append("   盾满值集合：%s" % ", ".join(_fmt(m, 0) for m in maxes))
         for a, c in sorted(sh.items(), key=lambda kv: -kv[1]["hits"])[:top]:
-            L.append("   agent %-4s hit %-3d times   %s -> %s%s" % (
+            L.append("   agent %-4s 被打中 %-3d 次   %s → %s%s" % (
                 a, c["hits"], _fmt(c["first"]), _fmt(c["last"]),
-                ("   ** shield broken @%.1fs **" % c["break_time"]) if c["broken"] else ""))
+                ("   ** 已破盾 @%.1fs **" % c["break_time"]) if c["broken"] else ""))
         rev = sorted(a for a, c in sh.items() if c["reversals"])
         if rev:
-            L.append("   [!] %d agents had shield values rise again (shield slot/identity changed => the 'zero = broken' rule does not hold for them): %s"
+            L.append("   ⚠️ %d 个 agent 的盾值出现回升（盾槽/盾身份变过 ⇒ 「归零=破盾」口径对它们不成立）：%s"
                      % (len(rev), ", ".join("agent %s" % a for a in rev[:8])))
     L.append("")
 
     sb = res["shots"]
     broken = {a: v for a, v in sb.items() if v["shots"] is not None}
-    L.append("2) arrows to break: %d/%d agents broke their shield" % (len(broken), len(sb)))
+    L.append("② 破盾箭数：%d/%d 个 agent 破盾" % (len(broken), len(sb)))
     if broken:
         for a, v in sorted(broken.items(), key=lambda kv: kv[1]["shots"])[:top]:
-            L.append("   agent %-4s broke after %d arrows (shield %s, @%.1fs)" % (
+            L.append("   agent %-4s %d 箭破盾（盾 %s，@%.1fs）" % (
                 a, v["shots"], _fmt(v["shield_max"], 0), v["break_time"]))
     else:
-        L.append("   nobody broke a shield this run => no samples (needs a longer battle; see PROGRESS.md section 2, data gap)")
+        L.append("   本局无人破盾 ⇒ 无样本（需更长的战斗；见 PROGRESS.md ② 数据缺口）")
     L.append("")
 
     ah = res["arrows"]
-    L.append("3) arrows-taken distribution: %d agents took arrows" % len(ah))
+    L.append("③ 挨箭分布：%d 个 agent 挨过箭" % len(ah))
     if ah:
         hist = {}
         for n in ah.values():
             hist[n] = hist.get(n, 0) + 1
         peak = max(hist.values())
         for k in sorted(hist):
-            L.append("   agents with %-3d arrows: %-3d %s" % (k, hist[k], _bar(hist[k], peak)))
+            L.append("   挨 %-3d 箭的 agent：%-3d %s" % (k, hist[k], _bar(hist[k], peak)))
         vals = sorted(ah.values())
-        L.append("   total %d arrows; median %s arrows/agent; max %d arrows" % (
+        L.append("   合计 %d 箭；中位 %s 箭/人；最多 %d 箭" % (
             sum(vals), statistics.median(vals), vals[-1]))
     L.append("")
 
     ss = res["speed_self"]
-    L.append("4) movement reconciliation")
+    L.append("④ 移速对账")
     if ss:
         worst = max(ss.items(), key=lambda kv: kv[1]["max_outside"])
-        L.append("   position delta vs engine speed (out-of-window distance, 0 = self-consistent): %d agents, %d checkpoints; "
-                 "mean %.3f, max %.3f (worst agent %s)" % (
+        L.append("   位置差分 vs 引擎 speed（区间外距离，0=自洽）：%d 个 agent、%d 个对账点；"
+                 "平均 %.3f、最大 %.3f（最差 agent %s）" % (
                      len(ss), sum(v["n"] for v in ss.values()),
                      sum(v["mean_outside"] for v in ss.values()) / len(ss),
                      worst[1]["max_outside"], worst[0]))
     else:
-        L.append("   position delta vs engine speed: no samples")
+        L.append("   位置差分 vs 引擎 speed：无样本")
     cap = res["speed_cap"]
-    L.append("   speed and multipliers ([!] speed is world-unit speed; maxSpeed/combatSpeed are DrivenProperty **multipliers** -- they are not directly comparable):")
+    L.append("   速度与倍率（⚠️ speed 是世界单位速度；maxSpeed/combatSpeed 是 DrivenProperty **倍率**，两者不可直接比较）：")
     L.append("     %-27s %-7s %-9s %-12s %-14s" % (
-        "troop", "samples", "mean_speed", "maxSpeed_mult", "combatSpeed_mult"))
+        "兵种", "采样", "均速", "maxSpeed倍率", "combatSpeed倍率"))
     for troop, v in sorted(cap.items(), key=lambda kv: -kv[1]["n"]):
         L.append("     %-27s %-7d %-9.3f %-12.3f %-14.3f" % (
             troop[:27], v["n"], v["mean_speed"], v["mean_max_speed"],
@@ -427,17 +427,17 @@ def render(events, top=8):
     eps = [d for v in rl.values() for d in v["durations"]]
     trunc = sum(v["truncated"] for v in rl.values())
     resolution = next(iter(rl.values()))["resolution"] if rl else 0.0
-    L.append("5) reload duration: %d agents, %d reload segments; overall median %s s" % (
+    L.append("⑤ 装弹时长：%d 个 agent、%d 段装弹；全体中位 %s 秒" % (
         len(rl), len(eps), _fmt(statistics.median(eps), 2) if eps else "-"))
-    L.append("   [!] resolution +/-%.1f s (state sampling interval) => this is an **upper bound**, not an exact value" % resolution)
+    L.append("   ⚠️ 分辨率 ±%.1f 秒（state 采样间隔）⇒ 这是**上界**，不是精确值" % resolution)
     if trunc:
-        L.append("   dropped half-segments: %d (battle ended mid-reload)" % trunc)
+        L.append("   被丢弃的半段：%d 段（战斗在装弹中途结束）" % trunc)
     L.append("")
 
     ai = res["ai"]
-    L.append("6) AI parameters: %d params x %d troops" % (len(ai["params"]), len(ai["groups"])))
+    L.append("⑥ AI 参数分组：%d 个参数 × %d 个兵种" % (len(ai["params"]), len(ai["groups"])))
     for troop, g in sorted(ai["groups"].items(), key=lambda kv: -kv[1]["agents"]):
-        L.append("   %-27s agents=%-4d params=%-3d sides=%s" % (
+        L.append("   %-27s agents=%-4d 参数=%-3d sides=%s" % (
             troop[:27], g["agents"], len(g["params"]), ",".join(g["sides"])))
     return "\n".join(L)
 
@@ -450,7 +450,7 @@ def main(argv=None):
     if path is None:
         path = bl_common.latest_battle()
         if path is None:
-            print("no battle logs and no path given.")
+            print("没有战斗日志，也没给路径。")
             return 2
     if os.path.isdir(path):
         files = bl_common.list_battle_files(path)
@@ -460,7 +460,7 @@ def main(argv=None):
         try:
             ev = load_events(f)
         except OSError as exc:
-            print("cannot read %s: %s" % (f, exc))
+            print("读不了 %s: %s" % (f, exc))
             continue
         print(render(ev))
         print()

@@ -23,14 +23,14 @@ def default_log_dir():
 
 def main():
     logdir = os.environ.get("BLBRIDGE_LOG_DIR") or default_log_dir()
-    print("log dir: %s\n" % logdir)
+    print("日志目录：%s\n" % logdir)
 
     status = os.path.join(logdir, "bridge_status.json")
     print("=" * 78)
     print("① bridge_status.json")
     print("=" * 78)
     if not os.path.isfile(status):
-        print("  missing")
+        print("  不存在")
     else:
         with io.open(status, "r", encoding="utf-8-sig", errors="replace") as fh:
             st = json.load(fh)
@@ -49,14 +49,14 @@ def main():
     battles_dir = os.path.join(logdir, "battles")
     print()
     print("=" * 78)
-    print("battles/ directory")
+    print("② battles/ 目录")
     print("=" * 78)
     if not os.path.isdir(battles_dir):
-        print("  missing: %s" % battles_dir)
+        print("  不存在：%s" % battles_dir)
         return 0
     files = sorted(f for f in os.listdir(battles_dir) if f.endswith(".jsonl"))
     if not files:
-        print("  empty (no battle log written yet in this session)")
+        print("  空（这一局还没有产生战斗日志）")
         return 0
     for f in files[-8:]:
         p = os.path.join(battles_dir, f)
@@ -65,19 +65,19 @@ def main():
     latest = os.path.join(battles_dir, files[-1])
     print()
     print("=" * 78)
-    print("latest battle: %s" % files[-1])
+    print("③ 最近一场：%s" % files[-1])
     print("=" * 78)
     events = bl_analyze.load_events(latest)
     kinds = collections.Counter(e.get("t") for e in events)
-    print("  %d events, kind histogram: %s" % (len(events), dict(kinds)))
+    print("  事件总数 %d，类型分布：%s" % (len(events), dict(kinds)))
     for kind in ("meta", "end"):
         for e in events:
             if e.get("t") == kind:
                 print("  %s: %s" % (kind, json.dumps(e, ensure_ascii=False)))
     for e in events[:3]:
-        print("  first %s: %s" % (e.get("t"), json.dumps(e, ensure_ascii=False)[:220]))
+        print("  首条 %s: %s" % (e.get("t"), json.dumps(e, ensure_ascii=False)[:220]))
     for e in events[-3:]:
-        print("  last %s: %s" % (e.get("t"), json.dumps(e, ensure_ascii=False)[:220]))
+        print("  末条 %s: %s" % (e.get("t"), json.dumps(e, ensure_ascii=False)[:220]))
     return 0
 
 

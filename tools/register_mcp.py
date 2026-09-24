@@ -57,17 +57,17 @@ def main(argv):
         if SERVER_ENTRY in servers:
             del servers[SERVER_ENTRY]
             save(MCP_JSON, data)
-            print("removed %s" % SERVER_ENTRY)
+            print("已移除 %s" % SERVER_ENTRY)
         else:
-            print("%s is not registered, nothing to remove" % SERVER_ENTRY)
+            print("%s 未登记，无需移除" % SERVER_ENTRY)
         return 0
 
     servers[SERVER_ENTRY] = build_entry()
     save(MCP_JSON, data)
-    print("registered %s -> %s" % (SERVER_ENTRY, MCP_JSON))
+    print("已登记 %s -> %s" % (SERVER_ENTRY, MCP_JSON))
     print(json.dumps(build_entry(), ensure_ascii=False, indent=2))
     print()
-    print("note: the MCP server list is normally loaded at IDE startup -- reload the window / restart CodeBuddy for it to take effect.")
+    print("注意：MCP 服务列表通常在 IDE 启动时加载，需要重载窗口/重启 CodeBuddy 才会生效。")
     return 0
 
 
