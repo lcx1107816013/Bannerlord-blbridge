@@ -71,6 +71,10 @@ def applied_from_range(events):
                 # 稳定部位名（v0.8.1 起）。旧日志没有 bodyPartName ⇒ 回退到 bodyPart
                 # （那里面 Head 会显示成别名 CriticalBodyPartsBegin，见 PROGRESS §七）。
                 "bodypartname": e.get("bodyPartName") or e.get("bodyPart", ""),
+                # 伤害类型（Cut / Pierce / Blunt）：材质抗性 R 是**按伤害类型**分档的
+                # （config 里每个材质各有 Cut/Pierce/BluntResistance 三项）⇒ 判据必须能按它
+                # 分组/筛选，否则"R 变了但伤害没变"与"R 根本没进这条路径"无法区分。
+                "damagetype": e.get("damageType", ""),
                 "missile": bool(e.get("isMissile", False)),
                 "distance": float(e.get("hitDistance", 0.0)),
             }
@@ -107,6 +111,7 @@ def applied_from_battle(events):
                 "weapon": e.get("weaponClass", ""),
                 "bodypart": e.get("bodyPart", ""),
                 "bodypartname": e.get("bodyPartName") or e.get("bodyPart", ""),
+                "damagetype": e.get("damageType", ""),
                 "missile": bool(e.get("isMissile", False)),
                 "distance": 0.0,
             }
@@ -332,7 +337,8 @@ def compare_tiers(tiers, key="bodypartname", metric="applied", missile=None,
 
 
 def render_compare(specs, by="bodypart", metric="applied", top=10):
-    key = {"bodypart": "bodypartname", "troop": "troop", "none": None}.get(by, "bodypartname")
+    key = {"bodypart": "bodypartname", "troop": "troop", "damagetype": "damagetype",
+           "none": None}.get(by, "bodypartname")
     tiers = [(t, load_tier(f)) for t, f in explode_tiers(specs)]
     tiers = [(t, d) for t, d in tiers if d["files"]]
     print("=" * 100)
@@ -447,7 +453,8 @@ def analyze(path, mode, by):
         print(line)
 
     if by != "none":
-        key = {"troop": "troop", "weapon": "weapon", "bodypart": "bodypart"}[by]
+        key = {"troop": "troop", "weapon": "weapon", "bodypart": "bodypart",
+               "damagetype": "damagetype"}[by]
         print("  分组（%s）" % by)
         groups = group_by(rows, key)
         for name in sorted(groups, key=lambda k: -len(groups[k])):
@@ -467,7 +474,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="?", help="JSONL 文件或目录")
     ap.add_argument("--mode", default="auto", choices=["auto", "range", "battle"])
-    ap.add_argument("--by", default="troop", choices=["troop", "weapon", "bodypart", "none"])
+    ap.add_argument("--by", default="troop",
+                    choices=["troop", "weapon", "bodypart", "damagetype", "none"])
     ap.add_argument("--compare", nargs="+", metavar="LABEL=PATH",
                     help="跨档对比（材质/护甲对照）：LABEL=PATH，PATH 可为 jsonl / 目录 / "
                          "bl_batch 的 manifest.json；第一档为基准")

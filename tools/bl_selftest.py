@@ -465,6 +465,25 @@ def test_dummy_analyze_compare():
     check(len(bda.select_rows(rows, "bodypartname", True, False)) == 2, "不筛 blocked ⇒ 2 条（对照口径）")
     check(len(bda.select_rows(rows, "bodypartname", None, False)) == 3, "全部口径 ⇒ 3 条")
 
+    # 6b) 按伤害类型分组（第一轮 R 表实测暴露的缺口：R 是**按伤害类型**分档的，
+    #     判据"Pierce 变 / Cut 不变"必须能把二者分开看，否则无法区分
+    #     "R 没进伤害路径"与"R 进了但没效果"）
+    ev_dt = [{"t": "dummy_hit", "applied": 5.0, "damageType": "Pierce", "blocked": False,
+              "isMissile": True, "bodyPartName": "Chest"}]
+    check(bda.applied_from_range(ev_dt)[0]["damagetype"] == "Pierce",
+          "rows 带 damagetype 字段", bda.applied_from_range(ev_dt)[0].get("damagetype"))
+    rows_dt = [dict(r1[0], damagetype="Pierce", applied=10.0),
+               dict(r1[0], damagetype="Cut", applied=30.0),
+               dict(r1[0], damagetype="Pierce", applied=20.0),
+               dict(r1[0], damagetype="Cut", applied=40.0)]
+    tier_dt = ("A", {"files": ["a"], "versions": ["0.8.7"], "armor": None, "swaps": [],
+                     "swapMissing": False, "hasBlockedField": True, "rows": rows_dt})
+    t_dt = bda.compare_tiers([tier_dt], "damagetype", "applied", None, True)
+    check(t_dt["Pierce"]["A"]["n"] == 2 and abs(t_dt["Pierce"]["A"]["mean"] - 15.0) < 1e-9,
+          "按 damagetype 分组：Pierce n=2 均值=15", t_dt["Pierce"]["A"])
+    check(abs(t_dt["Cut"]["A"]["mean"] - 35.0) < 1e-9,
+          "按 damagetype 分组：Cut 均值=35", t_dt["Cut"]["A"]["mean"])
+
     # 7) manifest 展开 + 接入层端到端（默认中文控制台 GBK 下也必须 exit 0）
     tmp = tempfile.mkdtemp(prefix="bda_compare_")
     try:
