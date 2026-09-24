@@ -20,7 +20,7 @@ namespace BlBridge
     ///   2. 残兵就地死亡（`Agent.Die`），保持战场清洁
     ///   3. 递增轮次 → 通知遥测**换一个日志文件**（每轮独立、零污染）
     ///   4. 重生两队：给了 `*Squads` 的一方**按组**重生（每组按 `SquadSpec.Count`，第 i 组基点
-    ///      沿 x 平移 `i * 12m`），没给的一方沿用旧单值路径（`Mission.SpawnAgent` + `AgentBuildData`）
+    ///      沿 x 平移 `i * 12f`），没给的一方沿用旧单值路径（`Mission.SpawnAgent` + `AgentBuildData`）
     ///   5. 重申战术：给了 `*Squads` 的一方**按组**重申 movement（复用 `ScenarioProbe.ApplyOrders`），
     ///      没给的一方沿用旧 TacticCharge（对称化口径不变）
     ///
@@ -221,7 +221,7 @@ namespace BlBridge
         }
 
         /// <summary>
-        /// T6：按组重生。第 i 组的基点 = 该方基点**沿 x 平移 i*12m**（y/z 不变；brief §3.2 定死的口径）。
+        /// T6：按组重生。第 i 组的基点 = 该方基点**沿 x 平移 i*12f**（y/z 不变；brief §3.2 定死的口径）。
         /// 基点无值 ⇒ 传 null（沿用引擎默认，与旧路径一致）。组内铺开仍由 Spawn() 自身完成。
         /// 防御分支：`specs[i]` / 对应 troop 缺失时**不静默** —— 写一条 `round_spawn_group_skipped`
         /// 事件（含 round / 第几组 / 原因）后跳过该组，绝不无痕少一组（GC3；Start() 已保证正常路径不可达）。
