@@ -632,6 +632,8 @@ namespace BlBridge
         /// rawSegments：该方 DSL 按 | 切分的原始片段（与 specs 下标一致），用于逐字回显（修复轮 1 · m2）。
         /// T6：resolvedTroops 带出逐组 Resolve 的兵种对象（下标与 specs 一一对应），
         /// 供多轮编排器按组重生复用，避免重复解析。
+        /// T14：未知兵种 id **一次报全部**（收集后统一返回），避免"只报第一个"逼得扫描方反复
+        /// start/abort 二分（实测会把引擎打进异常状态）；语义不变——仍报错并中止整场（GC3）。
         /// </summary>
         private static bool ValidateGroupedSide(List<SquadSpec> specs, string[] rawSegments, string label,
             out string code, out string message, out List<BasicCharacterObject> resolvedTroops)
@@ -640,6 +642,10 @@ namespace BlBridge
             message = null;
             resolvedTroops = null;
             List<BasicCharacterObject> troops = new List<BasicCharacterObject>();
+            // T14：收集**全部** Resolve 失败的条目（1 基组号 + 逐字 segment 原文 + 兵种 id），
+            // 循环结束后一次性报出，避免"只报第一个"逼得扫描方反复 start/abort 二分（实测会把引擎
+            // 打进异常状态：mission 卡 loading/busy，abort 无效）。失败的组跳过后续 formation/冲突校验。
+            List<string> unknownEntries = new List<string>();
             bool triedLoad = false;
             Dictionary<FormationClass, string> orderByFormation =
                 new Dictionary<FormationClass, string>();
@@ -657,9 +663,9 @@ namespace BlBridge
                 }
                 if (troop == null)
                 {
-                    code = "unknown_troop";
-                    message = label + "第 " + (i + 1) + " 组兵种 id 不存在: " + RawSegment(rawSegments, i, s.Troop);
-                    return false;
+                    unknownEntries.Add("第 " + (i + 1) + " 组 '" + RawSegment(rawSegments, i, s.Troop)
+                        + "'（" + s.Troop + "）");
+                    continue;
                 }
                 troops.Add(troop);
                 FormationClass fc = troop.GetFormationClass();
@@ -683,6 +689,17 @@ namespace BlBridge
                     movementByFormation[fc] = mv;
                     rawByFormation[fc] = raw;
                 }
+            }
+            if (unknownEntries.Count > 0)
+            {
+                // 语义不变（GC3：非法即报错、绝不静默）：仍报错并中止整场，只是从"第一个"换成"全部"。
+                int n = unknownEntries.Count;
+                int shown = n > 8 ? 8 : n;
+                string joined = string.Join("、", unknownEntries.GetRange(0, shown).ToArray());
+                code = "unknown_troop";
+                message = label + "有 " + n + " 个兵种 id 不存在：" + joined
+                    + (n > 8 ? " 等 " + n + " 个" : "");
+                return false;
             }
             resolvedTroops = troops;
             return true;
