@@ -94,11 +94,15 @@ def dsl(ids):
 
 
 def ping():
-    """连通性/会话身份；游戏没在跑时给出可执行的提示，而不是让人对着超时猜。"""
-    resp = bl_mcp.send_command("ping", {}, timeout=10)
-    if not resp.get("ok"):
-        raise SystemExit("ping 失败（游戏在跑吗？BlBridge 模块加载了吗？）：%s"
-                         % str(resp.get("error"))[:200])
+    """连通性/会话身份；游戏没在跑时给出可执行的提示，而不是让人对着超时猜。
+
+    注意 `bl_mcp.send_command` 的契约：返回 **(响应 dict, 错误字符串)**，不是裸 dict。
+    """
+    resp, err = bl_mcp.send_command("ping", {}, timeout=10)
+    if err:
+        raise SystemExit("ping 失败（游戏在跑吗？BlBridge 模块加载了吗？）：%s" % err)
+    if not resp or not resp.get("ok"):
+        raise SystemExit("ping 的响应异常：%r" % (resp,))
     return resp
 
 
@@ -107,15 +111,35 @@ def wait_state(target, timeout, poll=2.0, what=""):
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
-        resp = bl_mcp.send_command("status", {}, timeout=10)
-        res = resp.get("result") or {}
-        last = res.get("state")
+        resp, err = bl_mcp.send_command("status", {}, timeout=10)
+        if err:
+            last = "命令错误：%s" % err
+        else:
+            last = ((resp or {}).get("result") or {}).get("state")
         if last == target:
             return last
         time.sleep(poll)
     raise SystemExit("%s等待 state=%s 超时（当前 %s）——若一直是 loading，"
                      "就是已知的「abort 拉不回 loading」现象，请重启游戏"
                      % (what, target, last))
+
+
+def wait_state_soft(target, timeout, poll=2.0):
+    """尽力等状态；超时返回 None（不抛）。
+
+    为什么要软等：`ended` 之后引擎**可能长时间不回 idle**（state 仍 ended、busy 仍 true），
+    而 `bl_batch.py` 的实跑口径本来就是"只等 ended 就直接跑下一场"。硬等 idle 会把一次
+    正常的扫描卡死在第一场（2026-09-25 实测：cover_01 打完停在 ended，等 120 秒仍未回）。
+    """
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        resp, err = bl_mcp.send_command("status", {}, timeout=10)
+        last = None if err else ((resp or {}).get("result") or {}).get("state")
+        if last == target:
+            return last
+        time.sleep(poll)
+    return None
 
 
 def parse_unknown_troop(msg):
@@ -171,9 +195,11 @@ def cmd_probe(args):
             continue
 
         t0 = time.time()
-        resp = bl_mcp.send_command("start", params, timeout=args.timeout)
-        err = resp.get("error") or {}
-        if resp.get("ok"):
+        resp, cmd_err = bl_mcp.send_command("start_battle", params, timeout=args.timeout)
+        if cmd_err:
+            raise SystemExit("[%s] 命令失败（游戏没响应？）：%s" % (label, cmd_err))
+        err = (resp or {}).get("error") or {}
+        if (resp or {}).get("ok"):
             # 引信没生效 ⇒ 这条会话的判定前提不成立，且已经建了 mission。报错并停止，不硬跑下去。
             bl_mcp.send_command("abort", {}, timeout=20)
             raise SystemExit("[%s] start 竟然成功（引信 %s 未生效）——已发 abort；"
@@ -183,16 +209,18 @@ def cmd_probe(args):
                              % (label, err.get("code"), str(err.get("message"))[:200]))
 
         n, groups = parse_unknown_troop(err.get("message"))
+        decoy_group = len(troops)          # 引信永远追加在最后一组
+        if decoy_group not in groups:
+            raise SystemExit("[%s] 坏 id 列表里没有引信那一组（第 %d 组）——组号错位？"
+                             % (label, decoy_group))
         chunk_bad = []
         for g in groups:
             if g < 1 or g > len(troops):
                 raise SystemExit("[%s] 组号 %d 越界（本包 %d 组）"
                                  % (label, g, len(troops)))
+            if g == decoy_group:
+                continue                   # 只跳过引信这一组；包内的同名条目照样计入
             chunk_bad.append(troops[g - 1])
-        if args.decoy not in chunk_bad:
-            raise SystemExit("[%s] 坏 id 列表里没有引信 %s（组号错位？）"
-                             % (label, args.decoy))
-        chunk_bad = [x for x in chunk_bad if x != args.decoy]
         badset = set(chunk_bad)
         chunk_good = [t for t in chunk if t not in badset]
 
@@ -246,9 +274,11 @@ def cmd_cover(args):
             continue
 
         t0 = time.time()
-        resp = bl_mcp.send_command("start", params, timeout=args.timeout)
-        if not resp.get("ok"):
-            err = resp.get("error") or {}
+        resp, cmd_err = bl_mcp.send_command("start_battle", params, timeout=args.timeout)
+        if cmd_err:
+            raise SystemExit("[%s] 命令失败（游戏没响应？）：%s" % (label, cmd_err))
+        if not (resp or {}).get("ok"):
+            err = (resp or {}).get("error") or {}
             records.append({"label": label, "ids": batch, "error": err.get("code"),
                             "message": str(err.get("message"))[:300]})
             print("  [%s] start 失败：%s（本批 %d 个 id 未判定，多半是 good 清单里混进了坏 id）"
@@ -256,7 +286,9 @@ def cmd_cover(args):
             continue
 
         wait_state("ended", args.wait_timeout, what="[%s] " % label)
-        wait_state("idle", args.idle_timeout, what="[%s] " % label)
+        if not wait_state_soft("idle", args.idle_timeout):
+            print("  [%s] 注：%.0f 秒内未回 idle —— 继续下一场"
+                  "（bl_batch 的实跑口径同样是只等 ended）" % (label, args.idle_timeout))
 
         path = battle_since(t0)
         if not path:
@@ -307,7 +339,8 @@ def main(argv):
     c.add_argument("--scene", default="battle_terrain_a")
     c.add_argument("--timeout", type=float, default=120.0, help="start 命令超时（秒）")
     c.add_argument("--wait-timeout", type=float, default=180.0, help="等 state=ended 的超时（秒）")
-    c.add_argument("--idle-timeout", type=float, default=120.0, help="等 state=idle 的超时（秒）")
+    c.add_argument("--idle-timeout", type=float, default=10.0,
+                   help="等 state=idle 的超时（秒）；实跑里 ended 之后一般立刻可下一场，超时就继续")
     c.add_argument("--out", default=DEFAULT_COVER_OUT)
     c.add_argument("--dry-run", action="store_true", help="只打印分场计划，不碰游戏")
 

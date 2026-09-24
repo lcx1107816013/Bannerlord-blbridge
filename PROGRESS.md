@@ -1203,3 +1203,86 @@ T5 的 M2 修复（把冲突校验从"比字符串"改成"比落点"）首次在
 - **T11**：移除 DSL 的 `hold`（引擎层本就等同 `stop`）—— 写 `hold` 在解析期报错并提示改用 `stop`；连带删除 `OrderNotes`/`AppendOrderNote`/`orderNotes`（唯一用户消失）；文档/测试同步为 5 词。（commit `706b88f`）
 - `dba3d01` —— **T12**：修 T9 游戏内实测暴露的 `TypeInitializationException` —— `Start()` 不再触碰 `MovementOrder`，
   改用**纯字符串** `MovementKey` 做落点比较（语义等价：5 词与 5 落点一一对应）。另 `676b23c` 记录"dll 非确定性编译"的核对口径。
+
+---
+
+## 十七、全兵种扫描：可用性判定 + 覆盖扫描（2026-09-25，T15）
+
+**要回答的两个问题**：① 3200 个候选 id 里游戏端认哪些？② 认的里面，哪些"通过校验却没真正生成出来"？
+前者是清单质量问题，**后者才是真正的兵种 bug**。
+
+**工具**：`tools/bl_troop_sweep.py`（新增，输出 UTF-8 中文）
+
+- `probe`（可用性判定）：每包 id **追加一个已知坏 id 当引信**，让每次 `start` 必然以 `unknown_troop`
+  收场 ⇒ **永不建 mission** ⇒ 绕开「成功 start 之后 abort 拉不回 loading」的引擎卡死（已复现 2 次）。
+  配合 v0.8.8 的 T14（错误消息**一次报出全部**坏 id），4 包就拿到完整清单 ——
+  不需要二分，也不需要像上一轮那样真去打 11 场战斗。
+- `cover`（覆盖扫描）：用可用 id 跑真战斗（每场 300 个 id、每方 150、每 id 1 人），等 `ended`
+  （**不 abort**），再从该场 JSONL 的 `unit` 事件取 `troop` 集合与期望集合比对。
+  判据可靠：`unit` 在 `OnAgentBuild` 对**每个** agent 写一行，不受 `state`/`ai` 采样限制。
+
+### probe 结果（3200 个 id → 4 包）
+
+| 包 | 坏 | 好 |
+|---|---|---|
+| 0..800 | 403 | 397 |
+| 800..1600 | 518 | 282 |
+| 1600..2400 | 20 | 780 |
+| 2400..3200 | 0 | 800 |
+| **合计** | **941** | **2259** |
+
+与 2026-09-24 的结论（941 / 2259）**逐包一致** —— 差别是这次拿到了**完整坏 id 清单**
+（上一轮只拿到每包前 8 条）。产物：`.sdd/2026-09-24-multitroop-tactics-plan/sweep_probe_full.json`。
+
+### cover 结果（8 场，2259 个可用 id 全量覆盖）
+
+```
+cover_01..07: 期望 300 / 实际 unit 兵种 300   缺 0、多 0
+cover_08:     期望 159 / 实际 unit 兵种 159   缺 0、多 0
+覆盖缺口合计 0 个
+```
+
+⇒ **零缺口：不存在"通过校验却没 spawn 出来"的兵种** ⇒ 本轮**没有真正的兵种 bug**。
+产物：`.sdd/.../sweep_coverage.json`。
+
+### 精确分类（修正上一轮"全是非战斗 NPC"的归纳）
+
+上一轮那句话**不准确**。用 Sage 索引的 `occupation` 字段对 941 个被拒 id 客观统计：
+
+| occupation | 个数 | 说明 |
+|---|---|---|
+| Lord | 500 | 领主/贵族（`lord_*`、`dead_lord_*`） |
+| Soldier | 146 | **战斗单位**，但挂在剧情/任务系统：`conspiracy_*`（阴谋部队）、`*_contender*`（竞技场对手）、`borrowed_troop`、`anti_imperial_conspiracy_boss` … |
+| Wanderer | 67 | 游荡者/同伴 |
+| Merchant | 55 | 商人 |
+| NotAssigned / Special / Bandit / Gangster / Mercenary | 79 | `spc_*`（特殊人名与装备模板）、帮派打手等 |
+| 平民职业 | 94 | Headman / Artisan / Preacher / RuralNotable / GangLeader / GoodsTrader / Townsfolk / Villager / None |
+
+**准确表述**：它们都不是「自定义战斗可用的兵种」，而是**剧情/任务/竞技场/领主/平民职业 NPC**。
+其中 225 个的 occupation 属战斗类，但全部挂在剧情或任务系统上
+（`conspiracy_*`、`contender_*`、`thug_*`、`storymode_*`、`tutorial_*`）。
+
+**机制**：`unknown_troop` = 游戏端 `Resolve` 返回 null ⇒ 这些 id **不在运行时对象表里**；
+而 BannerlordSage 索引是**静态读 `ModuleData/*.xml`**，于是收录了一批"写在 XML 里、但游戏运行时
+并不注册为兵种"的条目（如 `spspecialcharacters.xml` 里的特殊人物/装备模板）。
+⇒ 给 MCP 联动的建议不变：`bl_sage` / `bl_lookup_troop` 的说明要写明
+「**索引含非战斗条目，不等于可 spawn 的兵种**」。
+
+### 本轮修掉的 3 个自写工具 bug（都是"干跑绿灯、真跑才炸"）
+
+1. `bl_mcp.send_command` 的契约是 **`(响应 dict, 错误字符串)`**，第一版当裸 dict 用 ⇒ `AttributeError`。
+2. 控制通道的方法名是 **`start_battle`**（不是 CLI 子命令名 `start`）⇒ 游戏端 `unknown_method` 拒掉。
+3. 引信剔除：第一版把"等于引信 id 的条目"全剔除；而引信本身也在清单里（第 3 包第 1801 个），
+   游戏端把它当**两个坏组**分别报出 ⇒ 少算 1 个坏 id（19 vs 20）。改为**只跳过引信那一组**。
+
+### 一条口径修正
+
+`ended` 之后引擎**可能长时间不回 idle**（实测 120 秒仍未回，但 `busy` 已是 `false`），
+所以 `cover` 的等待改成「等 `ended` + 软等 idle（默认 10 秒，超时就继续）」，
+与 `bl_batch.py` 的实跑口径一致 —— 硬等 idle 会把扫描**卡死在第一场**（本次实际发生）。
+
+### 环境与产物
+
+- 部署：dll sha256 `fcca590bdc7a6472`（本会话重新构建并部署；`SubModule.xml` 同时统一为无 BOM + LF）。
+- 战斗日志：`battle_20260925_0214*.jsonl` … `battle_20260925_021822_999.jsonl`（cover 的 8 场）。
+- 窗口：8 场 × 约 30 秒（cap 20 游戏秒）。
