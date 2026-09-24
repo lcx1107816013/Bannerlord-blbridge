@@ -1138,23 +1138,60 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
 
 1. `bridge_status.json` 的 `version = 0.8.8`、`loadedSha256` = 部署 sha、`fileChangedSinceLoad = false`；
    ⚠️ **核对口径（2026-09-25 实测，重要）**：`out\BlBridge.dll` **每次重编译的 sha256 都不同**（Roslyn 命令行默认
-   非确定性：嵌入 MVID / PE 时间戳）——同一份未改动的源码，两次 `build.ps1 -Deploy` 得到 `531AAB84…` 与 `19F66AD1…`。
+   非确定性：嵌入 MVID / PE 时间戳）——同一份未改动的源码，多次 `build.ps1 -Deploy` 得到 `531AAB84…` / `19F66AD1…` / `2183A94B…`。
    ⇒ **以 `python tools/bl_cmd.py buildcheck` 的 `deployedSha256` 为准**（它给出当前部署值；游戏跑起来后再看 `loadedSha256` 是否与之一致）。
-   **T9 开始前不要再跑 `build.ps1`**（会换成一个新 sha）。本次部署值（2026-09-25 00:07:41）：
-   `19F66AD1C637BC54BED14FA0E0CC05678B7552A355F0C10B0F564DF71AE62B89`。
-   结果：（待 T9）
+   **T9 开始前不要再跑 `build.ps1`**（会换成一个新 sha）。T9 所用部署值（2026-09-25 00:13:53，T12 修复后）：
+   `2183A94B94BBCF1175F2DDFAB21E3E01F1BA0D28B9E6C143FCA7C0CB5BE3B295`。
+   **结果：✅ 通过**（2026-09-25 00:15，游戏重开后）：`buildcheck` ⇒ `code=ok`、`builtVersion=0.8.8`、
+   `deployedSha256 = loadedSha256 = 2183a94b94bbcf11`、`loadedVersion=0.8.8`、`fileChangedSinceLoad=False`。
 2. 跑一个 **2 组**的 plan（例：攻方 `imperial_legionary:10:Infantry:stop` + `khuzait_khans_guard:5:HorseArcher:charge`）
    ⇒ 日志出现 **2 条 `squad`**，`spawned` 分别 = 10 与 5；
-   结果：（待 T9）
+   **结果：✅ 通过** —— `battle_20260925_001508_814.jsonl`（2.42 MB）里共 **3 条** `squad`（双方都给了 groups ⇒ 每组一行；
+   判据本意即"每组一行"）：攻方 `group 0 imperial_legionary count=10 formation=Infantry movement=stop` + **`spawned=10`**、
+   攻方 `group 1 khuzait_khans_guard count=5 formation=HorseArcher movement=charge` + **`spawned=5`**、
+   守方 `group 0 battanian_wildling count=15 movement=charge spawned=15`。
 3. `unit` 事件的 `formation` 与 `squad` 一致（10 个 Infantry、5 个 HorseArcher）；
-   结果：（待 T9）
+   **结果：✅ 通过** —— 同一日志 `unit` 事件的 `(side, formation)` 计数：`Attacker/Infantry=10`、`Attacker/HorseArcher=5`、
+   `Defender/Infantry=15`，与三条 `squad` 逐一对应。
 4. **行为可辨**：`stop` 那组在开局不发冲锋（`state` 的前若干秒位移 < 阈值）—— 与 `charge` 组对比；
-   结果：（待 T9）
-5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件为单组 + `movement=charge`，
+   **结果：✅ 通过** —— 开局 10 mission 秒（`state` 采样自 t≈2.03 s）按兵种位移均值：
+   `Attacker/imperial_legionary`（stop）**0.00 m**（max 0.00、均速 0.00，10 个 agent 全部原地）；
+   `Attacker/khuzait_khans_guard`（charge）**86.01 m**（均速 8.55）；`Defender/battanian_wildling`（charge）21.03 m。
+5. **GC2 回归**：用**旧 plan**（`tools/plan.mirror.example.json`）跑 1 场 ⇒ `squad` 事件 **0 条**（无 groups ⇒ 不产生新事件），
    且 `end.validity.verdict = ok`、`nanCount = 0`、坏行 0。
-   结果：（待 T9）
+   ⚠️ 计划原文写"`squad` 事件为单组"；**实测 0 条** —— 比计划原文更严格，且这才是 GC2（旧 plan 不产生新事件）的正确含义。
+   **结果：✅ 通过** —— `battle_20260925_001613_812.jsonl`（单兵种 20v20，字段等价于旧 plan 的一个 config）：
+   `squad=0`、`bad lines=0`、`verdict=ok`、`nanCount=0`、`ioFailed=false`、`reason=defenderWiped`（守方全灭，正常结束）。
 
-### 6. 提交记录
+**T9 结论：五条判据全部通过（2026-09-25 00:15–00:17，游戏内实测）。**
+⚠️ 首跑即暴露一个**离线测试发现不了**的缺陷（mission 之外访问 `MovementOrder` ⇒ `TypeInitializationException`，
+且永久污染该类型），已在 T12 修复（commit `dba3d01`）并重新部署后复测通过 —— 详见下方 §6。
+
+### 6. T9 首跑暴露并修复的缺陷（T12）
+
+**现象（2026-09-25 00:15，判据 2 第一次跑）**：`bl_cmd.py start --attacker-groups …` 返回
+`handler_exception: TypeInitializationException: The type initializer for 'TaleWorlds.MountAndBlade.MovementOrder' threw an exception.`
+（`MapMovement` ← `ValidateGroupedSide` ← `Start()`）。
+
+**根因**：`MovementOrder` 是 struct，其静态字段（`MovementOrderCharge/Stop/…`）在**类型初始化**时构造实例；
+而 `Start()` 跑在 **mission 之外**（游戏停在自定义战斗界面）⇒ 访问即抛。更严重：.NET 会把静态构造失败的类型
+**永久标记为不可用** ⇒ 同一进程内后续任何 `MovementOrder` 访问都抛（**连旧路径 `ApplyCharge` 也一起坏**）。
+T5 的 M2 修复（把冲突校验从"比字符串"改成"比落点"）首次在 `Start()` 里碰它 ⇒ 埋下此缺陷。
+
+**为什么之前全绿**：编译、`tools/jsontest`、`bl_selftest.py` 在 mission 之外**不执行**引擎类型初始化 ⇒
+**离线测试在结构上不可能发现它**；只有 T9（游戏内）能暴露。
+
+**修法（commit `dba3d01`）**：新增**纯字符串** `MovementKey(string)` 承担落点比较，彻底不碰 `MovementOrder`；
+错误码 / 消息文本 / 逐字回显 / `resolvedTroops` 输出**逐字未变**。T11 移除 `hold` 后 5 个 movement 与 5 个落点
+**一一对应** ⇒ 字符串比较 ≡ 落点比较（语义零变化）。`MapMovement` 的 doc 补上"**只允许在 mission 内调用**"。
+修后全仓 `MovementOrder` 出现点逐条自查 ⇒ 无 mission 之外的执行点。
+复测：重新部署（`2183A94B…`）+ 重开游戏 ⇒ **判据 2–5 全过**。
+
+**教训（可复用）**：任何"在 mission 之外访问引擎类型"的代码都可能在**离线全绿**的情况下炸，
+且后果是**进程级永久污染**（该类型在本次运行里再不可用）。这类缺陷只能靠游戏内判据兜住 ——
+这正是计划把 T9 定为必过项的价值。
+
+### 7. 提交记录
 
 - `ab5c3a3` —— **T5**：`src/ScenarioRunner.cs` 自定义 `IMissionTroopSupplier`（`SquadTroopSupplier`）按组建队/编队/下命令。
 - `20e8d1e` —— **T6**：`src/RoundOrchestratorBehavior.cs` 多轮重生与每轮命令重申按组（`x = base.x + i*12f`）。
@@ -1163,4 +1200,6 @@ Attacker=fian_champion 40 人 —— 与 §③/§九 的口径一致才动手）
   （`out\BlBridge.dll` 与模块目录 DLL sha256 逐字一致）。
 - `b775b08` —— **计划勘误**：§T5 规格段三处作废（self-spawn / 位置分段 / 指定编队）+ movement/`hold` 落点裁决。
 - `7fc8157` —— **T10**：文档与示例 plan（`README.md` §七 事件格式 + `tools/plan.multitroop.example.json`）。
-- **T11**：移除 DSL 的 `hold`（引擎层本就等同 `stop`）—— 写 `hold` 在解析期报错并提示改用 `stop`；连带删除 `OrderNotes`/`AppendOrderNote`/`orderNotes`（唯一用户消失）；文档/测试同步为 5 词。
+- **T11**：移除 DSL 的 `hold`（引擎层本就等同 `stop`）—— 写 `hold` 在解析期报错并提示改用 `stop`；连带删除 `OrderNotes`/`AppendOrderNote`/`orderNotes`（唯一用户消失）；文档/测试同步为 5 词。（commit `706b88f`）
+- `dba3d01` —— **T12**：修 T9 游戏内实测暴露的 `TypeInitializationException` —— `Start()` 不再触碰 `MovementOrder`，
+  改用**纯字符串** `MovementKey` 做落点比较（语义等价：5 词与 5 落点一一对应）。另 `676b23c` 记录"dll 非确定性编译"的核对口径。
