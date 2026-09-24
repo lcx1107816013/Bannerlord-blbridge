@@ -10,6 +10,9 @@
   - `count`：整数 ≥ 1
   - `formation`：`FormationClass` 的引擎名，**大小写不敏感**，取值只允许：
     `Infantry | Ranged | Cavalry | HorseArcher | Skirmisher | HeavyInfantry | LightCavalry | HeavyCavalry | General | Bodyguard`
+    ⚠️ **修订（2026-09-24 23:5x，用户批准路 A）**：`IAgentOriginBase` 无 formation 成员、
+    编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定 ⇒ 该字段**不能下发**，
+    语义降级为"**解析时校验 + 日志里记录实际编队**"（GC4 的观测量不受影响）。
   - `movement`：`charge | advance | hold | fallback | stop | retreat`（小写；映射见 T4）
   - 示例：`imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5:HorseArcher:charge`
   - 缺省：省略 `formation` ⇒ 引擎默认编队；省略 `movement` ⇒ `charge`
@@ -119,7 +122,21 @@ internal sealed class SquadSpec {
 **验证**：`tools/jsontest/` 新增断言（合法/非法各若干，含大小写不敏感）；编译通过即证明枚举名正确。
 期望：jsontest 全绿 + `build.ps1`（不部署）成功。
 
-## T5 · `ScenarioRunner` 按组建队/编队/下命令
+## T5 · `ScenarioRunner` 按组建队/编队/下命令（**2026-09-24 23:5x 修订：改走自定义 troop supplier**）
+
+> ⚠️ **前提修订**：原规格假设"我们逐组 `Mission.SpawnAgent` + `AgentBuildData.Formation`"，
+> 但取证表明两队是**引擎生成**的（`ScenarioRunner.cs:438` `MissionState.OpenNew` → `:458`
+> `MissionCombatantsLogic` → **`:460` `DefaultBattleMissionAgentSpawnLogic(_pendingSuppliers, …)`**；
+> 注释 `:462-467` 说明 `InitWithSinglePhase` 才是唯一创建 spawn phase 的地方）。
+> ⇒ 改为**用户已批准的路 A**：自定义 `IMissionTroopSupplier`（每方一个），按组轮转提供兵种/数量。
+>
+> ⚠️ **能力边界（同批取证）**：`IAgentOriginBase` 的 18 个成员里**没有 formation**
+> ⇒ **无法指定编队**（编队由 `BasicCharacterObject.GetFormationClass()` 按兵种决定，那是引擎 virtual，
+> 改它会污染共享 `CharacterObject`）⇒ GC1 的 `formation` 已降级为"校验 + 记录实际编队"。
+>
+> ⚠️ **GC2 提醒**：原规格末尾"未给命令的组保持引擎默认"仍成立，但 `ApplyCharge(team)` 的既有行为
+> **必须原样保留**给"没有 groups"的旧路径。
+
 
 **文件**：`src/ScenarioRunner.cs`
 
