@@ -708,3 +708,27 @@ python tools/bl_dummy_analyze.py --compare swap=runs_swap.json --by bodypart   #
 - v0.8.7 的进程内 DLL 一致（`loadedSha256` 应 = `3eb3b767…`）
 - 第一轮 baseline / 改后各 3 场（中间必须重启游戏）；第二轮换装 2 档 × 3 场
 - 仍**未做**：③ 的换边双跑（立项遗留）；战役层（`meta.mission=game` 未实测）
+
+### 追加修复（同源第 4 次）：MCP 工具描述在宿主里全是问号
+
+**用户报**：Reasonix 的 MCP 页面上 blbridge 的 15 个工具描述全是 "?"。
+
+**根因**（与 §十三 同源，但这次是**用户可见**的）：MCP over stdio 要求 UTF-8，
+而 `bl_mcp.py` 没有钉编码 ⇒ Python 按 locale（中文 Windows = GBK）写 stdout、
+宿主按 UTF-8 解码 ⇒ `tools/list` 的 7680 字节里 **1489 个 U+FFFD**；
+把同一批字节按 GBK 解码则完全正常（探针实测，红绿两态都有数据）。
+
+**修法**：
+- 新增 `_force_utf8_stdio()`：`stdin/stdout/stderr` 一律 `reconfigure(encoding="utf-8")`。
+  **只在 `main()` 入口调用，不放模块级** —— `bl_selftest.py` 会 `import bl_mcp`，
+  模块级改 stdio 会连带污染调用方。
+- `bl_selftest` 的 MCP 段**去掉**原先的 `PYTHONIOENCODING=utf-8` 注入（改成"故意不设"），
+  并新增两条断言（响应不许出现 `U+FFFD` / 必须含可读中文）⇒ 在**继承 GBK locale** 的条件下
+  也能抓住这个回归（原先那层环境变量注入恰好会掩盖它）。
+
+**证据**：修复前 1489 个 U+FFFD → 修复后 **0**；全量自测 `EXIT=0`。
+⚠️ **用户侧要"重新连接"该 MCP（或重启 Reasonix）才会生效。**
+
+**教训升级**：本项目"父进程读子进程输出"的编码坑已出现 4 次（§十三 的 MCP 段、
+§十四 的测试、以及这次的**真实宿主**）。规则固定为：**凡是跨进程边界传文本，
+两端编码都显式钉成 UTF-8，绝不依赖 locale 与调用者环境。**
