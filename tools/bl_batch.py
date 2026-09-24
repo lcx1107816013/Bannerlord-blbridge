@@ -59,6 +59,37 @@ DUMMY_PLAN_KEYS = ("dummySide", "freezeDummies", "unlimitedAmmo", "dummyArmor", 
 ROUND_PLAN_KEYS = ("rounds", "roundEndAlive", "roundSwap",
                    "roundSpawnAttacker", "roundSpawnDefender")
 
+# ── 多兵种 / 战术组（v0.8.8）：plan 顶层默认 + 单配置覆盖 ─────────────
+# 值可以是 DSL 字符串，也可以是组列表（每项 dict：troop/count/formation/movement）——
+# 列表会先转成 DSL，保证**只有一条解析路径**（bl_common.parse_squad_groups）。
+SQUAD_PLAN_KEYS = ("attackerGroups", "defenderGroups")
+_SQUAD_FIELDS = ("troop", "count", "formation", "movement")
+
+
+def squads_to_dsl(groups):
+    """组列表 → DSL 字符串（缺省字段省略）；已是字符串则原样返回（交给 parse 校验）。
+
+    非法一律 ValueError（GC3）。注意 movement 是第 4 字段、不能跳过 formation：
+    给了 movement 却没给 formation 会拼出 `a:10:charge`，那是会被当成 formation 的。
+    """
+    if isinstance(groups, str):
+        return groups
+    if not isinstance(groups, list):
+        raise ValueError("组必须是 DSL 字符串或组列表，收到 %s" % type(groups).__name__)
+    parts = []
+    for i, g in enumerate(groups, 1):
+        if not isinstance(g, dict):
+            raise ValueError("第 %d 组不是对象：%r" % (i, g))
+        unknown = [k for k in g if k not in _SQUAD_FIELDS]
+        if unknown:
+            raise ValueError("第 %d 组含未知字段 %s（可用：%s）"
+                             % (i, unknown, ", ".join(_SQUAD_FIELDS)))
+        if g.get("movement") and not g.get("formation"):
+            raise ValueError("第 %d 组给了 movement 却没给 formation"
+                             "（DSL 里 movement 是第 4 字段，不能跳过第 3 个）" % i)
+        parts.append(":".join(str(g[k]) for k in _SQUAD_FIELDS if g.get(k) is not None))
+    return "|".join(parts)
+
 
 def resolve_dummy_params(plan, cfg, keys=DUMMY_PLAN_KEYS):
     """plan 顶层默认 + 单配置覆盖 ⇒ 只保留真正给了值的键。"""
@@ -110,6 +141,18 @@ def build_start_args(plan, cfg, scene, orders, player_side, cap):
     if body_item:
         # 物品 id 不做本地校验：不认识的 id 由游戏端报 item_not_found 并写进 dummy_swap
         out += ["--dummy-body-item", str(body_item)]
+    # ── 多兵种/战术组（v0.8.8）：组列表或 DSL ⇒ CLI 字符串 ─────────────
+    # ⚠️ 必须放在下面那个 `if n is None: return out` **之前** —— 否则"没给 rounds"时会整段被跳过
+    #    （这是本任务第一版差点踩到的坑：早退分支会吃掉后面的参数）。
+    squads = resolve_dummy_params(plan, cfg, SQUAD_PLAN_KEYS)
+    for key, flag in (("attackerGroups", "--attacker-groups"),
+                      ("defenderGroups", "--defender-groups")):
+        val = squads.get(key)
+        if val is None:
+            continue
+        dsl = squads_to_dsl(val)
+        bl_common.parse_squad_groups(dsl)   # GC3：非法在这里就报错，不透传给游戏端
+        out += [flag, dsl]
     # ── 多轮参数（③ 换边双跑）：同样"非法即报错、绝不静默丢弃" ────────
     rounds = resolve_dummy_params(plan, cfg, ROUND_PLAN_KEYS)
     n = rounds.get("rounds")

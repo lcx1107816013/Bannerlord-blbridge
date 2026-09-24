@@ -416,6 +416,42 @@ def test_bl_batch_plan_args():
             check(True, "非法多轮参数被拒: %r" % (bad,))
 
 
+def test_squad_plan_args():
+    """plan 的多兵种/战术组（v0.8.8）：组列表与 DSL 两条入口、非法一律报错、旧路径零影响。"""
+    import bl_batch
+    scene, orders, ps, cap = "battle_terrain_a", "charge", "attacker", 30
+    base = {"attacker": "a", "defender": "b"}
+    A = bl_batch.build_start_args({}, dict(base, attackerGroups=[
+        {"troop": "imperial_legionary", "count": 10, "formation": "Infantry", "movement": "hold"},
+        {"troop": "khuzait_khans_guard", "count": 5},
+    ]), scene, orders, ps, cap)
+    check("--attacker-groups" in A, "组列表 ⇒ CLI --attacker-groups", A[-2:])
+    dsl = A[A.index("--attacker-groups") + 1]
+    check(dsl == "imperial_legionary:10:Infantry:hold|khuzait_khans_guard:5",
+          "组列表转 DSL（缺省字段省略）", dsl)
+    check("--defender-groups" not in A, "只给攻方组时不产生守方参数")
+    B = bl_batch.build_start_args({}, dict(base, defenderGroups="b:2:Ranged"),
+                                  scene, orders, ps, cap)
+    check(B[B.index("--defender-groups") + 1] == "b:2:Ranged", "DSL 字符串原样透传", B[-2:])
+    # GC2：完全没有组字段 ⇒ 不产生新参数（"旧路径逐字节不变"由既有断言守）
+    C = bl_batch.build_start_args({}, base, scene, orders, ps, cap)
+    check("--attacker-groups" not in C and "--defender-groups" not in C,
+          "GC2：旧字段路径不产生新参数", C)
+    # 关键回归：**没给 rounds** 时组参数也必须出现（build_start_args 有一个 early-return 分支）
+    D = bl_batch.build_start_args({}, dict(base, attackerGroups="a:1"), scene, orders, ps, cap)
+    check("--attacker-groups" in D, "无 rounds 时组参数不被早退分支吃掉", D[-2:])
+    for bad in ([{"troop": "a"}],
+                [{"troop": "a", "count": 1, "movement": "hold"}],
+                [{"troop": "a", "count": 1, "bogus": 2}],
+                "a:0",
+                "a:1:Infantry:jump"):
+        try:
+            bl_batch.build_start_args({}, dict(base, attackerGroups=bad), scene, orders, ps, cap)
+            check(False, "非法组必须报错: %r" % (bad,))
+        except ValueError:
+            check(True, "非法组被拒: %r" % (bad,))
+
+
 def test_bl_cmd_dummy_armor_strict():
     """bl_cmd.py 的 `--dummy-armor` 必须在**发命令之前**拒掉非法输入。
 
@@ -941,6 +977,7 @@ def main():
     test_parse_dummy_armor()
     test_parse_squad_groups()
     test_bl_batch_plan_args()
+    test_squad_plan_args()
     test_bl_cmd_dummy_armor_strict()
     test_death_compare_split()
 
