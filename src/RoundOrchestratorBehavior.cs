@@ -69,6 +69,16 @@ namespace BlBridge
             get { return Rounds > 1; }
         }
 
+        /// <summary>
+        /// **轮内时钟**（秒）。每轮在 `Advance` 里换轮次时归零。
+        ///
+        /// 为什么必须是轮内而不是整场：`RoundLog` 写出的每条事件都带 `round` 字段，
+        /// 语义上属于**该轮**；若 time 用整场累计值，则同一份日志（每轮一个文件）里
+        /// `round_start` / `round_all_done` 会落在该文件遥测主时钟区间之外。
+        /// 实测（battle_20260924_220146_854.jsonl）：遥测主时钟 0.01→155.70，
+        /// 而 round_all_done 落在 300.45 —— 下游按 time 切窗口会静默算错。
+        /// 这与 `TelemetryBehavior.BeginNewRound` 里的 `_elapsed = 0f` 保持同一语义。
+        /// </summary>
         private float _elapsed;
         private float _sinceCheck;
         private int _round = 1;
@@ -160,6 +170,11 @@ namespace BlBridge
 
             // 2) 换轮次：通知遥测**换一个日志文件**（每轮独立）
             _round++;
+            // 轮内时钟归零：必须与下面 tb.BeginNewRound 同步（遥测侧在同一调用里
+            // 把自己那份 _elapsed 归零）。两处共用一个原点，日志才对得上。
+            // 放在 _round++ 之后、RoundLog("round_start") 之前 —— 让 round_start 的
+            // time 从 0 起算，与该轮遥测的 time 同原点。
+            _elapsed = 0f;
             TelemetryBehavior tb = null;
             try
             {

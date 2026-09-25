@@ -44,6 +44,18 @@ python tools\bl_metrics_selftest.py                  # 指标模块自测
 powershell -ExecutionPolicy Bypass -File tools\jsontest\build_and_run.ps1   # C# 离线单测（Jmini/RequestGuard/SquadSpec…）
 ```
 
+**多轮实验（`--rounds > 1`）跑完之后，另跑一次时钟同源校验**：
+
+```powershell
+python tools\bl_check_clock_reset.py --since <部署时刻 ISO>   # 只看新产物
+python tools\bl_check_clock_reset.py                          # 全量：历史日志的已知失败样本必须仍被报出
+```
+
+这条不是可选的：`round_*` 事件的 time 曾经用过整场累计值而当轮内值用
+（v0.8.5–v0.8.8，详见 PROGRESS §十一 判据 6 与 §十二 ④），**症状是静默错**——
+没有异常、没有报错，只是下游按 time 切窗口时算错。所以不变量必须可执行。
+注意两次都要跑：只看新产物的话，一个永远返回 PASS 的脚本也能骗过你。
+
 另外两条与编码相关的纪律（踩过坑）：
 
 - PowerShell 5.1 读**无 BOM 的 UTF-8 `.ps1`** 会按 ANSI 解 ⇒ `build.ps1` 刻意只用 ASCII；

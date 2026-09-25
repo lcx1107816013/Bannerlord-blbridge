@@ -52,6 +52,7 @@ BlBridge/
   tools/bl_metrics.py             0.7.9 遥测指标分析器（8 个纯函数 seam：盾 HP 曲线 / 破盾箭数 / 挨箭分布 / 移速自洽与倍率 / 装弹时长 / AI 参数分组 / 阵亡挨箭画像）
   tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
+  tools/bl_check_clock_reset.py   多轮日志「时钟同源」校验（PROGRESS §十一 判据 6 的可执行版本）
   tools/plan.example.json         跑批计划示例（换边双跑）
   tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
   tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲；两件甲护甲数值完全相同，只差材质）
@@ -295,6 +296,20 @@ manifest_missing         旧版部署，没有清单
 
 ## 七、JSONL 事件格式（schema 1）
 
+**公共字段**：每条事件都带 `t`（事件类型）与 `time`（秒）。
+
+> ⚠️ **`time` 的时钟原点 = 该文件所属那一轮的起点，不是整场起点。**
+> 多轮模式下每轮是**独立文件**（`TelemetryBehavior.BeginNewRound` 换文件并把自身 `_elapsed` 归零），
+> `RoundOrchestratorBehavior` 的轮内时钟在同一次换轮里一并归零。
+> 因此**同一文件内所有事件的 `time` 共享同一原点**，可直接比较、可按时序切窗口。
+> 需要整场耗时请跨文件求和或用 `meta.startedUtc`。
+>
+> **v0.8.9 修正**：v0.8.5–v0.8.8 期间 `round_start` / `round_cleanup` / `round_all_done`
+> 的 `time` 误用了**整场累计**值（而同文件遥测用轮内值），导致同一文件內出现两条不衔接的时间轴。
+> 实测样本 `battle_20260924_220146_854.jsonl`：遥测主时钟 0.01→155.70，
+> 而 `round_all_done` 落在 300.45 —— 超出主时钟区间 144.75 秒。
+> **分析旧日志时须注意**：v0.8.8 及更早的多轮日志里，`round_*` 三条事件的 `time` 不可与同文件其它事件直接比较。
+
 | t | 字段 |
 |---|---|
 | `meta` | schema / mod / version / startedUtc / file；**v0.8.3 起**另带 `mission`（`bridge`=BlBridge 自建靶场 / `game`=其它，含玩家在战役沙盒里的实战）；**v0.8.4 起**另带 `randomSeed`（-1 = 未指定）；**v0.8.5 起**另带 `round`（多轮连续实验的轮次） |
@@ -310,7 +325,7 @@ manifest_missing         旧版部署，没有清单
 | `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
 | `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName`；**v0.8.2 起** `dummy_meta` 另带 `bodyItem`（请求替换的身甲物品 id） |
 | `dummy_swap` | **v0.8.2**：靶子身甲被替换时的一条记录 —— item, **material**（实际生效的材质，可观测落点）, armorBody, agents；找不到物品时 `agents=0` 且带 `error` |
-| `round_start` / `round_cleanup` / `round_all_done` | **v0.8.5** 多轮连续实验：round / rounds / cleanedUp（清场人数）；`round_cleanup` 用 `cleanedUp=-1` 标出分界。<br>⚠️ **`round_cleanup` 与下一条 `round_start` 之间的阵亡是"补刀死"（不是自然战死），分析时须排除**——与「死因偏差」同一类坑 |
+| `round_start` / `round_cleanup` / `round_all_done` | **v0.8.5** 多轮连续实验：round / rounds / cleanedUp（清场人数）；`round_cleanup` 用 `cleanedUp=-1` 标出分界。`time` 取**轮内**时钟（见上方公共字段说明）。<br>⚠️ **`round_cleanup` 与下一条 `round_start` 之间的阵亡是"补刀死"（不是自然战死），分析时须排除**——与「死因偏差」同一类坑 |
 
 > **为什么有 `bodyPartName` / `weaponSlotName`（v0.8.1）**：引擎的两个枚举带**同值别名**，
 > `ToString()` 返回别名而不是直观名 —— `BoneBodyPartType` 里 `Head = 0` 与 `CriticalBodyPartsBegin = 0` 同值
@@ -384,6 +399,7 @@ manifest_missing         旧版部署，没有清单
 | v0.2 | — | 新增 AI 推演与命令泵 | 见上 |
 | v0.3.0 | 战斗"加速"不可用 | ~~原版无加速键~~（**此判断已被外部审计推翻，见 §六 加速通道的修正记录**）。修正后的结论：原版只有**计分板 UI 入口**（`FastForwardButton` + `ScoreboardHotKeyCategory.ToggleFastForward`，默认 **F**），需要可见计分板 + 玩家操作，无程序化触发；第三方 RTSCamera 亦提供快进，但其 `Fastforward` 键位注册为空列表（`RTSCameraGameKeyCategory.CreateCategory`，反编译见 `..\tools\rts_src\RTSCamera.decompiled.cs:15224`），用户配置 `RTSCameraGameKeyConfig.xml` 里同样为空 → **该键当前无绑定**（"曾经绑过"未验证） | 自建加速通道：`Mission.IsFastForward` + 每帧重申（无键、无 UI、可编程）；新增 `bl_fast_forward` 工具与 `bl_cmd.py fastforward/speed` |
 | v0.4.0 | 幽灵请求 / 路径穿越 / 数据静默覆盖 / 部署静默失败 | 读 Coop 源码时照出我们自己 6 个缺陷（详见 `..\Coop源码对照_可复用清单.md` §1） | 新增 `RequestGuard`（过期作废 + id 白名单 + 大小上限）；`Jmini` 键查找改词法扫描；遥测文件名毫秒级 + `CreateNew`；浮点 round-trip + NaN 计数；超时三值归因 + 进程死亡早退；`build.ps1` 查进程 + 备份 + SHA256；新增 44 项离线单测 |
+| v0.8.9 | **多轮日志内时钟不同源**：同一 jsonl 里遥测事件用轮内时钟，而 `round_start`/`round_cleanup`/`round_all_done` 用整场累计值 → 两条不衔接的时间轴（实测样本：遥测主时钟 0.01→155.70，`round_all_done`=300.45，超出 144.75 秒）。**静默失真**：不抛异常、不丢数据，仅让按 `time` 切窗口的下游分析算错 | `RoundLog` 写出的每条事件都带 `round`（语义属某轮），但其 `time` 复用了 `_elapsed`（整场累计）。而每轮是独立文件，`TelemetryBehavior.BeginNewRound` 已把遥测侧 `_elapsed` 归零 —— 两侧原点不一致 | `Advance` 里 `_round++` 之后、`RoundLog("round_start")` 之前补 `_elapsed = 0f;`，与 `tb.BeginNewRound` 同步（共用同一原点）。`_elapsed` 全部 4 处用法均只服务遥测 `time`，故直接改语义、不新增字段（15 行插入、0 行删除）。README §七 补「公共字段」说明，§十一 判据追加第 6 条 |
 
 ---
 

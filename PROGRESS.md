@@ -530,6 +530,10 @@ ARMS `191459_538` / `191534_790` / `191610_398`
 3. 末轮结束有 `round_all_done`，mission 正常结束（不卡死）；
 4. `--round-swap` ⇒ 第 2 轮攻守兵种与第 1 轮**对调**；
 5. **补刀死的样本**落在 `round_cleanup` 之后 —— 分析必须排除（与「死因偏差」同类）
+6. **【v0.8.9 追加】时钟同源**：每份 jsonl 内所有事件的 `time` 共享同一原点（该轮起点）。
+   `round_start.time ≈ 0`；`round_all_done.time` 应落在同文件遥测主时钟区间内（不超出）。
+   ⚠️ v0.8.5–v0.8.8 违反本条（`round_*` 用了整场累计值，实测 round_all_done=300.45 vs 主时钟上限 155.70）——
+   **分析这段版本的旧日志时，`round_*` 三条事件的 `time` 不可与同文件其它事件直接比较。**
 
 ## 十二、首批实测结果（2026-09-24 20:20–20:27，10 场）
 
@@ -568,6 +572,26 @@ B: time=2.0027  px=586.6436  py=762.2758  vy=1.9847
 `--rounds 3 --round-swap --random-seed 777` 产出 **3 个独立文件**，各带 `meta.round` = 1/2/3；
 交界处 `round_cleanup`(cleanedUp=2) + `round_start`(cleanedUp=2)；末轮 `round_all_done`；
 **第 2 轮出现 `side:"Attacker", troop:"imperial_legionary"`** ⇒ 攻守互换生效 ✓
+
+### ④ 多轮日志「时钟不同源」修复（v0.8.9，2026-09-25 外部评审发现）
+
+**发现来源**：WorkBuddy 侧的静态分析链路（自研 Roslyn 规则 `BLB001`）在 v0.8.8 代码库上命中，
+经源码复核 + 106 份真实日志取证确认。
+
+**缺陷**：`RoundLog` 写出的事件都带 `round`（语义属某轮），但 `time` 用的是 `_elapsed`（**整场累计**）。
+每轮是独立文件、遥测侧 `TelemetryBehavior.BeginNewRound` 已归零自己那份 `_elapsed` ⇒ **两侧原点不一致**。
+
+**实测取证**（`battle_20260924_220146_854.jsonl`，4435 事件，`meta.round=2`）：
+遥测主时钟覆盖 **0.01 → 155.70**，而 `round_all_done` 落在 **300.45** —— 超出主时钟区间 **144.75 秒**。
+**静默失真**：不抛异常、不丢数据，只让按 `time` 切窗口的下游分析算错。
+
+**修法**：`Advance` 里 `_round++` 之后、`RoundLog("round_start")` 之前补 `_elapsed = 0f;`，
+与 `tb.BeginNewRound` 同步。`_elapsed` 全部 4 处用法（声明 / `+= dt` / 两处遥测写入）
+均只服务遥测 `time`，故**直接改语义、不新增字段**（15 行插入、0 行删除）。
+
+**验证**：影子工程编译 0 错误；`BLB001` 自检命中数 **1 → 0**；
+`tools/check_repo_encoding.py` 64 文件全合规；`bl_selftest.py` / `bl_metrics_selftest.py` 全部通过 EXIT=0。
+**未做真机回归**（见 §十一 判据 6 待验）。
 
 ### 顺带修掉的两个真 bug（v0.8.6）
 
