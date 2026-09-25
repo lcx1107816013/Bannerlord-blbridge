@@ -1692,6 +1692,13 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 > `WatchdogLoadingSeconds = 120f`（正式版、非实验版）。⇒ 真机证据对应当前交付物的**行为**，
 > 但"验证过的二进制"与"最终部署的二进制"不是同一份（差一段注释）—— 按 §四 的纪律如实标注。
 
+> **上述 sha 差异已闭环（13:02–13:04，同一组确认在最终产物上重跑）**：
+> `buildcheck` 四段一致（`loadedSha256=b03e353dcf9bc0d9` = 部署 = 构建，`fileChangedSinceLoad=false`）；
+> 场景样本对 `battle_terrain_a` 放行（6v6 打完）+ `bridge` ⇒ `unknown_scene` 且进程不崩；
+> `--rounds 3 --round-swap --round-end-alive 3` 产出 3 份文件，校验器新产物 **3 份 PASS**、历史 **11 份仍 FAIL**。
+> ⇒ **交付产物 `B03E353D…` 自身也已在真机上验证过**，不是只验了前一份二进制。
+> （本轮 `round_cleanup` 超出锚上界 0.26 / 1.95 / 0.90 s —— 1.95 s 与设计 `OVER_TOL` 时按实测估的上限一致。）
+
 > 部署过程中的一个环境细节：`Bannerlord.BLSE.Launcher` **会预加载** `Modules/*/bin/.../*.dll`
 > 并跑 `OnSubModuleLoaded`（所以它自己就写了 `bridge_status.json` 的 `pid/version`），
 > 因此**它开着就无法覆盖 dll**（`build.ps1 -Deploy` 会报 "The deployed DLL is locked"）。
