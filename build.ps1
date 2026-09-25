@@ -300,6 +300,35 @@ if ($Deploy) {
         Write-Host ("      deployed {0}/ ({1} file(s))" -f $sub, $n)
     }
 
+    # ---- MCP sub-package (unit B, v0.8.12 dual package) --------------------
+    # Shipped inside the mod on purpose: once the AI has installed the mod it can read
+    # mcp\README.md + manifest.json and wire the mod's control channel into MCP tools,
+    # so there is no second package to distribute.
+    # tools\*.py is the single source of truth; this step only copies. ALL of tools\*.py is
+    # copied (stdlib-only, and a missing module would only blow up when some rarely used
+    # branch imports it -- the "green on a dry run, explodes on the real run" class of bug).
+    # NOTE: this script stays ASCII-only on purpose (PS 5.1 reads a BOM-less .ps1 as ANSI).
+    $mcpSrc = Join-Path $moduleSrc 'mcp'
+    $mcpTarget = Join-Path $target 'mcp'
+    if (-not (Test-Path $mcpTarget)) { New-Item -ItemType Directory -Path $mcpTarget -Force | Out-Null }
+    # manifest.json version is single-sourced from BridgeConfig.Version (same rule as
+    # SubModule.xml): rewrite the repo copy in place, then copy. Hand-maintained versions
+    # drift ("manifest says 0.8.9, DLL says 0.8.12"), which is exactly what we forbid.
+    $manifestSrc = Join-Path $mcpSrc 'manifest.json'
+    if (Test-Path $manifestSrc) {
+        $mj = Get-Content -LiteralPath $manifestSrc -Raw
+        $mjNew = [regex]::Replace($mj, '("version"\s*:\s*")[^"]*(")', ('${1}' + $version + '${2}'))
+        if ($mjNew -ne $mj) {
+            [System.IO.File]::WriteAllText($manifestSrc, $mjNew, $utf8NoBom)
+            Write-Host ("      module/mcp/manifest.json version -> {0}" -f $version)
+        }
+    }
+    Copy-Item -Path (Join-Path $mcpSrc '*') -Destination $mcpTarget -Recurse -Force
+    Copy-Item -Path (Join-Path $root 'tools\*.py') -Destination $mcpTarget -Force
+    $mcpFiles = @(Get-ChildItem $mcpTarget -Recurse -File)
+    Write-Host ("      deployed mcp/ ({0} file(s), {1} KB)" -f $mcpFiles.Count,
+        [math]::Round((($mcpFiles | Measure-Object -Property Length -Sum).Sum) / 1KB, 1))
+
     # the user may have launched the game while we were copying -- check once more (by lock, not name)
     $dllBusy2 = $false
     try {

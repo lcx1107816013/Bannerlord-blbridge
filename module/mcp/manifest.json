@@ -1,0 +1,44 @@
+{
+  "manifest_version": "0.3",
+  "name": "blbridge",
+  "display_name": "BlBridge - 妤犳垹鐖? 閹存ɑ鏋熼柆銉︾ゴ娑撳孩甯瑰鏃€藟",
+  "version": "0.8.14",
+  "description": "Mount & Blade II: Bannerlord 閻ㄥ嫭婀伴崷?MCP 閺堝秴濮熼崳顭掔窗鐠囪褰囧〒鍛婂灆閸愬懏鍨弬妤呬淮濞村鈧礁鍨庨弸鎰灛閺傛鏆熼幑顔衡偓浣烘暠 AI 瀵偓娑撯偓閸?AI 鐎?AI 閹存ɑ鏋熼敍灞借嫙閸炪倛鎹?妞瑰崬濮╁〒鍛婂灆閸愬懐鏅棃顫偓?,
+  "long_description": "BlBridge 閻?*娑撱倓閲滈崡鏇炲帗閵嗕椒绔存稉顏勫瘶**缂佸嫭鍨氶敍姝昻\n- **閸楁洖鍘?A閿涘潰od 閸栧拑绱?*閿涙瓪Modules/BlBridge/`閿涘瞼鏁卞〒鍛婂灆娑撳骸鎯庨崝銊ユ珤鐠囪褰囬妴鍌滃负鐎瑰墎鏁?*濞撳憡鍨欓崘鍛存桨閺?*閿涘牅瀵岄懣婊冨礋 -> BlBridge 閹存ê婧€闂堛垺婢橀敍澶涚幢AI 閻?*閹貉冨煑闁岸浜?*閿涘牊鏋冩禒?IPC閿涘畭commands/pending` 閳?`commands/done`閿涘鈧倷琚遍懓鍛拌泲**閸氬奔绔撮弶鈥虫倵缁?*閿涙岸娼伴弶澶哥瑐閻ㄥ嫨鈧苯绱戞慨瀣灛閺傛ぜ鈧秳绗?MCP 閻?`bl_start_battle` 閺勵垰鎮撴稉鈧稉顏囩殶閻劊鈧繐n- **閸楁洖鍘?B閿涘湣CP 閸栧拑绱濋張顒傛窗瑜版洩绱?*閿涙碍濡告稉鈧稉?MCP 閺堝秴濮熼崳銊╂ mod 娑撯偓鐠у嘲鍨庨崣鎴礉鐠?AI 鐠囪鍩岄張顒佹瀮娴犺泛鎮楅崡鍐插讲閸旂姾娴囩€瑰喛绱濇禒搴も偓?*閺冦垼鍏橀崓蹇曞负鐎规湹绔撮弽椋庢暏閻ｅ矂娼伴妴浣风瘍閼崇晫娲块幒銉ㄧ箾 mod 閻ㄥ嫭甯堕崚鍫曗偓姘朵壕**閵嗕繐n\n闁矮淇婄€瑰苯鍙忛崷銊︽拱閸﹀府绱伴弮鐘电秹缂佹嚎鈧焦妫?HTTP 缁旑垰褰涢敍鍫ヤ缉瀵偓 URL ACL 閹绘劖娼堥敍澶涚礉瀵ゆ儼绻滄稉濠囨 = 閹貉冨煑闁岸浜炬潪顔款嚄闂傛挳娈?250 ms閵嗕繐n\n**閸忓牆鍠呴弶鈥叉**閿涙瓍ython 3.8+閿涘牆褰ч悽銊︾垼閸戝棗绨遍敍灞炬￥闂団偓 pip 鐎瑰顥婃禒璁崇秿閸栧拑绱氶妴浣圭埗閹村繑顒滈崷銊ㄧ箥鐞涘矉绱欓幒褍鍩楃猾璇蹭紣閸忕兘娓剁憰渚婄礆閵?,
+  "author": {
+    "name": "LCGX"
+  },
+  "keywords": ["bannerlord", "mount-and-blade", "game", "telemetry", "mod", "windows"],
+  "server": {
+    "type": "python",
+    "entry_point": "bl_mcp.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/bl_mcp.py"],
+      "env": {
+        "BANNERLORD_DIR": "${user_config.game_dir}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": { "python": ">=3.8" }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "game_dir": {
+      "type": "directory",
+      "title": "妤犳垹鐖? 濞撳憡鍨欓弽鍦窗瑜?,
+      "description": "閸?Modules/ 閻ㄥ嫮娲拌ぐ鏇礄閻劋绨拠璇插晸 Warbandlord 閻?config.xml閿涘鈧倿绮拋銈呪偓闂磋礋閺?MCP 閸栧懍绗傚┃顖欑瑏缁狙嶇礉閸?<濞撳憡鍨欓弽?/Modules/BlBridge/mcp -> <濞撳憡鍨欓弽?閵?,
+      "required": false,
+      "default": "${__dirname}/../../.."
+    }
+  },
+  "_meta": {
+    "blbridge": {
+      "controlChannel": "file-ipc",
+      "uiEntryId": "BlBridgeBattleSetup",
+      "note": "鐠囥儳娲拌ぐ鏇熸Ц BlBridge mod 閸栧懐娈戞稉鈧柈銊ュ瀻閿?濞撳憡鍨欓弽?/Modules/BlBridge/mcp閿涘鈧€€ools/ 娑撳骸鐣犻弰顖氭倱娑撯偓娴犺姤绨惍渚婄礉閻?build.ps1 -Deploy 閸氬本顒為妴?
+    }
+  }
+}

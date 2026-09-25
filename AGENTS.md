@@ -33,6 +33,42 @@
 - **`GUI/Prefabs/**/*.xml` 是 XML**：注释里**不得出现 `--`**（`<!-- ... -- ... -->` 会让解析器报错），
   别拿 `--` 当破折号，用逗号或冒号代替。
 
+### 控制通道参数命名硬规则（2026-09-25 增，v0.8.12 真机踩到）
+
+- **请求参数名不得与信封键同名**：`src/Jmini.cs` 是**扁平**读取器（按"文本里第一个 `"key"`"取值），
+  而请求信封是 `{"protocolVersion":…,"id":…,"method":…,"parameters":{…},"issuedUtc":…}`
+  ⇒ 参数叫 `id` / `method` / `parameters` / `protocolVersion` / `issuedUtc` 时，**读到的是信封的值**。
+  实例：`open_ui` 原本用 `id` 传入口名，真机上恒被解析成请求 id（`unknown_ui: 没有这个入口 id: 85a0d3d3fba54d4e`），
+  已改名为 **`uiId`**。
+- **离线自测抓不到这一类缺陷**：`tools/bl_selftest.py` 的假游戏端用真 JSON 解析（认嵌套），
+  天然没有这个碰撞。⇒ 新增控制通道参数**必须**在真机上过一遍（或至少确认参数名不在信封键集合里）。
+- 对照纪律仍然适用：新增/改名参数时，要能指出"哪种输入会红"（例：`uiId=NoSuchThing` 必须报 `unknown_ui`）。
+
+### InitialStateOption 硬规则（2026-09-25 增，v0.8.12 真机踩到）
+
+- **`Module.ExecuteInitialStateOptionWithId(id)` 只在主菜单可执行。** 它的 action 基本都是
+  `MBGameManager.StartNewGame(...)`，而后者做的是 `CleanAndPushState(GameLoadingState)` + 重跑一遍数据加载。
+  **在已经加载了 Game 的状态下执行它，状态机会卡在 `GameLoadingState` 不再推进**
+  （真机：从 `CustomBattleState` 调 `open_ui`，90 s+ 仍是 `GameLoadingState`、日志无异常、进程仍响应 ⇒ 只能重启游戏）。
+  ⇒ `UiEntry.HandleOpenUi` 有主菜单闸门（`ActiveGameStateName() != ""` → `wrong_state_for_ui`）。
+  上界判据：主菜单与从面板 `PopState` 回主菜单后，`Game.Current.GameStateManager.ActiveState` 都取不到（名字为空串）。
+- **进得去就要出得来**：给 agent 开了"能进官方 `CustomBattleState`"的门，就必须有对应出口
+  （`close_ui` 的 `state` 白名单含它）；否则它既出不来、又不能在那里再 `open_ui`（被上一条闸门挡住）。
+
+### 双分包硬规则（2026-09-25 增，v0.8.12）
+
+- **一个 mod 包 = 两个单元**：`Modules\BlBridge\`（游戏与启动器读：DLL / `GUI\` / `ModuleData\`）
+  + `Modules\BlBridge\mcp\`（AI 读：MCP 服务器 + `manifest.json` + `README.md`）。玩家用界面，AI 用控制通道，**共用同一条后端**。
+- `Modules\BlBridge\mcp\*.py` 是**构建产物**：唯一真相源是仓库 `tools\*.py`，`build.ps1 -Deploy` 整份复制。
+  **手改部署副本会在下次部署被覆盖**（`mcp\README.md` 把这条写给了 AI，别再让它踩）。
+- `module\mcp\manifest.json` 的 `version` 与 `module\SubModule.xml` 一样**由构建从 `BridgeConfig.Version` 同步**，
+  禁止手维护（手维护必漂移：清单说 0.8.9、DLL 说 0.8.12）。
+- **界面与端口必须共用同一个入口**：面板按钮构造与 MCP 同形的请求并调用同一个
+  `ScenarioRunner.Start`；返回主菜单走 `UiEntry.RequestClose`（官方 `CustomBattleVM.ExecuteBack` 的 `PopState` 同路径）。
+  禁止为 UI 另写一份开战/返回逻辑 —— 那样"界面上能做的、端口做不了"就会在结构上成立。
+- 从**部署副本**（`Modules\BlBridge\mcp\`）跑 `bl_build_check` 时，它旁边没有 `src/`：源码段会跳过并如实标注
+  `sourceCheck: skipped_no_src_dir`，结论降级为"三段一致"。**不要**把那个不存在目录当成源码目录报出去。
+
 ## 二、遇到「不支持 UTF-8 的代码」怎么处理
 
 **不是**把文案改成英文，**也不是**加"编码兼容"补丁（那只是把错配挪到另一边），而是

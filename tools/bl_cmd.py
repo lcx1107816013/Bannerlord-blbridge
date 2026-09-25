@@ -8,8 +8,12 @@ BlBridge 控制通道命令行（不依赖 MCP，可直接驱动游戏）。
   python bl_cmd.py wait --state ended --timeout 180
   python bl_cmd.py abort
   python bl_cmd.py ping
+  python bl_cmd.py list-ui                        # 有哪些游戏内入口（含官方 CustomBattle）
+  python bl_cmd.py open-ui --ui-id CustomBattle   # 走官方正门进选兵界面（不需要人手动点）
+  python bl_cmd.py open-ui                        # 或进 BlBridge 战场面板
 
-前置：游戏在跑、BlBridge 模块已启用、并且**停在「自定义战斗」界面**（start 需要 CustomBattleState）。
+前置：游戏在跑、BlBridge 模块已启用、并且**停在「自定义战斗」界面或 BlBridge 战场面板**
+（start 需要其中之一 —— 真正的判据是"自定义战斗数据已加载"，v0.8.12 起两者等价申报）。
 """
 import argparse
 import io
@@ -23,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bl_common  # noqa: E402
 import bl_mcp  # noqa: E402
+import bl_rts  # noqa: E402
 import bl_sage  # noqa: E402
 
 
@@ -43,6 +48,33 @@ def main(argv):
     sub.add_parser("status", help="推演状态机")
     sub.add_parser("abort", help="中止当前推演")
 
+    # ── 游戏内 UI 入口（v0.8.12 起 agent 正门；v0.8.14 自建面板删除后只剩官方界面）──
+    lu = sub.add_parser("list-ui", help="列出可进入的游戏内入口 + 官方自定义战斗场景全表")
+    lu.add_argument("--mode", choices=("all", "battle", "siege", "village", "lordsHall",
+                                       "naval", "navalRaid"), default=None,
+                    help="只列某模式的场景（默认 all；海战/海上掠夺来自 NavalDLC 的场景表）")
+    lu.add_argument("--limit", type=int, default=None, help="最多列多少行场景（默认 0 = 全吐）")
+    ou = sub.add_parser("open-ui", help="唤起一个游戏内界面（默认 = 官方自定义战斗界面）")
+    ou.add_argument("--ui-id", "--id", dest="ui_id", default=None,
+                    help="入口 id，默认 CustomBattle；全部可用 id 见 list-ui。"
+                         "注意线上参数名是 uiId，不是 id —— 控制通道的 JSON 读取器是扁平的，"
+                         "id 会被信封里的请求 id 顶掉（v0.8.12 真机踩过）")
+    cu = sub.add_parser("close-ui", help="从官方自定义战斗界面回主菜单（官方 PopState 同路径）")
+    cu.add_argument("--state", choices=("CustomBattleState",), default=None,
+                    help="要离开的状态；白名单只有 CustomBattleState（不接受任意状态名 —— "
+                         "那等于让调用方 pop 引擎状态栈）")
+
+    # ── RTSCamera 配置（v0.8.15，B 方案：我们只当它的"参数管理员"，不碰它的代码）──
+    rc = sub.add_parser("rts-config", help="回读 RTSCamera 配置（只读）")
+    rc.add_argument("--key", action="append", dest="keys", default=None,
+                    help="只读指定键（可重复），如 --key ElevatedHeightInSiege")
+    ra = sub.add_parser("rts-apply", help="写 RTSCamera 配置（自动备份 + XML 校验 + 回读核对）")
+    ra.add_argument("--preset", default=None,
+                    help="预设：siege-god(攻城抬升10) / free-always / elevated-always / god-full")
+    ra.add_argument("--set", action="append", dest="sets", default=None,
+                    help="逐键写入：--set ElevatedHeightInSiege=10（可重复）")
+    ra.add_argument("--dry-run", action="store_true", help="只预览不写入")
+
     p = sub.add_parser("start", help="开一场 AI 对 AI 战斗")
     p.add_argument("--attacker", required=True)
     p.add_argument("--defender", required=True)
@@ -54,6 +86,13 @@ def main(argv):
                    help="charge=双方都对称冲锋（默认，消除攻守战术偏差）；default=引擎默认战术")
     p.add_argument("--player-side", choices=("attacker", "defender"), default="attacker",
                    help="谁被标记为玩家侧（仅用于排查该标记是否带来系统性偏差）")
+    p.add_argument("--spectate", action="store_true",
+                   help="兜底观战镜头（v0.8.14）：挂官方 ICameraModeLogic 走自由观察相机。"
+                        "⚠️ 装了 RTSCamera 时野战会被它抢先（等于无效），优先用 --rts-preset；"
+                        "这个开关留给没装 RTSCamera 的机器")
+    p.add_argument("--rts-preset", dest="rts_preset", default=None,
+                   help="开战前套用 RTSCamera 预设（siege-god / free-always / elevated-always / god-full）。"
+                        "实测改配置无需重启、对本场立即生效；会先备份配置文件")
     p.add_argument("--allow-any-state", action="store_true",
                    help="跳过「必须停在自定义战斗界面」检查（用于从主菜单直接开战）")
     p.add_argument("--dummy-side", choices=("none", "attacker", "defender"), default="none",
@@ -133,6 +172,57 @@ def main(argv):
     if args.cmd == "abort":
         return _print(*bl_mcp.send_command("abort", {}, timeout=20))
 
+    if args.cmd == "rts-config":
+        try:
+            values = bl_rts.read(getattr(args, "keys", None))
+        except Exception as e:  # noqa: BLE001
+            print("错误: %s" % e)
+            return 2
+        print(json.dumps({"path": bl_rts.config_path(), "values": values},
+                         ensure_ascii=False, indent=1))
+        return 0
+
+    if args.cmd == "rts-apply":
+        try:
+            if getattr(args, "preset", None):
+                out = bl_rts.apply_preset(args.preset,
+                                          dry_run=bool(getattr(args, "dry_run", False)))
+            else:
+                edits = []
+                for kv in (getattr(args, "sets", None) or []):
+                    if "=" not in kv:
+                        print("错误: --set 需要 KEY=VALUE 形式，实得 %r" % kv)
+                        return 2
+                    k, v = kv.split("=", 1)
+                    edits.append({"key": k.strip(), "value": v.strip()})
+                if not edits:
+                    print("错误: 需要 --preset，或至少一个 --set KEY=VALUE")
+                    return 2
+                out = bl_rts.apply(edits, dry_run=bool(getattr(args, "dry_run", False)))
+        except Exception as e:  # noqa: BLE001
+            print("错误: %s" % e)
+            return 2
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        if out.get("dryRun"):
+            return 0
+        return 0 if out.get("ok") else 1
+
+    if args.cmd == "list-ui":
+        params = {}
+        if getattr(args, "mode", None):
+            params["scenesMode"] = args.mode
+        if getattr(args, "limit", None):
+            params["sceneLimit"] = int(args.limit)
+        return _print(*bl_mcp.send_command("list_ui", params, timeout=15))
+
+    if args.cmd == "open-ui":
+        params = {"uiId": args.ui_id} if args.ui_id else {}
+        return _print(*bl_mcp.send_command("open_ui", params, timeout=20))
+
+    if args.cmd == "close-ui":
+        params = {"state": args.state} if args.state else {}
+        return _print(*bl_mcp.send_command("close_ui", params, timeout=15))
+
     if args.cmd == "start":
         params = {
             "attackerTroop": args.attacker, "attackerCount": args.a,
@@ -144,6 +234,10 @@ def main(argv):
             "freezeDummies": "true" if args.freeze_dummies else "false",
             "unlimitedAmmo": "true" if args.unlimited_ammo else "false",
             }
+        # v0.8.14：上帝视角 —— 只在开启时才加键，保持旧命令的请求字节逐字不变
+        # （"请求面悄悄漂移"是这个项目最贵的一类坑：离线绿灯、真机才炸）
+        if args.spectate:
+            params["spectate"] = "true"
         if getattr(args, "dummy_armor", None):
             try:
                 # 必须传**数字**：C# 侧 Jmini.Num 只吃数字字符，字符串值会被判成"读不到"。
@@ -206,6 +300,15 @@ def main(argv):
                 params["roundSpawnAttacker"] = args.round_spawn_attacker
             if getattr(args, "round_spawn_defender", None):
                 params["roundSpawnDefender"] = args.round_spawn_defender
+        # v0.8.15：开战前套用 RTSCamera 预设（B 方案）。实测 RTSCamera 每场开始读一次配置，
+        # 所以"改完立刻开战"就对本场生效；它事后会覆写，所以这一步不能提前太久。
+        if getattr(args, "rts_preset", None):
+            try:
+                out = bl_rts.apply_preset(args.rts_preset)
+            except Exception as e:  # noqa: BLE001
+                print("错误: --rts-preset 套用失败：%s" % e)
+                return 2
+            print("rts-preset: %s" % json.dumps(out, ensure_ascii=False))
         return _print(*bl_mcp.send_command("start_battle", params, timeout=args.timeout))
 
     if args.cmd == "wait":

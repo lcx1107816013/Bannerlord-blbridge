@@ -173,8 +173,20 @@ namespace BlBridge
         {
             int p = FindKey(json, key);
             if (p < 0) return fallback;
+            // 形态 ①：裸 JSON 字面量 `true` / `false`（MCP 侧发的是这种）
             if (string.Compare(json, p, "true", 0, 4, StringComparison.OrdinalIgnoreCase) == 0) return true;
             if (string.Compare(json, p, "false", 0, 5, StringComparison.OrdinalIgnoreCase) == 0) return false;
+            // 形态 ②：带引号的字符串 `"true"` / `"false"`（CLI 侧的既有约定，见 README：
+            //   "布尔参数一律发字符串"）。两种都收 —— 只认一种就是"调用方猜谜"。
+            //
+            // 2026-09-25 真机踩到（v0.8.14 验证轮）：CLI 发 `"spectate": "true"`、
+            // 旧实现只认裸字面量 ⇒ 返回值落到 fallback=false，**参数被静默丢弃**：
+            // 请求 accepted、响应里 spectate=false，既不报错也不生效。
+            // 这类"没报错但没生效"比崩溃更难查，所以在此一并收口，而不是去改调用方。
+            string s = Str(json, key, null);
+            if (s == null) return fallback;
+            if (string.Equals(s, "true", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(s, "false", StringComparison.OrdinalIgnoreCase)) return false;
             return fallback;
         }
     }

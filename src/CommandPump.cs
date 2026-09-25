@@ -191,6 +191,22 @@ namespace BlBridge
             {
                 return Protocol.Success(id, TimeControl.SpeedJson());
             }
+            // ── 游戏内 UI 入口（v0.8.12，agent 正门）────────────────────────────
+            // 存在理由：AI 不该靠"模拟鼠标"操作游戏 UI（原型轮实测：同一套合成输入，
+            // 官方主菜单可点、自写层不可点）。走官方正门 ExecuteInitialStateOptionWithId。
+            // 三个方法都在主线程（Pump 由 OnApplicationTick 驱动），与引擎状态栈的约束一致。
+            if (method == "list_ui")
+            {
+                return UiEntry.HandleListUi(id, raw);
+            }
+            if (method == "open_ui")
+            {
+                return UiEntry.HandleOpenUi(id, raw);
+            }
+            if (method == "close_ui")
+            {
+                return UiEntry.HandleCloseUi(id, raw);
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 

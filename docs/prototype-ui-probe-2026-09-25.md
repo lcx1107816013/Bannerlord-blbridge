@@ -3,7 +3,10 @@
 > 目的：在写实施计划之前，先用**一次性代码 + 真机**回答 5 个"猜不出来"的问题。
 > 原型代码：`src/ProtoUi.cs`（单文件，标了 PROTOTYPE）+ `module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml`
 > + `module/ModuleData/Languages/CNs/*`；`src/SubModule.cs` 里只有一行 `ProtoUi.Register()`。
-> 结论已回填到 `PROGRESS.md` 的对应章节与后续实施计划。
+> 结论已回填到 `PROGRESS.md` §二十三 与 `docs/superpowers/plans/2026-09-25-ui-entry-plan.md`。
+> ⚠️ **更正（2026-09-25 晚复核）**：本行原文只写了"结论已回填到 `PROGRESS.md` 的对应章节与后续实施计划"，
+> 而当时**两样都不存在**（`PROGRESS.md` 无 UI 章节、`docs/superpowers/plans/` 无 UI 计划）——
+> 这是一条无法复现的表述，已就地更正；补齐动作与澄清见 `PROGRESS.md` §二十三 §0。
 
 ## 一、五个问题的答案（真机实测，非推演）
 
@@ -60,11 +63,19 @@
 
 > 注意：`gridhand windows list` 的输出带 ANSI 高亮码，PowerShell 里 `ConvertFrom-Json` 后按 title 过滤时要用能容忍转义码的方式（本轮吃过一次亏）。
 
-## 六、未完成 / 留给实施阶段
+## 六、未完成 / 留给实施阶段（状态已按 2026-09-25 晚的 v0.8.12 轮更新）
 
-- 真人点击对照（见第四节第 2 点）。
-- 原型代码尚未删除：删 `src/ProtoUi.cs` + `module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml` + `module/ModuleData/Languages/CNs/*` + `src/SubModule.cs` 里那一行 `ProtoUi.Register()`（`build.ps1` 的改动要**保留**：Modules 下程序集引用、`System.ValueTuple`、`GUI/ModuleData` 部署都是正式方案需要的）。
-- `src/SubModule.cs` 的 `wrong_state` 守卫放宽（允许我们的 state）尚未做。
+- ✅ **真人点击对照 —— 已完成**（第七节：修复后真人点与合成点都有效）。
+- ✅ **原型代码已删**（v0.8.13）。`src/ProtoUi.cs` + `module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml` 均已移除；
+  正式面板也在 **v0.8.14 一并删除** —— 官方界面本身即完整入口，复刻属重复建设（见 `PROGRESS.md` §二十五）。
+  （`build.ps1` 的改动要**保留**：Modules 下程序集引用、`System.ValueTuple`、`GUI/ModuleData` 部署都是正式方案需要的）。
+  **刻意推迟**：正式面板（`BattleSetupScreen`）真机通过**之后**再删，期间新旧两块屏并存、可对照；
+  顺序本身是纪律 —— 先证新的能跑，再删已知可用的旧的。语言文件 `ModuleData/Languages/CNs/*` **保留**（正式面板的主菜单入口要用）。
+- ⚠️ **`wrong_state` 守卫放宽 —— 已撤销**（v0.8.14）：曾改为白名单 `ScenarioRunner.IsBattleSetupState()`
+（`CustomBattleState` 或自有面板态）；面板删除后**收回为单值 `CustomBattleState`**。
+本文件第 5 条列这句的原文保留（它记录了当时的决定），但**当前实现不是那样**。见 `PROGRESS.md` §二十五。
+- 🆕 **agent 正门已落地**：`list_ui` / `open_ui` / `close_ui`（v0.8.12），AI 不再需要抢鼠标；
+  双分包（mod 包 + 包内 MCP 包）见 `docs/superpowers/plans/2026-09-25-ui-entry-plan.md`。
 
 ## 七、第 5 问的最终结论（2026-09-25 二轮，真机确证）
 

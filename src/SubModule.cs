@@ -23,6 +23,12 @@ namespace BlBridge
         /// </summary>
         internal static string MissionOrigin = "game";
 
+        /// <summary>本会话已完成的场次数（只读出口，给面板与状态文件共用）。</summary>
+        internal static int MissionsThisSession
+        {
+            get { return _missionCount; }
+        }
+
         /// <summary>
         /// v0.8.4：本场的随机种子（-1 = 未指定）。只用于**记录**（写进 meta）；
         /// 真正设种子由 `ScenarioRunner` 在开战前调 `MBRandom.SetSeed` 完成。
@@ -46,9 +52,10 @@ namespace BlBridge
                 CommandPump.EnsureDirs();
                 // 可选外部配置（C24）：只在模块加载时读一次，加载即校验，改完需重启游戏
                 BridgeConfigFile.Apply(BridgeConfigFile.DefaultPath);
-                // PROTOTYPE (branch prototype/ui-probe): register the main-menu entry.
-                // Delete this line together with src/ProtoUi.cs when the prototype is archived.
-                ProtoUi.Register();
+                // v0.8.14：**不再注册任何自建主菜单入口**。官方自定义战斗本身就是完整入口
+                // （战斗 / 围攻 / 村庄 / 海战 / 海上掠夺 + 玩家类型 + 选择攻守方 + 全套地图参数），
+                // 我们复刻它属重复建设 ⇒ 面板（BattleSetup*，v0.8.14 删）与原型探针（v0.8.13 删）
+                // 都已退役。分工定格：**人用官方界面玩，AI 用端口调**（list_ui / open_ui / close_ui）。
                 WriteStatus("loaded", null, 0);
             }
             catch
@@ -86,6 +93,31 @@ namespace BlBridge
                     // 遥测先读到扣血后的 hpAfter，靶场随后才改血量 ——
                     // 这样遥测里的 hpMax - hpAfter 恒等于"本次真实伤害"。
                     mission.AddMissionBehavior(new DummyRangeBehavior());
+                    // v0.8.14 上帝视角（AI 测试场次专用）：`start_battle` 传 spectate=true 时，
+                    // 把镜头交给引擎自带的自由观察相机（实现见 SpectatorWatchBehavior）。
+                    // **消费即清**：读完立刻复位，保证玩家自己打的战斗绝不会继承这个标志 ——
+                    // 静态标志污染下一场是本项目踩过的坑（见 DummyRangeBehavior 的复位注释）。
+                    if (ScenarioRunner.SpectateRequested)
+                    {
+                        ScenarioRunner.SpectateRequested = false;
+                        // v0.8.15：**装了 RTSCamera 就让位**。两者都实现 ICameraModeLogic，
+                        // 而 MissionScreen 是 FirstOrDefault —— 我实测过：野战里 RTSCamera 的
+                        // FlyCameraMissionView 排在下标 30、我们的在 43，它先被选中（我们的只被
+                        // 问了 8 次）；围城里则是我们被每帧问（8511 次）但它给的是"观察者镜头"，
+                        // 不是用户要的抬升自由视角。两边都挂只会互相抢镜头/输入。
+                        // ⇒ 我们退化成"**没装 RTSCamera 时的兜底**"；装了它就走配置管理
+                        //    （bl_rts_config / bl_apply_rts_config / start_battle 的 rtsPreset）。
+                        if (TaleWorlds.ModuleManager.ModuleHelper.IsModuleActive("RTSCamera"))
+                        {
+                            UiEntry.Log("spectate: 检测到 RTSCamera 已启用 ⇒ 不挂兜底相机"
+                                        + "（改用它的配置：bl_apply_rts_config / rtsPreset）");
+                        }
+                        else
+                        {
+                            mission.AddMissionBehavior(new SpectatorWatchBehavior());
+                            UiEntry.Log("spectate: SpectatorWatchBehavior 已挂载（兜底：本机未装 RTSCamera）");
+                        }
+                    }
                 }
             }
             catch

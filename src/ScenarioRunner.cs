@@ -148,6 +148,46 @@ namespace BlBridge
             return sb.ToString();
         }
 
+        /// <summary>
+        /// 当前激活的 GameState 类型名（取不到返回空串）。只读、已兜异常。
+        /// `UiEntry` 的 list_ui/open_ui/close_ui 与这里的开战守卫**共用这一个判据**，
+        /// 免得"两处各自算状态名"漂移（v0.8.10 的 B3/B5 就是这类"判定器自己没对照"的坑）。
+        /// </summary>
+        internal static string ActiveGameStateName()
+        {
+            try
+            {
+                if (Game.Current != null && Game.Current.GameStateManager != null &&
+                    Game.Current.GameStateManager.ActiveState != null)
+                {
+                    return Game.Current.GameStateManager.ActiveState.GetType().Name;
+                }
+            }
+            catch
+            {
+            }
+            return "";
+        }
+
+        /// <summary>
+        /// 「可以在这里开战」的状态：**只有官方自定义战斗界面** `CustomBattleState`。
+        ///
+        /// 沿革（别把这段读成"一直如此"）：
+        ///   v0.8.11 及之前 —— 同样是单值 `CustomBattleState`；
+        ///   v0.8.12        —— 放宽成白名单，多放行一个自建面板态 `BattleSetupState`；
+        ///   v0.8.14        —— 面板删除（官方自带完整界面：战斗/围攻/村庄/海战/海上掠夺 + 玩家类型
+        ///                     + 选择攻守方 + 全套地图参数，复刻属重复建设）⇒ 收回为单值。
+        ///
+        /// 与 `UiEntry.CustomBattleStateName` **共用同一个常量**，免得两处字符串各自漂移。
+        /// 集合外一律拒绝 —— 不做前缀匹配、不靠 catch 兜底；
+        /// 判据可离线对照：假造一个集合外状态名必须仍报 wrong_state（见 tools\bl_selftest.py 的断言）。
+        /// </summary>
+        internal static bool IsBattleSetupState(string stateName)
+        {
+            if (string.IsNullOrEmpty(stateName)) return false;
+            return stateName == UiEntry.CustomBattleStateName;
+        }
+
         public static string Start(string id, string raw)
         {
             if (Busy)
@@ -205,28 +245,26 @@ namespace BlBridge
             int rounds = Jmini.Int(raw, "rounds", 1);
             int roundEndAlive = Jmini.Int(raw, "roundEndAlive", 1);
             bool roundSwap = Jmini.Str(raw, "roundSwap", "false") == "true";
+            // v0.8.14：上帝视角观战（默认 false = 与以往完全一致）。
+            // 为什么要它：AI 测试场次里人只想看，不想被绑在一个身体上操作（官方自定义战斗的
+            // 「玩家类型」只有 Commander / Sergeant，点不出观察者）。实现见 SpectatorWatchBehavior。
+            bool spectate = Jmini.Bool(raw, "spectate", false);
             string roundSpawnA = Jmini.Str(raw, "roundSpawnAttacker", "");
             string roundSpawnD = Jmini.Str(raw, "roundSpawnDefender", "");
 
-            // 1) 必须处于自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）
-            string stateName = "";
-            try
-            {
-                if (Game.Current != null && Game.Current.GameStateManager != null &&
-                    Game.Current.GameStateManager.ActiveState != null)
-                {
-                    stateName = Game.Current.GameStateManager.ActiveState.GetType().Name;
-                }
-            }
-            catch
-            {
-            }
-            if (!allowAnyState && stateName != "CustomBattleState")
+            // 1) 必须处于官方自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）。
+            //    v0.8.12 曾放宽为白名单（含自建面板态 `BattleSetupState`）；v0.8.14 面板删除
+            //    （官方自带完整界面，复刻属重复建设）⇒ 白名单收回为单值，判据见 IsBattleSetupState。
+            //    真正的前提其实是"MBObjectManager 里的兵种/文化已加载"（裸主菜单下所有兵种 id
+            //    都报 unknown_troop），而官方自定义战斗正是加载它们的正门 —— 所以就用它当判据。
+            string stateName = ActiveGameStateName();
+            if (!allowAnyState && !IsBattleSetupState(stateName))
             {
                 return Protocol.Failure(id, "wrong_state",
                     "需要停留在「自定义战斗」界面（当前状态: " + (stateName.Length == 0 ? "未知" : stateName) +
                     "）。" + StuckMissionHint(stateName) +
-                    "进游戏后点 Custom Battle，停在选兵界面即可；或传 allowAnyState=true 跳过本检查。", false);
+                    "进游戏后点 Custom Battle 停在选兵界面，或用 open_ui（uiId=CustomBattle，主菜单下可用）走进去；" +
+                    "也可以传 allowAnyState=true 跳过本检查（但那时兵种 id 可能还解析不了）。", false);
             }
 
             // 2) T5 多兵种/战术组参数：`troop:count[:formation[:movement]]`，多组用 | 分隔。
@@ -416,6 +454,9 @@ namespace BlBridge
                 RoundOrchestratorBehavior.DefenderSquads = _pendingDefenderGroups;
                 RoundOrchestratorBehavior.AttackerSquadTroops = attackerGroupChars;
                 RoundOrchestratorBehavior.DefenderSquadTroops = defenderGroupChars;
+                // v0.8.14：上帝视角标志必须与 SiegePending 同一时刻写入（都在开 mission 之前），
+                // 由 SubModule.OnBeforeMissionBehaviorInitialize 消费一次（挂 SpectatorWatchBehavior）。
+                SpectateRequested = spectate;
                 // v0.8.11：城池场景必须走 siege mission（理由见 IsSiegeScene 的实测说明）
                 SiegePending = IsSiegeScene(scene);
                 if (SiegePending)
@@ -432,6 +473,7 @@ namespace BlBridge
                 sb.Append(",\"attackerCount\":").Append(Jw.N(aCount));
                 sb.Append(",\"defenderCount\":").Append(Jw.N(dCount));
                 sb.Append(",\"scene\":").Append(Protocol.Q(scene));
+                sb.Append(",\"spectate\":").Append(Jw.B(spectate));
                 sb.Append(",\"note\":\"战斗无玩家参与，10 倍速运行；用 bl_wait_for_state 等 ended\"}");
                 return Protocol.Success(id, sb.ToString());
             }
@@ -616,14 +658,16 @@ namespace BlBridge
         ///      下还有 atmosphere.xml / terrain.bin / navmesh.bin，但只有 scene.xscene 是每个
         ///      场景都必有的入口文件（实测该目录与其他场景目录均有）。
         /// </summary>
-        private static bool SceneExists(string scene)
+        /// <remarks>v0.8.14 起为 internal：`UiEntry` 的官方场景表（`CustomBattleScenes`）要逐行标
+        /// `exists` —— 一样的判据，不能让两处各写一份（那类"两个判定器各自漂移"本项目吃过亏）。</remarks>
+        internal static bool SceneExists(string scene)
         {
             if (string.IsNullOrEmpty(scene)) return false;
             try
             {
                 if (!IsSafeSceneName(scene)) return false;
 
-                foreach (ModuleInfo mi in SceneSearchModules())
+                foreach (ModuleInfo mi in SceneSearchModulesInternal())
                 {
                     string probe = Path.Combine(mi.FolderPath, "SceneObj", scene, "scene.xscene");
                     if (File.Exists(probe)) return true;
@@ -669,7 +713,7 @@ namespace BlBridge
         ///   v0.8.9 写的 `mi.FolderPath + "SceneObj/"` 因此得到 `...SandBoxCoreSceneObj/...`（恒不存在）
         ///   ⇒ 该守卫会把**每一次** start 都判成 unknown_scene。它提交后 0 次真机运行，故未被发现。
         /// </summary>
-        private static List<ModuleInfo> SceneSearchModules()
+        private static List<ModuleInfo> SceneSearchModulesInternal()
         {
             List<ModuleInfo> modules = new List<ModuleInfo>();
             foreach (ModuleInfo mi in ModuleHelper.GetActiveModules())
@@ -679,6 +723,54 @@ namespace BlBridge
                 modules.Add(mi);
             }
             return modules;
+        }
+
+        /// <summary>
+        /// 已激活模块的根目录（**不含**尾分隔符，理由见 SceneSearchModules 的 FolderPath 说明）。
+        ///
+        /// v0.8.14：给 `CustomBattleScenes` 用 —— 它按各模块 `SubModule.xml` 里的
+        /// `&lt;XmlName id="CustomBattleScenes" path="…"/&gt;` 声明去找 `ModuleData/&lt;path&gt;.xml`，
+        /// 属**纯文件读**，不碰 `MBObjectManager`。
+        /// 为什么不复用引擎的 `GetMergedXmlForManaged`：见 PROGRESS §二十六 —— 那条依赖会
+        /// 在"引擎自己正在合并/加载 XML"的窗口里被我们从主线程插进去，风险不可控；
+        /// 只读的数据用只读的办法拿。
+        /// </summary>
+        internal static List<string> ActiveModuleFolders()
+        {
+            List<string> folders = new List<string>();
+            foreach (ModuleInfo mi in SceneSearchModulesInternal()) folders.Add(mi.FolderPath);
+            return folders;
+        }
+
+        /// <summary>
+        /// 可用野战场景（`battle_*` 前缀），排序后返回。**与 `ValidateScene` 同一判据**：
+        /// 同一个 `SceneSearchModules()`（只认已激活模块）+ 同样只收 `battle_` 开头的目录。
+        /// 一物两用：① 上面错误消息里的清单；② `list_ui` 的 `scenes` 字段与面板的场景轮选。
+        /// （面板不再硬编码场景名 —— 硬编码的名字一旦不存在，玩家第一次点「开始战斗」就吃 unknown_scene。）
+        /// </summary>
+        internal static List<string> AvailableBattleScenes()
+        {
+            List<string> scenes = new List<string>();
+            try
+            {
+                foreach (ModuleInfo mi in SceneSearchModulesInternal())
+                {
+                    string sceneObj = Path.Combine(mi.FolderPath, "SceneObj");
+                    if (!Directory.Exists(sceneObj)) continue;
+                    foreach (string dir in Directory.GetDirectories(sceneObj))
+                    {
+                        string name = Path.GetFileName(dir);
+                        if (!name.StartsWith("battle_", StringComparison.Ordinal)) continue;
+                        if (scenes.IndexOf(name) >= 0) continue;
+                        scenes.Add(name);
+                    }
+                }
+                scenes.Sort(StringComparer.Ordinal);
+            }
+            catch
+            {
+            }
+            return scenes;
         }
 
         /// <summary>
@@ -696,35 +788,14 @@ namespace BlBridge
             sb.Append("场景不存在: ").Append(scene);
             sb.Append("。引擎侧无法安全失败（Scene.Read 崩在原生层，0xC0000005），故在此提前拦截。");
 
-            // 附上可用场景清单：只列野战战场（battle_*）与请求名最接近的若干，
-            // 避免把几百个城镇/城堡场景全刷出来。
-            try
+            // 附上可用场景清单：只列野战战场（battle_*），避免把几百个城镇/城堡场景全刷出来。
+            List<string> battleScenes = AvailableBattleScenes();
+            if (battleScenes.Count > 0)
             {
-                List<string> battleScenes = new List<string>();
-                foreach (ModuleInfo mi in SceneSearchModules())
-                {
-                    string sceneObj = Path.Combine(mi.FolderPath, "SceneObj");
-                    if (!Directory.Exists(sceneObj)) continue;
-                    foreach (string dir in Directory.GetDirectories(sceneObj))
-                    {
-                        string name = Path.GetFileName(dir);
-                        if (name.StartsWith("battle_", StringComparison.Ordinal))
-                        {
-                            battleScenes.Add(name);
-                        }
-                    }
-                }
-                battleScenes.Sort(StringComparer.Ordinal);
-                if (battleScenes.Count > 0)
-                {
-                    sb.Append(" 可用野战场景（最多列 12 个，默认 battle_terrain_a）: ");
-                    sb.Append(string.Join(", ", battleScenes.GetRange(
-                        0, Math.Min(12, battleScenes.Count)).ToArray()));
-                    if (battleScenes.Count > 12) sb.Append(" …");
-                }
-            }
-            catch
-            {
+                sb.Append(" 可用野战场景（最多列 12 个，默认 battle_terrain_a）: ");
+                sb.Append(string.Join(", ", battleScenes.GetRange(
+                    0, Math.Min(12, battleScenes.Count)).ToArray()));
+                if (battleScenes.Count > 12) sb.Append(" …");
             }
             message = sb.ToString();
             return false;
@@ -768,6 +839,18 @@ namespace BlBridge
         /// 本场是否为 siege（攻城）模式。`Start` 每次开战前设置，供 `ScenarioProbe` 读。
         /// </summary>
         internal static bool SiegePending;
+
+        /// <summary>
+        /// 下一场是否要「上帝视角」观战（v0.8.14，`start_battle` 的 `spectate` 参数）。
+        ///
+        /// **消费即清**（SubModule.OnBeforeMissionBehaviorInitialize 里读完立刻置 false）：
+        /// 这样即使收尾复位漏了，也绝不会把自由镜头带到玩家自己打的战斗里 ——
+        /// 这个项目在"静态标志污染下一场"上踩过坑（见 DummyRangeBehavior 的复位注释）。
+        ///
+        /// 它只控制"挂不挂 `SpectatorWatchBehavior`"（镜头），**不碰指挥权** ——
+        /// 指挥权仍由 `isPlayerGeneral=false` 那条既有修复决定（防止攻方停下来等玩家下令）。
+        /// </summary>
+        internal static bool SpectateRequested;
 
         /// <summary>
         /// 场景名 → 是否攻城场景（启发式）。

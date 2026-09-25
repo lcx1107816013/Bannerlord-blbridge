@@ -147,9 +147,43 @@ def start_fake_game(logdir, token):
                 elif method == "ping":
                     result = {"protocolVersion": 1, "mod": "BlBridge", "version": "0.1.1"}
                 elif method == "start_battle":
-                    result = {"accepted": True, "state": "loading"}
+                    # v0.8.14：回显 spectate（God view）—— 断言"参数被透传到端口"
+                    result = {"accepted": True, "state": "loading",
+                              "spectate": bool((req.get("parameters") or {}).get("spectate"))}
                 elif method == "abort":
                     result = {"aborted": True, "state": "running"}
+                elif method == "list_ui":
+                    # v0.8.14：入口清单 + 官方场景全表（这里只放三行代表三种模式）
+                    result = {"moduleLoaded": True, "activeState": "MainMenu",
+                              "options": [{"id": "CustomBattle", "name": "自定义战斗", "orderIndex": 5000,
+                                           "hidden": False, "disabled": False, "disabledReason": ""}],
+                              "scenes": ["battle_terrain_a"],
+                              "sceneTable": {
+                                  "count": 3, "filter": "all",
+                                  "fromCache": False, "sourceFiles": 2, "existsChecked": True,
+                                  "modes": {"battle": 1, "siege": 1, "village": 0, "lordsHall": 0,
+                                            "naval": 1, "navalRaid": 0},
+                                  "rows": [{"id": "battle_terrain_a", "name": "Vladiv Forest (Plain)",
+                                            "mode": "battle", "terrain": "Plain", "exists": True,
+                                            "source": "custom_battle_scenes.xml"},
+                                           {"id": "battania_castle_b", "name": "Llanoc Hen Castle",
+                                            "mode": "siege", "terrain": "Plain", "exists": True,
+                                            "source": "custom_battle_scenes.xml"},
+                                           {"id": "battle_terrain_opensea_northern",
+                                            "name": "Northern Open Sea", "mode": "naval",
+                                            "terrain": "OpenSea", "exists": True,
+                                            "source": "naval_custom_battle_scenes.xml"}],
+                                  "returned": 3, "missingInReturned": 0}}
+                elif method == "open_ui":
+                    # 假游戏端用真 JSON 解析（认嵌套）⇒ 抓不到"参数名与信封键同名"那类碰撞
+                    # （例如 v0.8.12 真机踩到的 id vs 信封 id）。真机判据见 PROGRESS §二十三 §3。
+                    result = {"requested": True,
+                              "uiId": (req.get("parameters") or {}).get("uiId") or "CustomBattle",
+                              "stateBefore": "MainMenu", "note": "fire-and-forget"}
+                elif method == "close_ui":
+                    result = {"closeRequested": True,
+                              "state": (req.get("parameters") or {}).get("state") or "CustomBattleState",
+                              "note": "PopState"}
                 else:
                     result = {}
                 resp = {"protocolVersion": 1, "id": rid, "ok": True,
@@ -748,11 +782,55 @@ def main():
     check(init.get("protocolVersion") == "2024-11-05", "initialize 返回协议版本", init.get("protocolVersion"))
     tools = by_id.get(2, {}).get("result", {}).get("tools", [])
     names = sorted(t["name"] for t in tools)
-    check(len(tools) == 21, "tools/list 返回 21 个工具", names)
+    check(len(tools) == 26, "tools/list 返回 26 个工具", names)
     check("bl_lookup_troop" in names, "bl_lookup_troop 已注册", names)
     check("bl_launch_game" in names and "bl_desktop_click" in names,
           "桌面/游戏 GUI 工具已注册", names)
     check("bl_apply_config" in names and "bl_analyze" in names, "关键工具存在", names)
+    check("bl_list_ui" in names and "bl_open_ui" in names and "bl_close_ui" in names,
+          "游戏内 UI 入口工具已注册（v0.8.12）", names)
+    check("bl_rts_config" in names and "bl_apply_rts_config" in names,
+          "RTSCamera 配置工具已注册（v0.8.15，B 方案）", names)
+
+    # ── v0.8.15：RTSCamera 配置读写（离线：全在临时文件上跑，绝不碰真配置）──
+    import bl_rts
+    rts_dir = tempfile.mkdtemp(prefix="bda_rts_")
+    rts_cfg = os.path.join(rts_dir, "RTSCameraConfig.xml")
+    with io.open(rts_cfg, "w", encoding="utf-8-sig") as fh:
+        fh.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                 '<RTSCameraConfig>\n'
+                 '  <DefaultToFreeCamera>DeploymentStage</DefaultToFreeCamera>\n'
+                 '  <ElevatedHeight>10</ElevatedHeight>\n'
+                 '  <ElevatedHeightInSiege>0</ElevatedHeightInSiege>\n'
+                 '</RTSCameraConfig>\n')
+    check(bl_rts.read(["ElevatedHeightInSiege"], path=rts_cfg).get("ElevatedHeightInSiege") == "0",
+          "rts: 读配置（指定键）", bl_rts.read(path=rts_cfg))
+    dry = bl_rts.apply([{"key": "ElevatedHeightInSiege", "value": "10"}], dry_run=True, path=rts_cfg)
+    check(dry.get("changed", {}).get("ElevatedHeightInSiege", {}).get("new") == "10"
+          and bl_rts.read(["ElevatedHeightInSiege"], path=rts_cfg)["ElevatedHeightInSiege"] == "0",
+          "rts: dry-run 只预览不落盘", dry)
+    out = bl_rts.apply_preset("siege-god", path=rts_cfg)
+    check(out.get("ok") is True
+          and (out.get("verified") or {}).get("ElevatedHeightInSiege") == "10"
+          and os.path.isfile(out.get("backup") or ""),
+          "rts: 套用预设 + 自动备份 + 回读核对", out)
+    bad = bl_rts.apply([{"key": "NoSuchKey", "value": "1"}], path=rts_cfg)
+    check(bad.get("ok") is False and "NoSuchKey" in (bad.get("error") or ""),
+          "rts: 未知键默认拒绝写入", bad)
+    thrown = False
+    try:
+        bl_rts.apply([{"key": "ElevatedHeight", "value": "1<2"}], path=rts_cfg)
+    except ValueError:
+        thrown = True
+    check(thrown, "rts: 含 XML 特殊字符的值被拒绝")
+    preset_bad = False
+    try:
+        bl_rts.apply_preset("no-such-preset", path=rts_cfg)
+    except ValueError:
+        preset_bad = True
+    check(preset_bad, "rts: 未知预设名被拒绝")
+    check(bl_rts.read(["DefaultToFreeCamera"], path=rts_cfg)["DefaultToFreeCamera"] == "DeploymentStage",
+          "rts: 未被指定的键保持原值")
     st = by_id.get(3, {}).get("result", {})
     check(st.get("content"), "bl_status 返回内容")
     an = by_id.get(4, {}).get("result", {})
@@ -804,6 +882,43 @@ def main():
     r3, e3 = bl_mcp.send_command("start_battle", {"attackerTroop": "a", "defenderTroop": "b"}, timeout=6)
     check(e3 is None and ((r3 or {}).get("result") or {}).get("accepted") is True,
           "start_battle 往返成功", e3)
+
+    # ── v0.8.12 / v0.8.14：UI 入口三个方法的往返（含"带参数"与"不带参数"两种形态）──
+    rui1, eui1 = bl_mcp.send_command("list_ui", {}, timeout=6)
+    ui1 = (rui1 or {}).get("result") or {}
+    check(eui1 is None and ui1.get("activeState") == "MainMenu" and bool(ui1.get("options")),
+          "list_ui 往返成功且带回入口清单", eui1 or ui1)
+    st1 = ui1.get("sceneTable") or {}
+    check(len(st1.get("rows") or []) == 3 and (st1.get("modes") or {}).get("naval") == 1,
+          "list_ui 带回官方场景全表（含模式计数与海战行）", ui1.get("sceneTable"))
+    check(st1.get("existsChecked") is True and st1.get("sourceFiles") == 2,
+          "场景表标注了 存在性是否已检查 / 实际解析到几个表文件", ui1.get("sceneTable"))
+
+    rui2, eui2 = bl_mcp.send_command("open_ui", {}, timeout=6)
+    ui2 = (rui2 or {}).get("result") or {}
+    check(eui2 is None and ui2.get("requested") is True and ui2.get("uiId") == "CustomBattle",
+          "open_ui 不带 uiId 时默认指向官方自定义战斗界面", eui2 or ui2)
+
+    rui3, eui3 = bl_mcp.send_command("open_ui", {"uiId": "CampaignResumeGame"}, timeout=6)
+    ui3 = (rui3 or {}).get("result") or {}
+    check(eui3 is None and ui3.get("uiId") == "CampaignResumeGame",
+          "open_ui 的 uiId 会被透传（任意官方入口）", eui3 or ui3)
+
+    rui4, eui4 = bl_mcp.send_command("close_ui", {}, timeout=6)
+    ui4 = (rui4 or {}).get("result") or {}
+    check(eui4 is None and ui4.get("closeRequested") is True and ui4.get("state") == "CustomBattleState",
+          "close_ui 往返成功且默认官方状态", eui4 or ui4)
+
+    rui5, eui5 = bl_mcp.send_command("close_ui", {"state": "CustomBattleState"}, timeout=6)
+    ui5 = (rui5 or {}).get("result") or {}
+    check(eui5 is None and ui5.get("state") == "CustomBattleState",
+          "close_ui 可显式指定官方状态（进得去就要出得来）", eui5 or ui5)
+
+    # v0.8.14：上帝视角参数从 MCP 层透传到端口层（模拟层只能测透传，真机行为另验）
+    r6, e6 = bl_mcp.send_command("start_battle",
+                                {"attackerTroop": "a", "defenderTroop": "b", "spectate": True}, timeout=6)
+    check(e6 is None and ((r6 or {}).get("result") or {}).get("spectate") is True,
+          "start_battle 的 spectate（上帝视角）会被透传", e6 or r6)
 
     # 会话身份（照 Coop 规范）：状态文件里的 runToken 变了，旧会话的响应必须被拒
     with io.open(os.path.join(logdir, "bridge_status.json"), "w", encoding="utf-8") as fh:

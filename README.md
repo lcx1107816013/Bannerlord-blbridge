@@ -11,26 +11,65 @@
 | 能力 | 说明 | 是否需玩家参与 |
 |---|---|---|
 | **遥测** | 每场战斗的每次命中/阵亡/溃逃/10 秒快照 → JSONL | 正常打即可（也可由 AI 推演自动产生） |
-| **AI 推演** | 由 MCP 触发，游戏自动开一场**无玩家**的战斗、10 倍速跑完、返回战果 | 不需要手打；只需停在自定义战斗界面 |
+| **AI 推演** | 由 MCP 触发，游戏自动开一场**无玩家**的战斗、10 倍速跑完、返回战果 | 不需要手打；只需停在**官方自定义战斗界面**（v0.8.14 起只认它 —— 自建面板已删），AI 可用 `bl_open_ui` 自己走进去；加 `spectate=true` 让镜头进上帝视角观战 |
 
 控制通道 = **本地文件 IPC**（`commands/pending/` ⇄ `commands/done/`），不是 HTTP：
 无端口、无 URL ACL 提权、无防火墙问题，且崩溃后请求/响应都留痕。协议 v1 的信封、响应不变式、
 会话身份（`runToken` + `processStartedUtc`）、版本硬校验、`outcomeUncertain` 不盲重试等规范，
 抄自 Bannerlord Coop 团队的 `CoopMcpServer` / `LiveTestProtocol`（见 `阶段2-复用尽调报告.md`）。
 
-**请求里的 `method` 只有这 6 个**（`src/CommandPump.cs`；名字**不是** CLI 子命令名 ——
+**请求里的 `method` 只有这 9 个**（`src/CommandPump.cs`；名字**不是** CLI 子命令名 ——
 直接手写请求时容易猜错，v0.8.10 真机回归实测踩到 `unknown_method: start`）：
 
 | method | 参数 | 等价入口 |
 |---|---|---|
 | `ping` | — | `bl_cmd.py ping` / MCP `bl_status` |
 | `status` | — | `bl_cmd.py status` / MCP `bl_battle_status` |
-| `start_battle` | `attackerTroop`/`defenderTroop`/`attackerCount`/`defenderCount`/`scene`/`durationCapSec`/`orders`/`playerSide`/`dummySide`/`dummyArmor*`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`/`allowAnyState`/`rounds`/`roundEndAlive`/`roundSwap`/`roundSpawnAttacker`/`roundSpawnDefender`/`randomSeed`/`attackerGroups`/`defenderGroups` | `bl_cmd.py start` / MCP `bl_start_battle` |
+| `start_battle` | `attackerTroop`/`defenderTroop`/`attackerCount`/`defenderCount`/`scene`/`durationCapSec`/`orders`/`playerSide`/`spectate`/`dummySide`/`dummyArmor*`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`/`allowAnyState`/`rounds`/`roundEndAlive`/`roundSwap`/`roundSpawnAttacker`/`roundSpawnDefender`/`randomSeed`/`attackerGroups`/`defenderGroups` | `bl_cmd.py start` / MCP `bl_start_battle` |
 | `abort` | — | `bl_cmd.py abort` / MCP `bl_abort` |
 | `fast_forward` | `enabled`（`"true"`/`"false"`） | `bl_cmd.py fastforward` / MCP `bl_fast_forward` |
 | `speed` | — | `bl_cmd.py speed` |
+| `list_ui` | `scenesMode`（可选，all/battle/siege/village/lordsHall/naval/navalRaid）、`sceneLimit`（可选，0=全吐） | `bl_cmd.py list-ui [--mode …] [--limit N]` / MCP `bl_list_ui` |
+| — | 场景表来源：**扫各模块 `SubModule.xml` 的 `<XmlName id="CustomBattleScenes">` 声明后直接读 XML**（纯文件读 + 缓存 + 切换窗口内降级），不再走引擎的 `GetMergedXmlForManaged`。见 `PROGRESS.md` §二十六 |
+| `open_ui` | `uiId`（可选，缺省 = `CustomBattle` 官方自定义战斗界面） | `bl_cmd.py open-ui [--ui-id …]` / MCP `bl_open_ui` |
+| `close_ui` | `state`（可选，白名单**只有** `CustomBattleState`） | `bl_cmd.py close-ui [--state …]` / MCP `bl_close_ui` |
+
+> ⚠️ **参数名不能叫 `id`**：`src/Jmini.cs` 是**扁平** JSON 读取器（按"文本里第一个 `"key"`"取值），
+> 而请求信封自带 `"id"`（16 位 hex 的请求 id）⇒ `Jmini.Str(raw,"id")` 恒读到信封那个值。
+> v0.8.12 真机实测踩到：`open_ui` 不带参数时被解析成 `unknown_ui: 没有这个入口 id: 85a0d3d3fba54d4e`。
+> **离线自测结构上抓不到**这类缺陷：测试用的假游戏端用真 JSON 解析（认嵌套），天然没有这个碰撞。
+
+> `list_ui` / `open_ui` / `close_ui` 是 **v0.8.12 起的 agent 正门**：走官方
+> `Module.CurrentModule.ExecuteInitialStateOptionWithId(id)` 唤起游戏内界面，而不是让 AI 去抢鼠标
+> （原型轮实测：合成鼠标输入不可达我们自己的层，根因是 Gauntlet 事件命中顺序，见
+> `docs/prototype-ui-probe-2026-09-25.md`）。引擎那个 API 本身**静默失败**（找不到 id 不报错、无返回值），
+> 所以我们先 `GetInitialStateOptionWithId` 判存在，把"找不到"变成显式错误 `unknown_ui`。
+>
+> **v0.8.14 起不再自建界面**：官方自定义战斗本身就是完整入口（战斗 / 围攻 / 村庄 / 海战 / 海上掠夺
+> 五种模式 + 玩家类型 + 选择攻守方 + 全套地图参数），复刻属重复建设 ⇒ 面板与主菜单入口注册已删。
+> 分工定格：**人用官方界面玩，AI 用端口调**。`list_ui` 同时吐官方场景全表
+> （合并表 `CustomBattleScenes`，含模式/地形/目录是否存在）。
 
 > 布尔参数一律发**字符串** `"true"`/`"false"`（C# 侧走 `Jmini.Str`）；`dummyArmor*` 走数字（`Jmini.Num`）。
+
+---
+
+### 两个单元（同一个包，v0.8.12 起）
+
+**一个 mod 包 = 两个单元**，玩家与 AI 各取所需、共用同一条后端：
+
+| 单元 | 位置 | 谁读它 | 入口 |
+|---|---|---|---|
+| **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 24 个（`bl_open_ui` / `bl_start_battle` / …） |
+
+关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
+并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
+两边最终落到同一条官方开战链。界面上能做而端口做不到的，只剩"用鼠标点选"这个动作本身。
+（`custom_battle_scenes.xml` / `naval_custom_battle_scenes.xml` 是**官方**的表，我们只读不写。）
+
+`tools\*.py` 是单元 B 的**唯一真相源**，`build.ps1 -Deploy` 把它整份复制进 `Modules\BlBridge\mcp\`；
+`mcp\manifest.json` 的 `version` 与 `SubModule.xml` 一样从 `BridgeConfig.Version` 自动同步。
 
 ---
 
@@ -39,6 +78,11 @@
 ```
 BlBridge/
   module/SubModule.xml            模块清单（<Id>=BlBridge，DLLName=BlBridge.dll）
+  module/mcp/README.md            单元 B 的入口文档（给 AI 的安装说明）
+  module/mcp/manifest.json        MCPB 0.3 形态清单（version 由构建同步）
+  src/UiEntry.cs                  游戏内 UI 入口 + 控制端口侧（list_ui / open_ui / close_ui）
+  src/CustomBattleScenes.cs       读官方场景合并表（模式 / 地形 / 目录是否存在）—— list_ui 用它吐全表
+  src/SpectatorWatch.cs           上帝视角：实现官方 ICameraModeLogic，返回 SpectatorCameraTypes.Free
   src/SubModule.cs                入口：目录/状态文件；挂遥测行为；每帧泵命令；卸载钩子（cleanExit）
   src/TelemetryBehavior.cs        命中/阵亡/溃逃/快照 → JSONL（惰性打开文件）
   src/ScenarioRunner.cs           AI 对 AI 开战 + 状态机探针 + 10 倍速（照官方 CPUBenchmark 模式）
@@ -55,7 +99,7 @@ BlBridge/
   build.ps1                       一键编译 + 部署（查游戏进程 + 备份旧 DLL + SHA256 + 写构建清单）
   blbridge.example.json           MCP 侧配置模板
   blbridge_game.example.json      游戏端配置模板
-  tools/bl_mcp.py                 MCP server（stdio，15 个工具）
+  tools/bl_mcp.py                 MCP server（stdio，24 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
@@ -118,7 +162,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 
 ---
 
-## 六、MCP 工具（15 个）
+## 六、MCP 工具（24 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -128,15 +172,26 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 | `bl_read_events` | 读原始事件（按类型过滤、分页） | 否 |
 | `bl_read_config` | 回读 Warbandlord 配置 | 否 |
 | `bl_apply_config` | 改 Warbandlord 配置（自动备份 + XML 校验） | 否（改完需重启游戏） |
+| `bl_rts_config` | 回读 **RTSCamera** 配置（攻城相机高度 / 自由相机 / 抬升触发） | 否 |
+| `bl_apply_rts_config` | 写 RTSCamera 配置（自动备份 + 校验 + 回读核对）；支持预设 `siege-god`/`free-always`/`elevated-always`/`god-full`。**实测改完下一场就生效**（它每场开始读一次配置；但它退出时会用内存值覆写文件 ⇒ 要"永久"得在游戏内 MCM 改） | 否 |
 | `bl_battle_status` | 推演状态机 + 双方存活数 + 战果 | 是 |
-| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`） | 是 |
+| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头；**`rtsPreset` = 开战前套用 RTSCamera 预设**） | 是 |
 | `bl_wait_for_state` | 等状态（idle/loading/running/ended/error） | 是 |
 | `bl_abort` | 中止当前推演 | 是 |
+| `bl_list_ui` | **列出游戏内可进入的入口** + **官方自定义战斗场景全表**（模式 / 地形 / 是否存在；可按 `scenesMode` 过滤） | 是 |
+| `bl_open_ui` | **唤起游戏内界面**（默认 = 官方自定义战斗；`uiId` 可换任意官方入口）—— agent 正门，不用抢鼠标 | 是 |
+| `bl_close_ui` | 从官方自定义战斗界面返回主菜单（官方 `PopState` 同路径；白名单只有 `CustomBattleState`） | 是 |
 | `bl_fast_forward` | 开关战斗加速（10 倍速，**对自己手打的战斗也生效**） | 是 |
-| `bl_build_check` | 核对 源码/构建产物/部署文件/进程内 DLL 是否一致 | 是 |
+| `bl_build_check` | 核对 源码/构建产物/部署文件/进程内 DLL 是否一致（从部署副本跑时如实标注"源码段跳过"） | 是 |
 | `bl_config` | 显示有效配置与来历（env / 文件 / 默认），并列出配置文件里的非法项 | 是 |
 | `bl_run_batch` | **按计划跑 N 场**（阶段 2④「一条命令跑 N 场」；支持换边双跑；`dryRun` 只回计划不碰游戏） | 是 |
 | `bl_batch_report` | **A/B 对比报告**（主指标 = 满编窗口；强制 95%CI；样本 < 3 局时拒绝下结论） | 否 |
+| `bl_lookup_troop` | 查兵种 id 是否存在（走 BannerlordSage 索引；第三方模组兵种不在索引里属正常） | 否 |
+| `bl_launch_game` | 无人值守启动游戏（BLSE + 自动应答模态弹窗；宿主会回收本会话进程树，见原型结论文档） | 否 |
+| `bl_desktop_windows` | 列窗口（结构化 JSON，**物理**坐标，已 DPI-aware） | 否 |
+| `bl_desktop_screenshot` | 截图（可叠带标签网格，按格定位） | 否 |
+| `bl_desktop_click` | 按格点击（`gridhand` 后端） | 否 |
+| `bl_desktop_key` | 发送按键 | 否 |
 
 ### 战斗加速通道（v0.3.0 新增）
 
@@ -382,10 +437,14 @@ manifest_missing         旧版部署，没有清单
 
 ## 九、已验证 / 未验证
 
+> ⚠️ **本节是历史记录**（写在 v0.1.0–v0.5.0 时代，下面的"尚未验证"清单早已过时）。
+> **当前的验证状态以 `PROGRESS.md` 与 `docs/` 下的排查/结论文档为准**，本节只保留"当时验证了什么"这一层信息；
+> 数字类计数不再手写（会漂移），改为给出可复算的出处。
+
 **已本地验证（无需游戏）**
-- Roslyn 编译通过：**14 个源文件**（DLL 体积以 `out/BlBridge.manifest.json` 的 `dllBytes` 为准，不再手写数字避免漂移），已部署
+- Roslyn 编译通过：全部 `src\*.cs`（源文件数以 `out/BlBridge.manifest.json` 的 `sourceCount` 为准，DLL 体积以 `dllBytes` 为准 —— 不再手写数字避免漂移），已部署
 - **离线单测 69 项**（`tools/jsontest/build_and_run.ps1`）：JSON 读取器（含"字符串值劫持键查找"）、请求闸门、探针判定规则、构建身份、配置校验
-- **Python 自测 52 项**（`tools/bl_selftest.py`）：分析器（血量偏差 0.0%）、MCP 协议（15 工具）、控制通道、
+- **Python 自测 244 项断言**（`tools/bl_selftest.py`，2026-09-25 实测；`[OK]` 计数可复算）：分析器（血量偏差 0.0%）、MCP 协议（24 工具）、控制通道（含 `list_ui`/`open_ui`/`close_ui` 往返）、
   **构建链四段判定**、**配置加载即校验**、**崩溃判定**、真实 config.xml 回读与 dry-run
 - `bl_build_check` 在真实目录实跑：`builtVersion` 与 `deployedSha256` 与清单一致（游戏未启动时为 `game_offline`）
 

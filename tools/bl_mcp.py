@@ -34,6 +34,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bl_analyze  # noqa: E402
 import bl_common  # noqa: E402
+import bl_rts  # noqa: E402
 import bl_sage  # noqa: E402
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -329,14 +330,28 @@ def build_check(src_dir=None, mod_dir=None):
       game_not_restarted        进程内是更早的 DLL（磁盘已更新）→ 必须重启游戏
       game_running_other_build  进程内 DLL 与磁盘上的不同 → 部署路径存疑
       game_offline              游戏没在运行，无法核对进程内身份（文件链条可能仍然一致）
+
+    v0.8.12：本函数从**部署副本**（<游戏根>\\Modules\\BlBridge\\mcp\\bl_mcp.py）跑时，
+    旁边没有 src/，源码段会跳过并在 `sourceCheck` 里如实标注（不再报一个不存在的 srcDir）。
     """
     src = src_dir or source_dir()
     mod = mod_dir or module_dir()
     dll = os.path.join(mod, "bin", "Win64_Shipping_Client", "BlBridge.dll")
     mf = os.path.join(mod, "build_manifest.json")
 
-    out = {"code": "ok", "detail": "", "srcDir": src, "moduleDir": mod,
+    out = {"code": "ok", "detail": "", "moduleDir": mod,
            "deployedDll": dll, "manifestPath": mf}
+    has_src = os.path.isdir(src)
+    if has_src:
+        out["srcDir"] = src
+    else:
+        # v0.8.12 双分包：部署副本（<游戏根>\Modules\BlBridge\mcp\bl_mcp.py）旁边没有 src/。
+        # 如实标注并跳过源码段，而不是把 <module>\src 这个**不存在的目录**当成源码目录报出去
+        # （报告里出现一个查无此处的路径，会让整个结论没法信 —— 见 AGENTS.md §四）。
+        out["sourceCheck"] = "skipped_no_src_dir"
+        out["sourceCheckNote"] = ("本副本旁边没有 src/（部署副本）：源码那一段跳过，"
+                                  "只核对「构建产物 = 部署文件 = 进程内 DLL」；"
+                                  "要核源码链请在仓库 tools\\ 下跑同一命令")
 
     if not os.path.isfile(dll):
         out["code"] = "no_deployed_dll"
@@ -365,7 +380,7 @@ def build_check(src_dir=None, mod_dir=None):
                          % (deployed[:16], (man.get("dllSha256") or "")[:16]))
         return out
 
-    if os.path.isdir(src):
+    if has_src:
         want = man.get("sources") or {}
         changed, have = [], set()
         for name in sorted(os.listdir(src)):
@@ -416,7 +431,8 @@ def build_check(src_dir=None, mod_dir=None):
         out["code"] = "game_running_other_build"
         out["detail"] = "游戏进程里的 DLL 与磁盘上的不同（进程 %s）—— 请确认游戏读的是这个模块目录" % loaded
         return out
-    out["detail"] = "四段一致：源码 = 构建产物 = 部署文件 = 进程内 DLL（版本 %s）" % out.get("builtVersion")
+    out["detail"] = ("%s：源码 = 构建产物 = 部署文件 = 进程内 DLL（版本 %s）" % (
+        "四段一致" if has_src else "三段一致（源码段跳过）", out.get("builtVersion")))
     return out
 
 
@@ -728,6 +744,33 @@ TOOLS = [
             "required": ["edits"], "additionalProperties": False},
     },
     {
+        "name": "bl_rts_config",
+        "description": ("回读 **RTSCamera** 的配置（Documents\\...\\Configs\\RTSCamera\\RTSCameraConfig.xml）。"
+                        "只读。用来查'攻城相机高度/自由相机/抬升触发'这些开关现在是什么值。"
+                        "我们不改它的代码，只当它的参数管理员（见 bl_apply_rts_config）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "keys": {"type": "array", "items": {"type": "string"},
+                     "description": "只读这些键（如 ElevatedHeightInSiege）；不传返回全部"},
+            "presets": {"type": "boolean", "description": "true = 顺带回显可用预设名"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_apply_rts_config",
+        "description": ("写 RTSCamera 配置（自动备份 + 写后 XML 校验 + 回读核对）。"
+                        "**实测：改完无需重启，下一场战斗就生效**（RTSCamera 每场读一次配置）；"
+                        "但它运行中会把自己的配置覆写回去 ⇒ 想要「永久」请在游戏内 MCM 改。"
+                        "可传 preset（siege-god / free-always / elevated-always / god-full）或 edits。"),
+        "inputSchema": {"type": "object", "properties": {
+            "preset": {"type": "string",
+                       "description": "预设名：siege-god(攻城抬升10) / free-always / elevated-always / god-full"},
+            "edits": {"type": "array", "items": {"type": "object", "properties": {
+                "key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]},
+                "description": "逐键写入，如 [{\"key\":\"ElevatedHeightInSiege\",\"value\":\"10\"}]"},
+            "dry_run": {"type": "boolean", "description": "只预览不写入"},
+            "allow_missing": {"type": "boolean", "description": "允许写入表里不存在的键（默认 false）"}},
+            "additionalProperties": False},
+    },
+    {
         "name": "bl_battle_status",
         "description": "查询游戏内推演状态机（idle/loading/running/ended/error）、进度（双方存活数）与最近一次结果",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -735,7 +778,10 @@ TOOLS = [
     {
         "name": "bl_start_battle",
         "description": ("让游戏开一场**无玩家**的 AI 对 AI 战斗（10 倍速）。"
-                        "前提：游戏需停在「自定义战斗」界面。返回 accepted 后请用 bl_wait_for_state 等 ended。"),
+                        "前提：游戏需停在官方「自定义战斗」界面（v0.8.14 起只认它 —— 自建面板已删）；"
+                        "用 bl_open_ui（默认目标就是它）可让 agent 自己走进去，不必靠人点。"
+                        "模式由 scene 决定：城池场景自动走官方 siege mission（围攻）。"
+                        "返回 accepted 后请用 bl_wait_for_state 等 ended。"),
         "inputSchema": {"type": "object", "properties": {
             "attackerTroop": {"type": "string", "description": "攻方兵种 id，如 imperial_legionary"},
             "attackerCount": {"type": "integer", "description": "攻方人数，默认 20"},
@@ -749,6 +795,15 @@ TOOLS = [
                                        "default=引擎默认战术，仅用于 A/B 对照")},
             "playerSide": {"type": "string", "enum": ["attacker", "defender"],
                            "description": "谁被标记为玩家侧，仅用于排查该标记是否带来系统性偏差，默认 attacker"},
+            "spectate": {"type": "boolean",
+                         "description": ("兜底观战镜头（v0.8.14，默认 false）。true = 挂官方 "
+                                         "ICameraModeLogic 让镜头走自由观察相机。"
+                                         "⚠️ 装了 RTSCamera 时野战会被它抢先（无效果），所以**优先用 rtsPreset**；"
+                                         "这个开关留给「没装 RTSCamera」的机器做兜底")},
+            "rtsPreset": {"type": "string",
+                          "description": ("开战前套用 RTSCamera 预设（B 方案）：siege-god = 攻城也抬升视角；"
+                                          "free-always / elevated-always / god-full。"
+                                          "实测改完无需重启即对本场生效；会先备份配置文件")},
             "dummySide": {"type": "string", "enum": ["none", "attacker", "defender"],
                           "description": "不朽靶场（v0.8.0）：把该方设为永不倒下的靶子，默认 none"},
             "freezeDummies": {"type": "boolean",
@@ -799,6 +854,45 @@ TOOLS = [
         "name": "bl_abort",
         "description": "中止当前正在进行的推演（调用引擎的 Mission.EndMission，走官方结束路径）",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_ui",
+        "description": ("列出游戏内所有可进入的入口（初始状态选项）+ 当前激活状态 + **官方自定义战斗场景全表**"
+                        "（合并表 CustomBattleScenes，含模式：战斗/围攻/村庄/领主大厅/海战/海上掠夺，"
+                        "以及地形、场景等级、目录是否真的存在）。只读。"
+                        "用它替代\"靠记忆猜 id/场景名\"：id、名字与场景表都是引擎当场给的。"),
+        "inputSchema": {"type": "object", "properties": {
+            "scenesMode": {"type": "string",
+                           "enum": ["all", "battle", "siege", "village", "lordsHall", "naval", "navalRaid"],
+                           "description": "只返回某一模式的场景（默认 all）"},
+            "sceneLimit": {"type": "integer",
+                           "description": "最多返回多少行场景（默认 0 = 全吐；全表 314 行约 35 KB）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_open_ui",
+        "description": ("走官方正门唤起一个游戏内界面（默认 = 官方自定义战斗界面，uiId=CustomBattle）。"
+                        "v0.8.14 起不再有自建面板 —— 官方界面本身就是完整入口"
+                        "（战斗/围攻/村庄/海战/海上掠夺 + 玩家类型 + 选择攻守方 + 全套地图参数）。"
+                        "⚠️ 入口动作是 fire-and-forget（跨帧加载）：返回 requested=true 只代表已触发，"
+                        "请用 bl_list_ui 看 activeState 是否真的变了（约 1~5 秒）。"
+                        "⚠️ 只在**主菜单**可用：游戏已加载时执行它会让状态栈卡在 GameLoadingState（真机实测过）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "uiId": {"type": "string",
+                     "description": ("入口 id，默认 CustomBattle；全部可用 id 见 bl_list_ui。"
+                                     "⚠️ 不接受也不要叫 `id`：控制通道的 JSON 读取器是扁平的，"
+                                     "`id` 会被信封里那个请求 id 顶掉（v0.8.12 真机踩过）")}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_close_ui",
+        "description": ("从官方自定义战斗界面回主菜单（与官方 CustomBattle 的「返回」同一路径：PopState）。"
+                        "open_ui 进去了就用它出来。白名单**只有** CustomBattleState："
+                        "别的状态一律返回 bad_state —— 不会去 pop 引擎的任意状态。"),
+        "inputSchema": {"type": "object", "properties": {
+            "state": {"type": "string", "enum": ["CustomBattleState"],
+                      "description": "要离开的状态，默认且仅支持 CustomBattleState"}},
+            "additionalProperties": False},
     },
     {
         "name": "bl_fast_forward",
@@ -1138,6 +1232,29 @@ def call_tool(name, args):
             return {"ok": False, "error": "edits 不能为空"}
         return apply_config(edits, dry_run=bool(args.get("dry_run")))
 
+    # ── v0.8.15：RTSCamera 配置（B 方案：只当它的参数管理员，不碰它的代码）──────
+    if name == "bl_rts_config":
+        try:
+            values = bl_rts.read(args.get("keys"))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "path": bl_rts.config_path()}
+        out = {"ok": True, "path": bl_rts.config_path(), "values": values}
+        if args.get("presets"):
+            out["presets"] = dict(bl_rts.PRESETS)
+        return out
+
+    if name == "bl_apply_rts_config":
+        try:
+            if args.get("preset"):
+                return bl_rts.apply_preset(str(args["preset"]), dry_run=bool(args.get("dry_run")))
+            edits = args.get("edits") or []
+            if not edits:
+                return {"ok": False, "error": "需要 preset，或非空的 edits"}
+            return bl_rts.apply(edits, dry_run=bool(args.get("dry_run")),
+                                allow_missing=bool(args.get("allow_missing")))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e), "path": bl_rts.config_path()}
+
     if name == "bl_build_check":
         return {"ok": True, "buildCheck": build_check()}
 
@@ -1168,6 +1285,10 @@ def call_tool(name, args):
             "orders": args.get("orders") or "charge",
             "playerSide": args.get("playerSide") or "attacker",
         }
+        # v0.8.14：上帝视角（只在开启时才写进请求 —— 保持旧调用的请求字节逐字不变，
+        # 这个项目的"离线自测抓不到、真机才炸"的坑大多来自请求面悄悄漂移）。
+        if args.get("spectate"):
+            params["spectate"] = True
         # ── v0.8.10：补齐 CLI 侧早已支持的参数（真机回归 F7：MCP 的参数面窄于 CLI，
         #          导致多轮与多兵种组走不了 MCP）────────────────────────────────
         # 校验口径与 bl_cmd.py **逐字对齐**：组 DSL 在本地先校验，非法绝不透传
@@ -1236,18 +1357,29 @@ def call_tool(name, args):
                         "hint": ("索引只覆盖官方 XML；若该兵种确实来自第三方模组，"
                                  "用 skipTroopCheck=true 跳过校验。可用 bl_lookup_troop 查兵种")}
 
+        # v0.8.15（B 方案）：开战前按需套用 RTSCamera 预设。必须在发请求**之前**做 ——
+        # 实测 RTSCamera 每场战斗开始时读一次自己的配置，所以"改完立刻开战"就对本场生效
+        # （也正因为它运行中会覆写配置，这一步不能提前太久）。
+        rts_result = None
+        if args.get("rtsPreset"):
+            try:
+                rts_result = bl_rts.apply_preset(str(args["rtsPreset"]))
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": "rtsPreset 套用失败：%s" % e}
+
         resp, err = send_command("start_battle", params, timeout=60)
         if err:
-            return {"ok": False, "error": err}
+            return {"ok": False, "error": err, "rtsConfig": rts_result}
         body = resp.get("result") or {}
         if not resp.get("ok"):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "start_battle 被拒绝",
                     "code": e.get("code"), "outcomeUncertain": e.get("outcomeUncertain"),
-                    "response": resp}
+                    "rtsConfig": rts_result, "response": resp}
         return {"ok": True, "state": body.get("state"), "accepted": body.get("accepted"),
                 "buildCheck": bc,
                 "troopCheck": troop_check,
+                "rtsConfig": rts_result,
                 "buildWarning": (bc.get("detail") if bc.get("code") == "stale_source" else None),
                 "hint": "用 bl_wait_for_state(state=ended) 等它打完", "response": resp}
 
@@ -1308,6 +1440,50 @@ def call_tool(name, args):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "abort 失败", "response": resp}
         return {"ok": True, "response": resp}
+
+    # ── v0.8.12：游戏内 UI 入口（agent 正门）────────────────────────────
+    # 设计依据：AI 不该靠"模拟鼠标"操作 UI（原型轮实测：同一套合成输入，官方主菜单可点、
+    # 我们这层因 Gauntlet 事件命中顺序不可点）。正门 = Module.ExecuteInitialStateOptionWithId。
+    if name == "bl_list_ui":
+        ui_params = {}
+        if args.get("scenesMode"):
+            ui_params["scenesMode"] = str(args["scenesMode"])
+        if args.get("sceneLimit"):
+            ui_params["sceneLimit"] = int(args["sceneLimit"])
+        resp, err = send_command("list_ui", ui_params, timeout=15)
+        if err:
+            return {"ok": False, "error": err}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_ui 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_open_ui":
+        params = {}
+        if args.get("uiId"):
+            # 参数名必须是 uiId：控制通道的 Jmini 是扁平读取器，`id` 会被请求信封里的 id 顶掉
+            params["uiId"] = str(args["uiId"])
+        resp, err = send_command("open_ui", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "open_ui 被拒绝", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp,
+                "hint": ("入口动作已触发（fire-and-forget）。用 bl_list_ui 看 activeState 是否变成 "
+                         "CustomBattleState（官方自定义战斗界面）；不在主菜单时本调用会被主菜单闸门拒绝")}
+
+    if name == "bl_close_ui":
+        params = {}
+        if args.get("state"):
+            params["state"] = str(args["state"])
+        resp, err = send_command("close_ui", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "close_ui 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
 
     # ── 阶段 2④：批量跑批 + A/B 对比报告 ────────────────────────────────
     # ⚠️ 必须捕获子进程输出：MCP 走 stdio，任何漏到 stdout 的东西都会破坏 JSON-RPC。

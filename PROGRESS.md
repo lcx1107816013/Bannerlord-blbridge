@@ -2001,3 +2001,367 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 
 **看门狗阈值 300 s 的实测依据**：本轮每批**总耗时 17–25 秒（含 loading）** ⇒ 400 组/场的 loading 很快，
 **120 s 本来也够**；300 s 是按用户裁定取的保守值（余量更大，代价是真卡死要等更久才兜住）。
+
+---
+
+## 二十三、游戏内 UI 入口 + 双分包（v0.8.12，2026-09-25，分支 `prototype/ui-probe`）
+
+**本轮定位（用户裁定）**：选项 **A + B + C 一起做**，并明确最终形态 —— **一个 mod 包 = 两个单元**：
+单元 A（mod 包，游戏/启动器读；玩家用界面、AI 用控制端口）+ 单元 B（**MCP 包，放在 mod 包内**，
+AI 读完它的介绍即可加载，从而既能像玩家一样用界面、又能直接连 mod 的控制通道）。
+实施计划（本轮产物）：`docs/superpowers/plans/2026-09-25-ui-entry-plan.md`。
+
+### 0. 现状核实 + 一处记载更正（本轮实测）
+
+| 项 | 值 |
+|---|---|
+| 仓库 / 分支 | `C:\Users\LCGX\CodeBuddy\20260923171333\BlBridge`，`prototype/ui-probe` @ `543fe57`，工作区干净 |
+| 对照分支 | `main` @ `657b982`（攻城轮，无 UI 相关代码） |
+| **更正** | `docs/prototype-ui-probe-2026-09-25.md:6` 原写"结论已回填到 `PROGRESS.md` 的对应章节与后续实施计划"，**实测不成立**（本文件当时无 UI 章节、`docs/superpowers/plans/` 无 UI 计划）。本轮补齐：本 §二十三 + 上述计划文件；该行已就地更正 |
+
+**原型轮结论（此前只存在于 `docs/`，本轮补记）**：5 个"猜不出来"的问题全部真机答完，其中第 5 问（按钮点不动）
+的根因是 **prefab 的 `ButtonWidget` 缺 `DoNotPassEventsToChildren="true"`** —— 子 `TextWidget` 抢走
+`MousePressed/MouseReleased`，`HandleClick()` 永不执行 ⇒ `Command.Click` 静默不触发（真人点与合成点一样没反应）。
+修复后真机 `ExecutePing: clicks=1..24`。两条环境事实：**宿主会回收本会话启动的游戏进程树**（无人值守启动须走计划任务）、
+**`Prefab` 是 XML（注释里不得出现 `--`）**。
+
+### 1. 本轮落地（W1–W9，逐项带判据）
+
+| # | 改动落点 | 判据 | 状态 |
+|---|---|---|---|
+| W1 | `src/UiEntry.cs`（新增）+ `src/CommandPump.cs` 分发三个新 method | `list_ui` / `open_ui` / `close_ui`；**入口 id 不存在必须报 `unknown_ui`**（官方 `ExecuteInitialStateOptionWithId` 是静默失败，我们刻意改成显式错误） | ✅ 真机已过（§5） |
+| W2 | `src/ScenarioRunner.cs`：`IsBattleSetupState()` 白名单 + `ActiveGameStateName()` | 停在自有面板态时 `start_battle` 应 `accepted`；白名单外仍必须 `wrong_state`（旧行为 `CustomBattleState` 必须仍通过） | ✅ 真机已过（§5 ③④） |
+| W3 | `src/BattleSetupScreen.cs` + `src/BattleSetupVM.cs` + `module/GUI/Prefabs/BlBridge/BattleSetupScreen.xml` | 面板可开、按钮可点、能开一场战斗 | ✅ 真机已过（§5 ②⑤，含真人点击） |
+| W4 | VM 的「开始战斗」构造与 MCP **同形**请求并调用同一个 `ScenarioRunner.Start` | 同一请求经 UI 与经 MCP 各跑一次，响应字段同形且都 `accepted` | ✅ 真机对照已做（§5 ⑤，「`requestId=ui`」即"走哪条路"的证据） |
+| W5 | `tools/bl_mcp.py`（+3 工具，21→**24**）、`tools/bl_cmd.py`（+`list-ui`/`open-ui`/`close-ui`）、`README.md`（method 表 6→**9**、工具表补齐到 24）、`tools/bl_selftest.py`（+5 断言） | `bl_selftest` 全绿 | ✅ 已核实 |
+| W6 | **双分包**：`build.ps1 -Deploy` 新增 `mcp/` 子包部署（`module/mcp/{README.md,manifest.json}` + `tools\*.py` 全量复制，`manifest.json` 的 version 从 `BridgeConfig.Version` 同步）；`tools/register_mcp.py` 改为**自定位** | 部署后从 `Modules\BlBridge\mcp\` 跑 `register_mcp.py --show` 得到 `gameDirSource: self:deployed-in-module`；`bl_cmd.py buildcheck` 可跑 | ✅ 已核实（见 §2） |
+| W7 | 原型退役（删 `ProtoUi.cs` / `ProtoUiScreen.xml` / `SubModule.cs` 那一行） | —— | **刻意未做**：真机通过后再删（先证新屏可跑，再删旧的） |
+| W8 | 真机验收 | 见 §5 结果 | ✅ 7 条判据全部通过（+2 条反向判据） |
+| W9 | 文档同步（本文件 / README / 计划文件） | —— | ✅ |
+
+**顺带修掉的两处既有问题**：① `bl_build_check` 从**部署副本**跑时会报出一个并不存在的 `srcDir`
+（`<module>\src`）—— 现改为如实标注 `sourceCheck: skipped_no_src_dir`，并把结论降级为"三段一致"；
+② `ScenarioRunner` 里"必须停在自定义战斗界面"的报文补上"或用 `open_ui` 唤起面板"，
+且**该前置条件从此不再必须由人完成**（`open_ui id=CustomBattle` 官方入口 id 见下一段）。
+
+**本轮取证（一手，非推演）**：
+
+- `Module.GetInitialStateOptions()`(Module.cs:1550) / `GetInitialStateOptionWithId()`(1555) /
+  `ExecuteInitialStateOptionWithId()`(1567，`?.DoAction()` **静默失败**)；`InitialStateOption` 公开成员
+  `Id/Name/OrderIndex/IsHidden/IsDisabledAndReason/EnabledHint/DoAction`（InitialStateOption.cs:6-38）。
+- 官方入口 id：`CustomBattle`(5000) / `Multiplayer`(9997) / `Options`(9998) / `Credits`(9999) / `Exit`(10000) / `Editor`(-1)；
+  另有 `SandBoxNewGame`（NavalDLC 在调）。
+- 返回主菜单的官方路径：`CustomBattleVM.ExecuteBack()` → `Game.Current.GameStateManager.PopState(0)`（反编译 CustomBattleVM.cs:693）——
+  `close_ui` 与面板上的「返回主菜单」都走它，**不去 pop 别人的状态**。
+- `.mcpb` 规范（联网核实）：manifest 0.3 必填 `manifest_version/name/version/description/author/server`；
+  `mcp_config` 支持 `${__dirname}` 变量替换；官方**推荐 Node**（宿主自带），Python 走 `server.type: python|uv`；
+  **agent session 默认不支持 bundle** ⇒ 注册脚本仍是主路径。同类先例：Minecraft MCP Mod / MC-MCP / 网易 ModPC / rimcp-v2 / unity-mcp。
+
+### 2. 离线验证（全部实跑，可复现）
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 编译 + 部署 | `powershell -ExecutionPolicy Bypass -File .\build.ps1 -Deploy` | ✅ 24 个源文件 → **111 KB**；**最终判定版 `dll sha256 = AD425E547DB9FD2F…`**（真机过程中共部署 3 轮，每轮修掉一个真机缺陷，见 §3b）；部署 `GUI/`(2) + `ModuleData/`(2) + **`mcp/`(21 文件, ~366 KB)**；每轮旧 DLL 均自动备份（最近一个 `BlBridge.dll.bak_20260925_192612`），模块版本同步为 v0.8.12 |
+| Python 自测 | `python tools\bl_selftest.py` | ✅ **245 项断言全过**（含新增 6 项：工具数 24、`list_ui`/`open_ui`(带 uiId / 不带 uiId)/`close_ui`(默认 / 带 state) 往返） |
+| C# 离线单测 | `tools\jsontest\build_and_run.ps1` | ✅ 全部通过 |
+| 编码体检 | `python tools\check_repo_encoding.py` | ✅ 73 个跟踪文件全部 UTF-8 无 BOM + LF（新文件已单文件核验行尾） |
+| 时钟同源 | `python tools\bl_check_clock_reset.py` | ⚠️ **全量**：11 份历史文件仍报 FAIL（**对照组按预期成立**）；`--since 18:47:37`：无新产物 ⇒ `exit 2`（数据不足）——本轮的"新产物 0 失败"那半边**要等真机跑完才有**，不得当作已验 |
+| 双分包零配置 | `python "<游戏根>\Modules\BlBridge\mcp\register_mcp.py" --show` | ✅ `gameDirSource = self:deployed-in-module`（上溯三级自定位）；`bl_cmd.py buildcheck` 可跑 |
+
+### 3. 真机结果（2026-09-25 19:18–19:30，三轮启动；最终判定版 `dll sha256 = AD425E547DB9FD2F…`）
+
+启动方式：**Windows 计划任务**（`Register-ScheduledTask -Principal (LogonType Interactive)` + `Start-ScheduledTask`），
+理由见原型结论文档 §七（宿主会回收本会话启动的进程树）。每轮都是一次完整闭环，判据逐条对照：
+
+| # | 步骤 | 结果 | 证据 |
+|---|---|---|---|
+| ① | 主菜单 `bl_cmd.py list-ui` | ✅ | 11 个入口：官方 6 个（含 `CustomBattle` 自定义战斗）+ 我们的 `BlBridgeBattleSetup`（**中文名"BlBridge 战场面板"渲染正常**）+ 原型探针；**113 个 `battle_*` 场景** |
+| ② | `bl_cmd.py open-ui --ui-id CustomBattle` | ✅ | `requested:true` → 轮询到 `activeState=CustomBattleState` ⇒ **"必须由人点进 CustomBattle"这个前提被取消**，agent 自己走进去 |
+| ③ | `bl_cmd.py close-ui --state CustomBattleState` | ✅ | `closeRequested:true` → `activeState==""`（回主菜单）。**这条是本轮新增能力**：没有它 agent 进去就出不来 |
+| ④ | `bl_cmd.py open-ui`（自有面板） | ✅ | `activeState=BattleSetupState`；日志：`BattleSetupScreen.OnInitialize` → `LoadMovie OK: BattleSetupScreen -> movie=not-null` → `OnFrameTick: LoadingWindow.DisableGlobalLoadingWindow() called`（第 2 帧） |
+| ⑤ | 面板态 `bl_cmd.py start --attacker imperial_legionary --defender battanian_wildling --a 20 --d 20` | ✅ | `accepted:true`（**不再 `wrong_state`**）⇒ W2 白名单生效；21.7 s 打完（`battle_20260925_192819_127.jsonl`，2094 KB），面板自动回来（`OnActivate（战斗结束回到面板）`） |
+| ⑥ | **真人点面板上的「开始战斗」** | ✅ | `11:29:18.501 \| UI start_battle request: {"attackerTroop":"imperial_legionary","attackerCount":20,"defenderTroop":"battanian_wildling","defenderCount":20,"scene":"battle_terrain_a","durationCapSec":600,"orders":"charge","playerSide":"attacker"}` → `11:29:18.647 \| UI start_battle response: {…"id":"ui"…"accepted":true…}`；`status.requestId = "ui"`；`battle_20260925_192918_982.jsonl`（2324 KB）；战斗结束后面板再次 `OnActivate` |
+| ⑦ | 反向判据：面板态 `open-ui --ui-id CustomBattle` | ✅ | `wrong_state_for_ui`（**且游戏不再卡死**，`activeState` 仍是 `BattleSetupState`）—— 这正是 §4 修掉的 F2 |
+| ⑧ | 反向判据：面板态调自有入口 | ✅ | `requested:false, alreadyOpen:true`（幂等：**不执行**入口动作，所以不会触发 ⑤ 的闸门） |
+| ⑨ | 引擎自带 disabled 入口（`--ui-id Exit`） | ✅ | `ui_disabled`（引擎自己报 `disabled=true`，我们如实转达、不硬闯） |
+
+**W4「同一条管线」的真机证据**：⑥ 里面板构造的请求键名/取值与 ⑤（端口）逐字同形，两条路都 `accepted`；
+区分点只有一个 —— `status.requestId`：端口发起的是 16 位 hex，界面发起的是 **`ui`**（这就是"走的哪条路"的可核验标记）。
+界面截图（`%USERPROFILE%\Documents\...\BlBridge\ui\panel-final.png`）：中文无方块、绑定全部生效、
+默认场景已是 `battle_terrain_a (38/113)`。
+
+### 3b. 真机抓到的三个缺陷（离线自测结构性抓不到）与修复
+
+| # | 缺陷 | 现象 | 根因 | 修法 |
+|---|---|---|---|---|
+| **F1（high）** | `open_ui` 的参数取名 `id` | 不带参数时返回 `unknown_ui: 没有这个入口 id: 85a0d3d3fba54d4e` | `src/Jmini.cs` 是**扁平**读取器（按"文本里第一个 `"key"`"取值），而请求信封自带 `"id"`（16 位 hex 请求 id）⇒ `Jmini.Str(raw,"id")` 恒读到信封那个值 | 参数改名 **`uiId`**；并写进 `AGENTS.md` 的"控制通道参数命名硬规则"。**假游戏端用真 JSON 解析 ⇒ 自测天然抓不到这类碰撞**（第一轮真机才暴露） |
+| **F2（high）** | `open_ui` 在非主菜单状态执行 | 从 `CustomBattleState` 调 `open_ui` 后**卡在 `GameLoadingState` 90 s+ 不推进**，日志无异常、进程仍响应（CPU 465 s）⇒ 只能重启游戏 | `InitialStateOption` 的 action 基本都是 `MBGameManager.StartNewGame(...)`，它做 `CleanAndPushState(GameLoadingState)` 并重跑数据加载；**已加载 Game 时执行它会让状态机会卡住** | ① 加**主菜单闸门**：`ActiveGameStateName() != ""` 一律 `wrong_state_for_ui`（Fail Fast）；② `close_ui` 加 `state` 参数，白名单放行 `CustomBattleState`（官方「返回」同一个 `PopState`）⇒ agent 进得去也出得来 |
+| **F3（low）** | 面板默认场景 | 默认落在 `battle_terrain_001`（113 个场景里字典序第一） | 直接取列表首项 | 显式优先 `battle_terrain_a`（与 `bl_cmd.py --scene` / MCP 默认逐字对齐 —— 同一条管线的要求） |
+
+**本轮最值得记的一条**：F1 说明"离线自测全绿"不等于"控制通道没问题" ——
+假游戏端是 `json.loads`（认嵌套），真游戏端是 `Jmini`（扁平），**两者对同一个请求的解释不同**。
+⇒ 控制通道新增/改名参数，必须真机过一遍，或至少确认参数名不与信封键同集合。
+
+### 4. 未决（需用户裁定，本轮未擅自决定）
+
+1. **控制端口形态**：维持文件 IPC（本轮选择）／另加 localhost TCP（更接近字面"端口"，多一条代码路径 + 安全面）。
+2. **`.mcpb` 是否作为强制分发物**（宿主支持时一键装很好，但 agent session 不支持 bundle）。
+3. **面板要暴露哪些参数**：本轮只做「攻守兵种 + 双方人数 + 场景 + 开始/刷新/返回」（**纯按钮轮选、无文本输入** ——
+   因为"键盘输入到 Gauntlet 层"没有真机证据，唯一被验证过的交互原语是按钮点击）。
+   候选兵种取自 T15 已判定可用的集合（`docs/ledgers/sweep_probe_full-2026-09-25.json` 的 `good`），
+   后续是否做**兵种选择器 / 战术组 DSL 输入**属下一轮范围裁定。
+4. **分支去留**：W7 之后 `prototype/ui-probe` 是否改名 `feat/ui-entry` 并合回 `main`。
+
+---
+
+## 二十四、v0.8.13：原型退役 + 官方风格面板（兵种形象/数据）（2026-09-25 晚）
+
+**用户裁定**：① 原型**退役**；②「界面太丑太简陋，官方能做到的先抄过来」——具体点名**官方选兵种时显示兵种形象与数据**、
+**选地图时显示地图样貌**。
+
+### 1. 原型退役（W7，已完成）
+
+删除 `src/ProtoUi.cs` + `module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml`（`git` 里可恢复：`git checkout 543fe57 -- src/ProtoUi.cs`），
+`src/SubModule.cs` 里的 `ProtoUi.Register()` 一行与 `CNs` 语言文件里两个 `BlBridgeProto_*` 键一并删除。
+部署后 `GUI/` 只剩 **1 个文件**（`BattleSetupScreen.xml`），`list_ui` 里 `BlBridgeProtoBattleTest` 不再出现。
+
+### 2. 面板改成官方机制（逐条抄，附官方出处）
+
+| 抄的东西 | 官方出处（`Modules\SandBoxCore\GUI\Prefabs\CustomBattle\`） | 我们怎么用 |
+|---|---|---|
+| **兵种形象** | `TroopTypeSelectionPopUp.xml:32` → `<ImageIdentifierWidget DataSource="{Visual}" AdditionalArgs="@AdditionalArgs" ImageId="@Id" TextureProviderName="@TextureProviderName"/>` | 每张卡片一个 `ImageIdentifierWidget`，`Visual` = `CharacterImageIdentifierVM(CharacterCode.CreateFrom(character))`（官方 `CustomBattleTroopTypeVM.cs:169` 原句） |
+| **等级图标** | `TroopTypeSelectionPopUp.xml:34`（`Sprite="@Text"`，数据来自 `CustomBattleTroopTypeVM.GetCharacterTierData`） | 把官方那段拼串逻辑抄成 `BuildTierIconSprite`：`"General\\TroopTierIcons\\icon_tier_" + clamp(ceil((Level-5)/5),0,7)`（Hero 记 0） |
+| **选中标记** | `TroopTypeSelectionPopUp.xml:48` → `Sprite="SPGeneral\GameMenu\companion_selected_check"` + `IsVisible="@IsSelected"` | 卡片右侧打勾；`ButtonType="Radio"` + `IsSelected="@IsSelected"` 取官方 `ArmyComposition.xml:43-50` 的写法 |
+| **列表 + 卡片** | `ArmyComposition.xml:43-50`（`ListPanel DataSource=` + `ItemTemplate` + Radio 按钮） | 攻守两列各 10 张卡片 |
+| **面板/分隔线** | `CustomBattleScreen.xml:68/90` → `Sprite="flat_panel_9" ExtendLeft="53" ExtendRight="52" AlphaFactor="0.5"` + `SPGeneral\TownManagement\title_divider` + `StdAssets\subpage_divider` | 三列面板 + 标题分隔线 |
+| **暗底** | `TroopTypeSelectionPopUp.xml:12` → `Sprite="BlankWhiteSquare" Color="#000000B0"` | 全屏压暗，让面板浮起来 |
+
+**我们自己加的一条**（超出官方）：卡片上直接显示一行数据（`Lv / 兵种类型 / 数值最高的 4 项技能`）。
+理由：官方把技能放在**悬停 tooltip** 里，而 tooltip 在"看截图/自动化"场景读不到。数据来源 `character.GetSkillValue(SkillObject)`。
+
+### 3. 真机结果（`dll sha256 = 1ED66EE9E2BA7D12…`）
+
+- 面板进入 `BattleSetupState`、`LoadMovie OK`、全局加载窗口第 2 帧关闭 —— 与 v0.8.12 判据一致（未回归）。
+- **截图**：`%USERPROFILE%\Documents\Mount and Blade II Bannerlord\BlBridge\ui\panel-official-style-v2.png`
+  —— 两列共 20 张卡片全部渲染出**真实兵种形象**、中文名、等级图标、数据行；中间列显示人数/场景/两侧选中项/日志/按钮。
+- **卡片选择**：截图里守方选中项已从默认 `battanian_wildling` 变为 `battanian_hero`，且该卡片带官方打勾
+  ⇒ 有人（人）点了那张卡：**点卡片选择 = 真机验证过，VM→界面回写（中间文字 + 打勾）双向通**。
+  ⚠️ 诚实标注：**选择变更目前不写日志**，所以这条只有截图证据，没有日志证据（下一轮补日志）。
+
+### 4. 关于"选地图显示地图样貌"——官方**没有**这个功能（取证结论）
+
+三条一手证据：
+1. 官方地图选择控件是**纯文字下拉**：`CustomBattleScreen.xml:125-131` → `Standard.DropdownWithHorizontalControl` 绑 `{MapSelection}`；
+2. 地图项的 VM **没有任何图像字段**：`MapItemVM.cs:7-62` 只有 `MapName` / `MapId` / `ForcedSceneLevel` / `NameText`（`SelectorItemVM` 子类）；
+3. 游戏里**不存在**场景预览贴图：`SceneObj\battle_terrain_a\` 只有 `scene.xscene` / `terrain.bin` / `navmesh.bin` / `atmosphere.xml` / `flora.bin`，
+   全库搜 `*battle_terrain*` 在 `SceneObj` 之外 **0 命中**。
+
+⇒ 想"显示地图样貌"只有我们自己造：要么预先为若干常用场景截图存进 mod 包（113 个全做不现实），
+要么用引擎的 tableau/截图通道在面板里现场渲染（成本与风险都高）。**需用户裁定**（见 §4 未决）。
+
+### 5. 下一轮候补（已识别，未做）
+
+1. **兵种选择弹窗 + 搜索**（官方 `TroopTypeSelectionPopUp` 的完整形态：全兵种、搜索框、全选/还原）；
+2. **大号 3D 形象**（官方 `ArmyComposition.xml:17` 的 `CharacterTableauWidget`，绑 `CharacterViewModel` + `BodyProperties/EquipmentCode/...`）
+   —— 需要先摸清 `CharacterViewModel` 的填充 API（它在 `ViewModelCollection`，**不在反编译索引里**，索引查它会得到假阴性）；
+3. **护甲/武器图标列**（官方 `ArmyCompositionItemVM` 的 `ArmorsList`/`WeaponsList` + `EquipmentTypeVisualBrushWidget`）；
+4. 卡片选择/开战写日志（把 §3 那条"只有截图证据"补成日志证据）；
+5. 地图样貌（取决于用户裁定）。
+
+---
+
+## [2026-09-25] §二十五 面板退役：官方界面即入口 + 上帝视角（v0.8.14）
+
+### 1. 用户裁定（推翻了上一节的整个方向）
+
+> "我们白设计了 …… 他有接口，我们只设计把场景和兵种接进去不就行了？"
+> "甚至可以把自己设计的自定义删除了，官方本身就自带了。"
+> "控制通道肯定留着，只不过只让 AI 调用 …… 我们人就老老实实用官方的玩。"
+
+**依据（两条一手来源）**：
+- 官方战斗界面（用户截图 `blbridge-official-custombattle-reference.png`）：
+  游戏类型 / **玩家类型（指挥官）** / **选择攻守方（攻击方·防守方）** / 地图·季节·时间·雨雪密度·雾密度 + 军团规模。
+- 官方开战接口是**公开静态方法**：`CustomBattleHelper.StartGame(CustomBattleData)`（`CustomBattleHelper.cs:80`），
+  `CustomBattleData` 字段全 public（`GameTypeStringId` / `SceneId` / `WallHitpointPercentages` /
+  `IsPlayerAttacker` / `SceneUpgradeLevel` / `IsSallyOut` …）。⇒ 我们的活只剩"填数据"，不是"造界面"。
+
+⇒ **面板（`BattleSetup*` 4 个文件 + prefab + 语言文件 + 主菜单入口注册）全部删除**；
+`close_ui` 保留但白名单收缩为单值 `CustomBattleState`（`open_ui` 是门，没有出口 agent 进去就出不来）；
+`wrong_state` 守卫同理收回单值。
+
+### 2. 官方两张表的取证（决定"能不能接 mod 兵种 / 更多场景"）
+
+| 表 | 声明 | 加载 | 结论 |
+|---|---|---|---|
+| `CustomBattleScenes` | `<XmlName id="CustomBattleScenes" path="custom_battle_scenes"/>` | `CustomGame.cs:116` `MBObjectManager.GetMergedXmlForManaged(...)` —— **合并** | 可扩：加带 flag 的场景条目即可 |
+| `NPCCharacters`（`custombattlecharacters.xml`） | 同表 id，`IncludedGameTypes=CustomGame/EditorGame` | `CustomGame.cs:125` `LoadXML(...)` | 见下"反转" |
+
+- 场景表属性全集（实测）：`id / name / terrain` + `is_siege_map`(94) / `is_village_map`(102) /
+  `is_lords_hall_map`(17) / `forced_scene_level`(14) / `forest_density`(6)。
+- **NavalDLC 用的是同一张表**（`naval_custom_battle_scenes.xml`，37 条）：
+  `is_naval_map`(21)=**海战**、`is_naval_raid_map`(16)=**海上掠夺**，新地形 `River/CoastalSea/OpenSea`。
+  ⇒ **"游戏类型"那一行不是硬编码**，是从场景表 flag 推导的（官方只定义了 Battle/Siege/Village 三个常量）。
+- **反转**：`custombattlecharacters.xml` 全表只有 **24 条、`is_hero="true"` 24/24**，全是 6 文化 × 4 个领主/指挥官
+  （`commander_1..`），**一个正规军兵种都没有**（`imperial_legionary` 命中 0）。
+  ⇒ 界面兵种列表是**运行时**从当前游戏类型已加载的兵种表里按"文化 + 编队"枚举的
+  （`ArmyCompositionItemVM.cs:252-256` 逐个过 `IsValidUnitItem`，只判 `DefaultFormationClass`）。
+  ⇒ 推论（**待真机核对**）：第三方 mod 兵种很可能**本来就出现在**官方界面里，无需我们做任何事。
+
+### 3. 本轮交付（v0.8.14）
+
+| 项 | 位置 | 说明 |
+|---|---|---|
+| 上帝视角 | `src/SpectatorWatch.cs` | 实现官方 `ICameraModeLogic`，`GetMissionCameraLockMode` 返回 `SpectatorCameraTypes.Free`；参数 `spectate=true`（CLI `--spectate` / MCP `spectate`）。**消费即清**：标志在 `SubModule.OnBeforeMissionBehaviorInitialize` 用完立刻复位，绝不带进玩家自己的战斗 |
+| 官方场景全表 | `src/CustomBattleScenes.cs` | 读合并表（与官方 `CustomGame` 同一调用形态），`list_ui` 吐 314 行 + `modes` 计数 + 每行 `exists`（目录是否真在磁盘上，防 0xC0000005） |
+| 面板退役 | 删 `BattleSetup*.cs` ×3、`module/GUI/*`、`ModuleData/Languages/CNs/*`；`UiEntry` 去掉 `EnsureRegistered` | `BlBridge.dll` 118.5 KB → **98.5 KB** |
+
+**引擎侧依据（上帝视角）**：`MissionScreen.cs:395-397` 从 mission behaviors 里挑 `ICameraModeLogic`；
+`:3805-3815` 用其返回值决定相机锁模式；`SpectatorCameraTypes` 全集
+`Invalid=-1, Free=0, LockToMainPlayer=1, LockToAnyAgent=2, LockToAnyPlayer=3, LockToPlayerFormation=4,
+LockToTeamMembers=5, LockToTeamMembersView=6, LockToPosition=7`；官方先例 `TournamentBehavior.cs:81-87`。
+
+**离线验证**：`bl_selftest.py` **全部通过**（含新增：`list_ui` 带回场景全表与模式计数、
+`open_ui` 默认 `CustomBattle`、`close_ui` 默认 `CustomBattleState`、`spectate` 透传）；编译 0 error。
+
+### 4. ⚠️ 未验证项（诚实清单，下一轮真机逐条打勾）
+
+1. `spectate=true` 真机下的**镜头行为**：`lockedToMainPlayer=true` 时本类仍返回 `Free` ——
+   按 `MissionScreen:3826-3828` 语义，true 是"引擎想锁主玩家"（例如部署阶段），
+   强行自由镜头可能让那些阶段偏离官方流程。**每次询问都写进 `ui.log`**（前 3 次 + 总计），
+   跑一次即可看到引擎怎么问、结果如何，再用证据决定要不要在部署阶段让步。
+2. **身体仍在**：`commander_1` 必须留在玩家方 party（v0.8.11 的崩溃教训），所以上帝视角是"自由镜头"
+   而不是"没有身体"。"彻底无身体"（V2）单独一轮做 —— 要重验那条历史崩溃点。
+3. `list_ui` 的 314 行 JSON（约 35 KB）走文件 IPC 的**大小上限**（`RequestGuard`）是否受得住 ——
+   只读过请求上限，没核过响应侧上限；真机跑一次 `list-ui` 即知，必要时用 `sceneLimit`。
+4. 官方界面里**是否已列出 mod 兵种**（第 2 节的推论）—— 人眼确认即可，不用改代码。
+
+### 5. 明确未做（已识别）
+
+- XML 扩展层（在**我们自己的模块**里声明 `CustomBattleScenes` / `NPCCharacters` 同 id 表，
+  补 mod 场景与 mod 兵种）—— 机制已查清，但"官方表里到底缺什么"要靠第 4 节第 4 条的真机核对结论，
+  否则就是瞎加条目。
+- V2「无身体观战」。
+
+### 6. 本节的真机验证结果（同日晚，逐条打勾）
+
+| 第 4 节的那条 | 结果 |
+|---|---|
+| 4.1 上帝视角真机行为 | ✅ **通**。`ui.log`：`SpectatorWatchBehavior 已挂载` → 引擎询问 `lockedToMainPlayer=False missionMode=Deployment` → 返回 `Free`；整场**被询问 26880 次**。截图 `ui_20260925_202142.png`：自由观察镜头（城墙/城门/营地全景）+ 官方观战 UI（上一个/下一个角色）。战果 `defenderWiped`（攻方 42/51 存活，35.6 秒）。**顺带推翻了我原先的担心**：`lockedToMainPlayer` 全程 `False`，不存在"部署阶段引擎要锁主玩家"的情况 |
+| 4.2 身体仍在 | 如实存在：上帝视角 = 自由镜头，不是无身体（V2 仍待做） |
+| 4.3 314 行 JSON 是否超 IPC 上限 | ✅ 通（317 行 / 约 35 KB 正常往返；`list_ui --mode siege --limit 5` 与全表都跑过） |
+| 4.4 官方界面是否已列出 mod 兵种 | ⏳ 未查（需人眼看官方兵种弹层） |
+
+顺带验证了**全自动闭环**：主菜单 →`open_ui`→ 官方界面 →`start_battle`(攻城) → 跑完 →`close_ui`→ 主菜单 →`open_ui uiId=Exit`→ 游戏退出。全程无鼠标。
+
+---
+
+## [2026-09-25] §二十六 崩溃 A/B 与 `list_ui` 加固（v0.8.14 续）
+
+### 1. 那次崩溃的 A/B（**不可复现**，未坐实元凶）
+
+现象：`0xE0434352`（**托管异常未捕获**）崩在 `20:14:34`，即 `open_ui CustomBattle` 之后引擎在
+`loading managed_core_parameters.xml` 的**数据加载窗口**里（前一行是 `Warbandlord\ModuleData\*.mbproj`）。
+栈：`clr.dll` → `TaleWorlds.Native` → **`MonoMod.Utils`**（BLSE 的 detour 基础设施 ⇒ 只有被 patch 的方法才走这里）。
+
+| 轮次 | 做法 | 结果 |
+|---|---|---|
+| 1 | 主菜单 → `open_ui` → **全程不碰端口** 45 秒 | **没崩**；官方界面正常（截图 `ui_20260925_201914.png`）；错误日志 0.2 KB（只有文件头） |
+| 2 | 回主菜单 → `open_ui` → **加载期猛调 `list_ui` × 14** | **也没崩**；14 次全部返回 `CustomBattleState`；错误日志仍 0.2 KB |
+
+⇒ 结论：**我们新写的 `list_ui` 不是已坐实的元凶**（从"嫌疑"降为"未坐实的可能"）。
+证据更指向第三方 patch（`MonoMod`）或资源缺失（崩前成片的 `Could not find the event index for: event:/...`）。
+**诚实边界**：只跑两轮、该崩溃只发生过一次 —— 是"没能复现"，不是"已排除"。
+
+**但捞到一条真发现**：第二轮**轮询 #1 无响应** —— 引擎在切状态/加载的那一刻，我们的泵答不上来。
+⇒ "别在引擎切换期干重活"这条判断独立成立，于是有了下面的加固。
+
+### 2. `list_ui` 场景表加固（本轮改动）
+
+| 改动 | 原因 |
+|---|---|
+| **不再用** `MBObjectManager.GetMergedXmlForManaged`（引擎的加载通道） | 只读数据不该走带全局状态/副作用的通道，尤其不该在引擎自己的加载窗口里插进去 |
+| 改为**扫各模块 `SubModule.xml` 的 `<XmlName id="CustomBattleScenes" path="…"/>` 声明**，直接解析 `ModuleData/<path>.xml` | 纯文件读；合并语义与引擎一致（**同 id 后者覆盖**）；代价=看不到"运行期动态注册"的表（官方与常见 mod 都是静态声明，且 `sourceFiles` 会体现） |
+| 结果**缓存**（TTL 120 秒） | 省掉重复磁盘 IO；响应里带 `fromCache` 便于核对 |
+| 逐行 `exists`（磁盘存在性）**只对真正吐出去的行算**，且**切换窗口内整段跳过** | 旧实现 317 行 × 每行一次全模块目录扫描；现在是"按需 + 可降级" |
+| `open_ui` 成功后开 **45 秒切换窗口**，窗口内 `list_ui` 走缓存 + 跳过磁盘检查，并标 `existsChecked=false` + `note` | 降级而不是拒答：AI 正是靠这个窗口轮询 `activeState` 看自己有没有走进去 |
+
+真机验证：主菜单首次 `list_ui` → `fromCache=false / sourceFiles=2 / existsChecked=true / missingInReturned=0`；
+50 秒后再调 → `fromCache=true`（缓存命中）、`existsChecked=true`。
+**切换窗口内的降级路径本次没能观测到**：那一次请求**根本没被应答**（与第二轮轮询 #1 同一现象）——
+说明窗口判断是对的（那一刻主线程被引擎占着），但"降级响应"这条路要等一次"答上了"的切换才能看到。
+
+### 2b. 相机插桩的结论（v0.8.15，用户报告"野战=上帝视角、围城=观战视角"）
+
+**我们先前的判断错了两次，这次有插桩证据。**
+
+用户观察：`start --spectate` 的**野战**是 RTS 式上帝视角，**围城**却是"观战视角"（锁定某个 agent、带上一个/下一个角色）。
+
+插桩（`src/SpectatorWatch.cs`，v0.8.15 临时诊断）给出的对照：
+
+| | 野战 `battle_terrain_a` | 围城 `sturgia_castle_siege_001` |
+|---|---|---|
+| `ICameraModeLogic` 实现者（按下标） | `[30:FlyCameraMissionView, 43:SpectatorWatchBehavior]` | `[47:FlyCameraMissionView, 88:SpectatorWatchBehavior]` |
+| 首个（`MissionScreen.cs:396` 是 `FirstOrDefault` ⇒ 它胜出） | **FlyCameraMissionView** | **FlyCameraMissionView** |
+| 我们的方法被调用次数 | **8**（仅初始化期探测） | **8511**（约每帧） |
+| 行为数变化 | 73 | 120 → **116**（有行为被移除） |
+
+⇒ **野战里根本轮不到我们**：`FlyCameraMissionView` 排在下标 30 就先被选中了。而它是 **`RTSCamera.dll`（用户装的 mod）** 里的类 —— 在官方反编译源码里**搜不到**（全模块 DLL 二分搜索唯一命中 `Modules\RTSCamera\bin\...\RTSCamera.dll`）。
+**所以用户在野战看到的"RTS 上帝视角"是 RTSCamera 提供的，与我们的 `spectate` 无关。**
+
+那围城为什么不一样？RTSCamera 自己的配置（`Documents\...\Configs\RTSCamera\RTSCameraConfig.xml`）写着：
+
+```xml
+<DefaultToFreeCamera>DeploymentStage</DefaultToFreeCamera>
+<ElevatedCameraTriggerMode>WhenOpeningOrderUI</ElevatedCameraTriggerMode>
+<ElevatedHeight>10</ElevatedHeight>
+<ElevatedHeightInSiege>0</ElevatedHeightInSiege>   <!-- ← 攻城专用抬升高度 = 0，等于关掉 -->
+```
+
+⇒ **RTSCamera 默认在攻城时不给抬升上帝视角**，引擎那套观察者镜头就露出来了。**这不是我们的 bug，是 mod 的默认配置。**
+
+**已做的最小改动**（用户裁定前先试探）：`ElevatedHeightInSiege` `0 → 10`（备份 `RTSCameraConfig.xml.bak_before_20260925`）。
+真机对照：不带 `spectate` 的围城 = 第三人称跟身；带 `spectate` = 观察者镜头；改配置后 = 视角明显抬高拉远（截图 `ui_20260925_204927.png`）。
+若要"像野战那样常驻自由上帝视角"，还需把 `DefaultToFreeCamera` 改成 `Always`（合法值：`DeploymentStage`/`Always`/`Never`）与/或 `ElevatedCameraTriggerMode` 改成 `Always`（现为 `WhenOpeningOrderUI` ⇒ 只有打开命令 UI 时才抬升）。
+
+**由此得出的一条设计结论**：我们的 `SpectatorWatchBehavior`（`ICameraModeLogic → Free`）是**重复建设** ——
+野战被 RTSCamera 抢先（无效果），攻城给的是观察者镜头（不是用户想要的自由视角）。
+要不要删它，等用户裁定（见 §二十七）。
+
+### 2c. B 方案的落地（v0.8.15：我们当 RTSCamera 的「参数管理员」）
+
+用户裁定："**B 做好**，还能装 RTSCamera 用它的功能吗" ⇒ 能，这正是 B 的形态（我们**不碰它的代码**，只读写它的配置）。
+
+**为什么不做"把 RTSCamera 抄进我们 mod"（用户后来提的方案）**：
+- 分发包里**没有许可文件**（只有 CHANGELOG/README，且 README 只讲功能）⇒ 默认按"保留所有权利"处理，抄 DLL/反编译代码进我们要发布的包 = 侵权风险；功能可以自研（clean-room），代码不能抄。
+- 体量：`RTSCamera.dll` 267 KB IL + 自带 `MissionLibrary.dll`(20 KB) + `RTSCameraAgentComponent.dll`(8 KB) + GUI prefabs + 60~70 个配置项 + 自己的 MCM 页面 + 战帆船只接管 ⇒ 全抄等于重写一个中型 View/输入 mod，维护从此归我们。
+- 而用户要的效果（攻城也能有抬升视角）**只需要改它的配置**。
+
+**实现**（`tools/bl_rts.py`，与 Warbandlord 的 `bl_apply_config` 同纪律：形状校验 → 拒绝 XML 特殊字符 → 备份 → 临时文件 → XML 解析校验 → 原子替换 → 回读核对）：
+
+| 面 | 内容 |
+|---|---|
+| 配置 | `(Documents)\Mount and Blade II Bannerlord\Configs\RTSCamera\RTSCameraConfig.xml`（扁平 `<Key>值</Key>`，UTF-8 **带 BOM**，写回保留） |
+| 读 | `bl_rts_config`（MCP）/ `bl_cmd.py rts-config`（CLI） |
+| 写 | `bl_apply_rts_config`（MCP，支持 `preset`/`edits`/`dry_run`/`allow_missing`）/ `bl_cmd.py rts-apply`（`--preset` / `--set K=V` / `--dry-run`） |
+| 预设 | `siege-god`(攻城抬升10) / `free-always` / `elevated-always` / `god-full`（后三个含未证实枚举值时会给 warnings，**不静默**） |
+| 开战联动 | `bl_start_battle` 的 `rtsPreset` 参数 / `bl_cmd.py start --rts-preset`：**发请求之前**写配置（因为 RTSCamera 每场开始时读一次） |
+| 我们的相机 | `SpectatorWatchBehavior` **降级为兜底**：`SubModule` 里检测到 RTSCamera 已启用就不挂（避免两边抢 `ICameraModeLogic`/输入），只当"没装 RTSCamera 的机器"的兜底 |
+
+**真机验证**：`rts-apply --preset god-full` → 写入并回读核对通过（`ElevatedHeightInSiege` 0→10、`DefaultToFreeCamera`→Always、`TriggerMode`→Always 并给出"未证实"警告）+ 自动备份。
+离线自测新增 7 条断言（读/dry-run 不落盘/预设+备份+回读/未知键拒绝/XML 特殊字符拒绝/未知预设拒绝/未指定键保持原值）—— **全部通过**，工具数 26。
+
+**⚠️ 一条新证据（B 的时序约束）**：我早先写的 `ElevatedHeightInSiege=10` **在 20:53 那次退出后被覆写回 0** ⇒
+RTSCamera **只在启动时读一次配置，退出时会用内存值把文件覆写回去**。
+⇒ B 的正确姿势是"**每场开战前写**"（`--rts-preset` 正是如此），不是"改一次永久"；要永久必须在游戏内 MCM 改。
+另：`ElevatedCameraTriggerMode=Always` 属于**未证实的枚举值**（DLL 里存在 `Always` 串，但没有证据表明本键接受），已撤回为 `WhenOpeningOrderUI`。
+
+**仍待办**：① 需要一次游戏会话做"视角"验收（配置层已验证，视觉待看）；② 本地已编译的"C# 兜底降级"改动需要部署 + 重启才生效；③ README 的工具表要补两行。
+
+### 3. ⚠️ 口径差异（重要，别当 bug 修）
+
+我们的合并视图 **303 条**；旧实现（引擎口径）**317 条**。差额来自**同 id 重复**：
+官方 `custom_battle_scenes.xml` 内部就有同一个场景 id 出现多次的条目（实测该文件 373 个 `<Scene>` 节点、
+唯一 id 只有 312），叠加 NavalDLC 与它的 9 条跨文件重名 ⇒ 引擎那份列表里会出现**重复行**。
+我们按 id 合并（后者覆盖），列表更干净、按 id 选场景无歧义 —— **有意的差异**，不是解析错误。
+若哪天要与官方界面做逐行对照，先记得这 14 条的差。
+
