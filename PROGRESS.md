@@ -1776,3 +1776,154 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 
 ⇒ 换 `--round-end-alive 3` 后稳定产出 3 轮（5.2 的数据即来自该配置）。
 **该缺陷独立于本轮修复**，建议单独立项（可选修法：多轮启用时让探针跳过 `*Wiped` 判定，交给编排器）。
+
+---
+
+## 二十一、功能回归测试（2026-09-25，v0.8.10）
+
+**范围**：离线工具链（14 个）+ MCP 16 个工具 + 游戏端命令/参数面。
+**真机战斗规模按用户指定：100 v 100**（此前各轮多用 8v8 / 20v20）。
+
+### 1. 离线层（不需要游戏）—— 全部通过 ✅
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 编码体检 | `check_repo_encoding.py` | ✅ 67 个跟踪文件全合规（UTF-8 无 BOM + LF） |
+| 离线自测 | `bl_selftest.py` | ✅ `结果: 全部通过`，exit 0 |
+| 指标自测 | `bl_metrics_selftest.py` | ✅ 同上 |
+| C# 单测 | `tools/jsontest/build_and_run.ps1` | ✅ 同上 |
+| 时钟同源 | `bl_check_clock_reset.py` | ✅ 三条路径都对：全量 `exit=1`（含 11 份历史失败样本）/ `--since` `exit=1` + 对照组 / 数据不足 `exit=2` + 对照组 |
+| 分析器 | `bl_analyze.py` / `bl_metrics.py` | ✅ 8v8 与 **100v100**（5.9 MB）产物均正常：200 入场 / 4179 命中 / 164 阵亡 / 332 s |
+| 伤害分析 | `bl_dummy_analyze.py`（`auto`/`range`/`--compare`） | ✅ 三种口径都出数；`range` 口径在 100v100 靶场上 2388 样本 |
+| A/B 对比 | `bl_compare.py`（`--a/--b`、`--manifest`） | ✅ 出报告（示例 manifest 里的旧文件缺失时提示 `!!` 后继续） |
+| 阵亡画像 | `bl_death_compare.py`（多文件） | ✅ 两口径都报，样本不足时拒绝给数（显示 `-`） |
+| 兵种索引 | `bl_sage.py --status/--check/--search/--culture/--limit` | ✅ 索引可用（1981 兵种），`OK/MISS` 与退出码区分正确；`--search` 是 **SQL LIKE（需 `%` 通配）**、`--culture` **必须配合 `--search`**（help 已写明，误用会打印 usage） |
+| 状态转储 | `status_dump.py` | ✅ |
+| 一次性探针 | `hit_semantics_probe.py` / `dump_agent_hits.py` | ✅ 结论仍是 `dmg-absorbed` ≡ `hpAfter` 差分（吻合 98.1%） |
+| 扫描工具 | `bl_troop_sweep probe --dry-run` / `cover --help` | ✅ 分包计划正确（4 id → 2 包 + 引信）；需自备 `--ids-file`（见 F4） |
+| 跑批 dry-run | `bl_batch.py --dry-run` | ✅ 计划展开为逐场 `bl_cmd start/wait` |
+| MCP 注册 | `register_mcp.py --show` | ✅ **修复后**（见 F3） |
+
+### 2. MCP 层（真机，16 个工具）
+
+- **查询类 11/11 通过**：`bl_status` / `bl_battle_status` / `bl_build_check` / `bl_config` / `bl_read_config` /
+  `bl_lookup_troop`（found+missing 双路径）/ `bl_list_battles` / `bl_analyze` / `bl_read_events` /
+  `bl_fast_forward`（开 + 关）
+- **批处理/配置类**：`bl_run_batch`（dryRun ✅）、`bl_batch_report`（✅ 对过期示例数据优雅降级）、
+  `bl_apply_config`（✅ `changed`/`missing`/`dryRun` 三路径；值不做校验见 F5）
+- **真机动作类**：`bl_start_battle` **100v100** ✅、`bl_wait_for_state` ✅、`bl_abort` ✅
+
+### 3. 真机层（100 v 100）
+
+| 项 | 结果 |
+|---|---|
+| 100v100 基础场（`orders=charge`） | ✅ `130823_240`：200 agent、4179 命中、164 阵亡、332 s（游戏内）、5.9 MB；结束后 `aInitial/dInitial` 正常 |
+| 100v100 靶场（`dummySide=defender` + `freezeDummies` + `unlimitedAmmo` + `dummyArmor` + `cap=60`） | ✅ `130859_686`：4529 命中、靶子侧 100 存活 |
+| 场景守卫样本对 | ✅ 6/6（§5.1） |
+| 多轮 8v8（`--rounds 3 --round-swap --round-end-alive 3`） | ✅ 3 文件时钟同源（§5.2） |
+| 看门狗（正式阈值 120 s）**真实触发** | ✅ 见 F1：`abort` 在 loading 态 ⇒ 120.0036 s 后收尾为 `error` |
+| `abort`（loading 态） | ⚠️ 会让 mission 卡住 ⇒ 触发 F1/F2 |
+| 多兵种组 / 参数组合场 / 多轮 100v100 / 跑批+compare / `troop_sweep` / 错误码 | ✅ 全部通过 —— 明细见 §7 |
+
+### 4. 发现的缺陷与缺口（按严重度）
+
+**F1（medium-high）看门狗的"恢复可用"在真实卡死场景下只完成一半**
+- 事实层：`abort` 在 loading 态后 mission tick 停住（`ticks=7351` 不再增长、`missionTime=0`、`verdict=stalled`），
+  120 s 后看门狗把状态机收成 `error`/`busy=false` ✅（§5.3 的机制生效）
+- 后果层：**引擎的 GameState 栈没恢复** —— `start` 一直被拒：`wrong_state（当前状态: MissionState）`，
+  且 `Mission.Current != null`（残留）。⇒ §5.3 的"熔断后 start 仍 accepted"**只在 `EndMission()` 生效时成立**
+  （那次实验是"mission 正常加载"），真实卡死时用户仍需手动退出/重启游戏。
+- 连带（本轮已修文案）：原 `wrong_state` 文案让用户"点 Custom Battle"，而界面已在 mission 里 —— 照做也进不去。
+  新增 `StuckMissionHint()`：只在"停在 MissionState + 引擎还有 mission + 本状态机不 Busy"时给出
+  "按 ESC 退出该战斗 / 退回主菜单；无响应则重启游戏"。
+
+**F2（medium）`abort` 在 loading 态会让 mission 卡死**
+- 事实层：`Abort()` 无条件 `m.EndMission()`，而 loading 中的 mission 调 EndMission 不会正常收尾
+  （`ScenarioProbe.OnMissionTick` 只在 running 态消费 `_endRequested`）⇒ mission tick 停。
+- 后果层：**本轮实测**（100v100 第 3 场，13:09）：无日志文件产出、`MissionState` 残留、需看门狗兜底。
+- 建议：`Abort` 在 loading 态改为"只置 `_endRequested=true`，等 running 或等看门狗收尾"，不要直接 EndMission。
+
+**F3（low，已修）`register_mcp.py` 从未能运行**
+- `NameError: name 'HERE' is not defined` —— 第 17 行用 `HERE`，而它到第 22 行才定义 ⇒ 该工具**任何调用都崩**。
+- 修：把 `HERE = ...` 提到 `sys.path.insert` 之前；`--show` 已实测通过。
+
+**F4（low）`bl_troop_sweep` 的默认 `--ids-file` 指向不入库路径**
+- `DEFAULT_IDS = .sdd/2026-09-24-multitroop-tactics-plan/sweep_expected_ids.json`，而 `.sdd/` 明确不入库
+  （PROGRESS §十七 已归档清理）⇒ 不带 `--ids-file` 必然失败；`cover` 的 `--good-file` 同理。
+
+**F5（low）`bl_apply_config` 的值不做类型/范围校验**
+- 实测 `value="abc"` 被当作合法新值接受（`dryRun` 无害；真写靠备份兜底）。
+- 另外：传错 `edits` 形状时抛的是裸 `TypeError("string indices must be integers")`，不告诉调用方正确格式
+  （应为 `[{"path": "...", "value": "..."}]`）。
+
+**F6（low）`bl_analyze` / `bl_compare` 在多轮**中间轮**文件上读不到时长与攻守人数**
+- 它们只从 `end` 事件取 `duration_sec` / `aInitial` / `dInitial`，而多轮模式下只有**最后一轮**写 `end`
+  （中间轮写 `round_cleanup`）⇒ 中间轮显示 `时长 -`、`攻方 None→None`。不是数据缺失，是取值口径单一。
+
+**F7（low）MCP 的 `bl_start_battle` 参数面窄于 CLI**
+- 缺少 `rounds` / `roundSwap` / `roundEndAlive` / `roundSpawnAttacker|Defender` / `randomSeed` /
+  `allowAnyState` / `attackerGroups` / `defenderGroups` ⇒ **多轮与多兵种组走不了 MCP**，只能走 `bl_cmd.py`。
+
+**F8（low）靶场交叉校验的 `byHp` 量纲错**
+- `DummyRangeBehavior.OnScoreHit`：`byHp = HealthLimit - Health`，而 `HealthLimit = hpMax + 9999`
+  （防死用）⇒ 它算的是"距满血还差多少"，**不是本次伤害**；只有"每击后立刻回满"时才相等。
+- 数据对照（100v100 靶场 `130859_686`）：7/2388 不一致，逐条满足 `byHp = 上一击残留 + 本次 applied`
+  （如 `applied=20, byHp=37`；`27 → 58`）。
+- ⇒ `_mismatchCount`（游戏端自报）与 `bl_dummy_analyze` 那句"**应为 0**"是**口径误报**，不是数据缺陷。
+- 建议修法：只在 `hp >= limit`（已回满）时计入校验，或让 `byHp` 改为"上一次该 agent 的 hp − 本次 hp"。
+
+**F9（low）`bl_cmd start` 在组模式下仍强制要求 `--attacker/--defender`**
+- 事实层：argparse 里二者是 `required`，而 help 文本写的是"给了 `--attacker-groups` 则 `--attacker/--a` **被忽略**"
+  ⇒ 省略它们会直接 argparse 报错，请求根本没发出去。
+- 后果层：本轮实测踩到 —— `start --attacker-groups ... --defender-groups ...` 被 argparse 拒绝，
+  而我的输出过滤只抓 `"accepted"/"code"` 之类的 JSON 字段 ⇒ 没看见错误，`wait` 白等了 3 分钟。
+- 建议：help 文本改为"仍须提供（组模式下仅用于回显，实际兵力由 groups 决定）"，或让二者在组模式下变为可选。
+
+### 5. 本轮已修
+
+| # | 修法 | 产物 |
+|---|---|---|
+| F3 | `HERE` 定义位置（Python，不影响 dll） | `tools/register_mcp.py` |
+| F1 文案 | 新增 `StuckMissionHint()` 并接进 `wrong_state` 分支 | dll `21903D82…`（`out\` 与部署逐字节一致） |
+
+### 6. 操作坑（本轮新增）
+
+- **`ilspycmd` 反编译部署目录的 dll 会让它无法被覆盖**：实测 `Copy-Item` 报
+  `The requested operation cannot be performed on a file with a user-mapped section open`。
+  ⇒ 验证产物请反编译 **`out\BlBridge.dll`**，不要碰 `Modules\BlBridge\...\BlBridge.dll`；
+  若已经踩上，等一会儿重试即可（`build.ps1` 会按"进程在跑但 dll 未锁"放行，输出 `deploying anyway`）。
+- **`Bannerlord.BLSE.Launcher` 在启动早期就会 mmap `Modules/*/*.dll`**（此时 `File.Open` 独占探测
+  可能仍显示"可写"，但 `Copy-Item` 会失败）⇒ 部署时机要抢在启动器早期，或干脆先关掉它。
+
+### 7. 真机执行结果（本节原为"待做"清单，2026-09-25 13:18–13:26 全部跑完）
+
+| 项 | 命令要点 | 结果 |
+|---|---|---|
+| 多兵种组 100v100 | `--attacker-groups 'imperial_legionary:60:Infantry:charge｜khuzait_khans_guard:40:HorseArcher:charge'` + 守方两组 `stop` | ✅ `accepted`，组求和 100+100，正常打完（50 s） |
+| 参数组合场 100v100 | `--orders default --player-side defender --random-seed 12345 --round-spawn-attacker/-defender` | ✅ accepted；`meta.randomSeed=12345` 已落盘验证（未指定的场次为 `-1`） |
+| 加速通道 | `fastforward --on` → `speed`（战斗中）→ `--off` | ✅ 战斗内 `isFastForward=true`、`sceneTimeSpeed=1`、`appliedFrames=100`；关闭后 `forced=false` |
+| 多轮 100v100 | `--rounds 3 --round-swap --round-end-alive 3` | ✅ 产出 3 文件（6.1 / 2.4 / 1.6 MB）、每轮 `unit=200`；时钟校验 **3/3 PASS**；`probe` 与锚同源（轮 1 `[10.04, 310.47]` vs 锚 310.02；轮 2 `[10.03, 170.23]` vs 176.04） |
+| 跑批 + 对比 | `bl_batch --plan <100v100 换边双跑>` → `bl_compare --manifest` / `bl_cmd compare --manifest` | ✅ 两场 100v100（A 0:46 / B 0:53）、`runs.json` 产出、报告含主指标 / 全程对照 / 胜负分布 / validity |
+| `troop_sweep probe`（真机） | 4 id（3 真 1 假）/ `--chunk 2` | ✅ 好 3 / 坏 1，与清单逐条一致（每包 ~27 s，含引信，**未建 mission**） |
+| `troop_sweep cover`（真机） | `--good-file <probe 产出>` | ✅ 期望 3 / 实际 3：缺 0、多 0（46.9 s） |
+| 错误码（协议层，绕开 CLI 校验） | 直接 `send_command("start_battle", ...)` | ✅ `bad_groups`（formation 非法；`hold` 已移除并提示改用 `stop`）、`unknown_troop`、`unknown_scene`（附 12 个可用场景） |
+| 错误码（CLI 前置校验） | `bl_cmd start` 直传坏 id / 坏 DSL | ✅ 被客户端拦下并给指引（`--skip-troop-check` 可绕过，绕过时游戏端仍正确报 `unknown_troop`） |
+
+**过程中新增两条观察**：
+
+- **O1（low）** `cover` 等"回 idle"在 100v100 下会超时（打印"10 秒内未回 idle —— 继续下一场"）。
+  与 F1 同源：`State=ended` 立即可见，但 `bridge_status.json` 回到 `idle` 要等 TelemetryBehavior 的结束回调
+  走完，200 agent 规模下 >10 s。
+- **O2（low）协议 method 名是 `start_battle`**（不是 `start`）—— raw 调用方容易猜错（本轮实测踩到
+  `unknown_method: 未知方法: start`）。建议在 README 协议章节列一张 method 表。
+
+### 8. 仍待决策的修复项
+
+| # | 修复建议 | 风险 |
+|---|---|---|
+| F2 | `Abort` 在 loading 态改为只置 `_endRequested=true`，不直接 `EndMission()` | 低（更保守） |
+| F5 | `apply_config` 对数值键做类型校验；`edits` 形状错时给出正确格式 | 低 |
+| F6 | `bl_analyze`/`bl_compare` 缺 `end` 事件时回退用 `round_*` 取时长/人数 | 低 |
+| F7 | MCP `bl_start_battle` 补齐 8 个参数（多轮 + 多兵种组） | 中（schema 变更） |
+| F8 | `byHp` 只在"已回满"时计入校验；或改相邻 hp 差分（会动 `dummy_hit.appliedByHp` 语义，需同步工具断言） | 低-中 |
+| F4 / F9 / O1 / O2 | 提示与文档类改动 | 极低 |

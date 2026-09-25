@@ -222,7 +222,8 @@ namespace BlBridge
             {
                 return Protocol.Failure(id, "wrong_state",
                     "需要停留在「自定义战斗」界面（当前状态: " + (stateName.Length == 0 ? "未知" : stateName) +
-                    "）。进游戏后点 Custom Battle，停在选兵界面即可；或传 allowAnyState=true 跳过本检查。", false);
+                    "）。" + StuckMissionHint(stateName) +
+                    "进游戏后点 Custom Battle，停在选兵界面即可；或传 allowAnyState=true 跳过本检查。", false);
             }
 
             // 2) T5 多兵种/战术组参数：`troop:count[:formation[:movement]]`，多组用 | 分隔。
@@ -431,6 +432,31 @@ namespace BlBridge
                 State = RunStateError;
                 LastError = ex.GetType().Name + ": " + ex.Message;
                 return Protocol.Failure(id, "open_failed", LastError, true);
+            }
+        }
+
+        /// <summary>
+        /// 卡死残留提示（v0.8.10 真机回归发现，见 PROGRESS §二十一）。只在"停在 MissionState
+        /// 且引擎里还有 mission、但本状态机不 Busy"时给出**可执行**的指引。
+        ///
+        /// 为什么需要它：`abort` 在 loading 态会让 mission 卡住（EndMission 在 loading 中无效），
+        /// 看门狗能收回本状态机（Busy=false），但**收不回引擎的 GameState 栈** —— MissionState
+        /// 仍留在栈顶。此时用户按原来的文案去"点 Custom Battle"是做不到的（界面已在 mission 里），
+        /// 会以为桥坏了。实测（2026-09-25 13:09，100v100 第 3 场）：`wrong_state（当前状态: MissionState）`。
+        /// </summary>
+        private static string StuckMissionHint(string stateName)
+        {
+            try
+            {
+                if (stateName != "MissionState") return "";
+                if (Busy) return "";
+                if (SafeMission() == null) return "";
+                return "【引擎里残留了一个不再推进的 mission（本状态机已被看门狗收尾: " + State + "）—— "
+                    + "请按 ESC 退出该战斗 / 退回主菜单后再点 Custom Battle；界面无响应则需重启游戏。】";
+            }
+            catch
+            {
+                return "";
             }
         }
 

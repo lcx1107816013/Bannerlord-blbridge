@@ -14,12 +14,13 @@ import json
 import os
 import shutil
 import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import bl_common  # noqa: E402
 
 MCP_JSON = os.path.join(os.path.expanduser("~"), ".codebuddy", "mcp.json")
-HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER_ENTRY = "blbridge"
 DEFAULT_GAME_DIR = r"G:\Program Files (x86)\Steam\steamapps\common\Mount & Blade II Bannerlord"
 
