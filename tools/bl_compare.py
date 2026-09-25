@@ -38,6 +38,8 @@ def per_run_metrics(path):
     events = load(path)
     meta = next((e for e in events if e.get("t") == "meta"), {})
     end = next((e for e in events if e.get("t") == "end"), {})
+    # v0.8.10（F6）：多轮中间轮没有 `end` ⇒ 时长/人数回退（见 bl_common.end_metrics）
+    _duration, _a_init, _d_init = bl_common.end_metrics(events, end)
     hits = [e for e in events if e.get("t") == "hit"]
     kills = [e for e in events if e.get("t") == "kill"]
     first_kill = min((k.get("time", 0.0) for k in kills), default=None)
@@ -82,11 +84,11 @@ def per_run_metrics(path):
     return {
         "file": os.path.basename(path),
         "version": meta.get("version", "?"),
-        "duration": end.get("time"),
+        "duration": _duration,
         "aAlive": end.get("aAlive"),
         "dAlive": end.get("dAlive"),
-        "aInitial": end.get("aInitial"),
-        "dInitial": end.get("dInitial"),
+        "aInitial": _a_init,
+        "dInitial": _d_init,
         "validity": (end.get("validity") or {}).get("verdict", "-"),
         # 满编窗口：本报告的主指标（不受雪球影响）
         "early_hits_A": early.get("Attacker", [0, 0.0])[0],

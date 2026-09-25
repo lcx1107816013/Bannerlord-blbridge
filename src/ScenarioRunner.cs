@@ -470,8 +470,21 @@ namespace BlBridge
             {
                 _endReason = "aborted";
                 _endRequested = true;
-                Mission m = Mission.Current;
-                if (m != null) m.EndMission();
+                // v0.8.10：**loading 态不要直接 EndMission**。
+                //
+                // 实测（真机回归 2026-09-25 13:09，100v100 第 3 场：start 后立刻 abort）：
+                // loading 中调 EndMission 会让 mission 卡在中间状态、mission tick 停住
+                // （`readiness.ticks` 不再增长、`missionTime=0`），只能等看门狗 120 s 兜底；
+                // 而且引擎的 GameState 栈会残留 MissionState ⇒ 之后每次 start 都被判 wrong_state，
+                // 用户必须手动退出/重启游戏（PROGRESS §二十一 F1/F2）。
+                //
+                // loading 态只置标志：ScenarioProbe 进入 running 后会消费 `_endRequested` 并
+                // Finish("aborted") 正常收尾；若它始终进不了 running（真卡死），看门狗负责兜底。
+                if (State != RunStateLoading)
+                {
+                    Mission m = Mission.Current;
+                    if (m != null) m.EndMission();
+                }
                 return Protocol.Success(id, "{\"aborted\":true,\"state\":" + Protocol.Q(State) + "}");
             }
             catch (Exception ex)

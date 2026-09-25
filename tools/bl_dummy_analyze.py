@@ -477,12 +477,21 @@ def analyze(path, mode, by):
     blocked = [r["blocked"] for r in rows]
     describe("实际扣血 applied 分布", applied, blocked)
 
-    # 交叉校验：applied（引擎 OnScoreHit.damagedHp） vs appliedByHp（hpAfter 差分）
+    # 交叉校验：applied（引擎 OnScoreHit.damagedHp） vs appliedByHp（HP 差分）
+    #
+    # v0.8.10 修正（真机回归 F8）：游戏端只在"本次命中**前**靶子恰好满血"时给出可用的差分值，
+    # 否则写 -1（命中密集时上一击的欠额会被算进来，旧口径的"不一致"是误报）。这里只统计可用样本，
+    # 并把跳过的条数一并报出来（否则读者会把"跳过了大半"误当成"全都很一致"）。
     if mode == "range" and rows:
-        byhp = [r["appliedByHp"] for r in rows]
-        mism = sum(1 for a, b in zip(applied, byhp) if abs(a - b) > 1.5)
-        print("  交叉校验 applied vs appliedByHp：不一致 %d/%d (%.1f%%)  <- 应为 0"
-              % (mism, len(rows), 100.0 * mism / len(rows)))
+        usable = [r for r in rows if r["appliedByHp"] >= 0]
+        skipped = len(rows) - len(usable)
+        mism = sum(1 for r in usable if abs(r["applied"] - r["appliedByHp"]) > 1.5)
+        if usable:
+            print("  交叉校验 applied vs appliedByHp：不一致 %d/%d (%.1f%%)  <- 应为 0；"
+                  "另 %d 条未回满、该口径不适用（写 -1）"
+                  % (mism, len(usable), 100.0 * mism / len(usable), skipped))
+        else:
+            print("  交叉校验 applied vs appliedByHp：本场无可用样本（全部未回满 ⇒ 差值写 -1）")
     if nominal:
         nz = [v for v in nominal if v > 0]
         if nz:

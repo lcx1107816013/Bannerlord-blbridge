@@ -72,9 +72,11 @@ def main(argv):
     p.add_argument("--attacker-groups", dest="attacker_groups", default=None,
                    help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
                         '如 "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
-                        "（给了它则 --attacker/--a 被忽略；非法直接报错，不静默跳过）")
+                        "（给了它则组内兵力取代 --attacker/--a，但 --attacker/--defender 仍须照常提供"
+                        "—— 它们此时只用于回显；非法直接报错，不静默跳过）")
     p.add_argument("--defender-groups", dest="defender_groups", default=None,
-                   help="守方多兵种/战术组，语法同 --attacker-groups（给了它则 --defender/--d 被忽略）")
+                   help="守方多兵种/战术组，语法同 --attacker-groups（组内兵力取代 --defender/--d，"
+                        "但 --attacker/--defender 仍须照常提供 —— 它们此时只用于回显）")
     p.add_argument("--rounds", type=int, default=None,
                    help="多轮连续实验：同一 mission 内跑 N 轮（每轮一个日志文件；默认 1 = 关闭）")
     p.add_argument("--round-end-alive", dest="round_end_alive", type=int, default=None,

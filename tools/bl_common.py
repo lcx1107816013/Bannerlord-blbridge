@@ -205,3 +205,37 @@ def parse_squad_groups(text):
                                  % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS), hint))
         out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
     return out
+
+
+def end_metrics(events, end=None):
+    """结束类指标（v0.8.10 F6）：时长与双方入场人数，缺 `end` 事件时按多轮口径回退。
+
+    背景：多轮连续实验**每轮一个文件**，而 `end` 事件只在 mission 真正结束时写 ⇒ 只有最后一轮
+    有 `end`。只认 `end` 的分析器会把中间轮的时长/人数显示成 `-`/None（真机回归实测：
+    `bl_analyze` 报"时长 -""攻方 None→None"、`bl_compare` 报"A:D = None:None"）。
+
+    回退口径（**只在前者为空时启用**，不覆盖 `end` 里的真值）：
+      - duration   ：最后一个 `round_*` 事件的 `time`（即该轮末）；
+      - a/d 初始数：`unit` 事件按 `side` 统计（每轮一个文件 ⇒ 就是该轮入场数）。
+    """
+    if end is None:
+        end = next((e for e in events if e.get("t") == "end"), {})
+    duration = end.get("time")
+    a_init = end.get("aInitial")
+    d_init = end.get("dInitial")
+
+    if duration is None:
+        rounds = [e for e in events if str(e.get("t", "")).startswith("round_")]
+        if rounds:
+            duration = rounds[-1].get("time")
+
+    if a_init is None or d_init is None:
+        units = [e for e in events if e.get("t") == "unit"]
+        a_n = sum(1 for e in units if str(e.get("side")) == "Attacker")
+        d_n = sum(1 for e in units if str(e.get("side")) == "Defender")
+        if a_n or d_n:
+            if a_init is None:
+                a_init = a_n
+            if d_init is None:
+                d_init = d_n
+    return duration, a_init, d_init

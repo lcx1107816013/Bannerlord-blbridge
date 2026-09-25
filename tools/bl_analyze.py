@@ -40,6 +40,9 @@ def analyze(path):
     ev = load_events(path)
     meta = next((e for e in ev if e.get("t") == "meta"), {})
     end = next((e for e in reversed(ev) if e.get("t") == "end"), {})
+    # v0.8.10（F6）：多轮模式下 `end` 只在**最后一轮**存在 ⇒ 时长/入场人数回退
+    # （见 bl_common.end_metrics：round_* 取时长、unit 按 side 取人数）
+    duration_sec, a_initial, d_initial = bl_common.end_metrics(ev, end)
     units = [e for e in ev if e.get("t") == "unit"]
     hits = [e for e in ev if e.get("t") == "hit"]
     kills = [e for e in ev if e.get("t") == "kill"]
@@ -184,8 +187,8 @@ def analyze(path):
         "file": path,
         "meta": meta,
         "summary": {
-            "duration_sec": end.get("time"),
-            "a_initial": end.get("aInitial"), "d_initial": end.get("dInitial"),
+            "duration_sec": duration_sec,
+            "a_initial": a_initial, "d_initial": d_initial,
             "a_alive": end.get("aAlive"), "d_alive": end.get("dAlive"),
             "hits": len(hits), "kills": len(kills), "flees": len(flees),
             "units_seen": len(units), "samples": len(samples),

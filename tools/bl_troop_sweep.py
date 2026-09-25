@@ -64,7 +64,12 @@ _RE_GROUP = re.compile(r"第\s*(\d+)\s*组")
 
 def _load_json_list(path, what):
     if not os.path.isfile(path):
-        raise SystemExit("找不到%s：%s" % (what, path))
+        raise SystemExit(
+            "找不到%s：%s\n"
+            "  提示（v0.8.10 F4）：probe 的默认 --ids-file 指向本地工作目录 `.sdd/…`，"
+            "而 `.sdd/` **不入库**（PROGRESS §十七 已归档清理）⇒ 在别的检出或清理之后必然找不到。\n"
+            "  请显式指定，例如： --ids-file <你的 id 清单.json>"
+            "（字符串数组；可用 bl_lookup_troop / bl_sage --search 生成候选）" % (what, path))
     with open(path, "r", encoding="utf-8-sig") as fh:
         data = json.load(fh)
     if not isinstance(data, list) or not all(isinstance(x, str) for x in data):

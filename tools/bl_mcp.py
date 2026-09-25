@@ -567,6 +567,15 @@ def read_config(paths=None):
     return out
 
 
+def _is_number(s):
+    """宽松数字判定（v0.8.10 F5：给 apply_config 的"旧值数字 → 新值非数字"提醒用）。"""
+    try:
+        float(str(s).strip())
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def apply_config(edits, dry_run=False, allow_missing=False):
     """edits: [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}, ...]"""
     path = warbandlord_config()
@@ -577,9 +586,30 @@ def apply_config(edits, dry_run=False, allow_missing=False):
     text = _read_text(path)
     lines = text.splitlines()
 
+    # v0.8.10（F5）：入参形状与值的健全性检查。
+    #
+    # 原来直接 `e["path"]` / `e["value"]` —— 传错形状（如 {"Key": "0.3"} 而不是
+    # [{"path": ..., "value": ...}]）会抛裸 `TypeError: string indices must be integers`，
+    # 调用方看不出正确格式；值本身也不检查，`"abc"` 会被当成合法新值写进 XML
+    # （虽有备份兜底，但越早拒绝越好）。真机回归实测踩到这两点。
+    if not isinstance(edits, list) or not edits:
+        raise ValueError('edits 必须是**非空数组**，形如 '
+                         '[{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}]')
+    for i, e in enumerate(edits):
+        if not isinstance(e, dict) or "path" not in e or "value" not in e:
+            raise ValueError('edits[%d] 必须是 {"path": "...", "value": "..."} 形式的对象，实得：%r' % (i, e))
+        v = e["value"]
+        if isinstance(v, bool) or v is None or str(v).strip() == "":
+            raise ValueError('edits[%d] 的 value 不能为空/布尔（path=%s）' % (i, e["path"]))
+        if any(c in str(v) for c in "<>&\"'\n\r"):
+            raise ValueError('edits[%d] 的 value 含 XML 特殊字符（< > & " \' 或换行），'
+                             '会破坏配置文件（path=%s）' % (i, e["path"]))
+
     want = {}
     for e in edits:
         want[e["path"]] = str(e["value"])
+    # 数值启发式（只提醒、不拒绝）：旧值是数字而新值不是 ⇒ 很可能写错了键或值类型。
+    warnings = []
 
     info = {}
     for idx, full, val, oid in _scan(text):
@@ -595,6 +625,9 @@ def apply_config(edits, dry_run=False, allow_missing=False):
                 indent = line[:len(line) - len(line.lstrip())]
                 new_lines.append(indent + '<Option id="%s" value="%s" />' % (oid, want[full]))
                 changed[full] = {"old": oldval, "new": want[full]}
+                if _is_number(oldval) and not _is_number(want[full]):
+                    warnings.append("%s：旧值 %r 是数字、新值 %r 不是 —— 请确认该键允许非数值"
+                                    % (full, oldval, want[full]))
                 continue
         new_lines.append(line)
 
@@ -603,6 +636,8 @@ def apply_config(edits, dry_run=False, allow_missing=False):
             missing.append(p)
 
     result = {"changed": changed, "missing": missing, "dryRun": bool(dry_run), "path": path}
+    if warnings:
+        result["warnings"] = warnings
     if dry_run:
         return result
     if missing and not allow_missing:
@@ -729,7 +764,26 @@ TOOLS = [
             "skipTroopCheck": {"type": "boolean",
                                "description": ("跳过兵种 id 校验（默认 false=校验）。"
                                                "校验走 BannerlordSage 索引，只覆盖官方 XML；"
-                                               "用第三方模组兵种时该 id 会被判为不存在，此时置 true 跳过")}},
+                                               "用第三方模组兵种时该 id 会被判为不存在，此时置 true 跳过")},
+            "allowAnyState": {"type": "boolean",
+                              "description": ("跳过「必须停在自定义战斗界面」检查（默认 false）。"
+                                              "用于从主菜单直接开战，但仍需游戏内数据已加载（否则会报 unknown_troop）")},
+            "rounds": {"type": "integer",
+                       "description": ("多轮连续实验：同一 mission 内跑 N 轮（每轮一个独立日志文件），"
+                                       "默认 1 = 关闭")},
+            "roundEndAlive": {"type": "integer",
+                              "description": "某方存活 ≤ 此值即判定本轮结束（默认 1）"},
+            "roundSwap": {"type": "boolean", "description": "每轮交换攻守（第 2、4…轮把原守方放到攻方位置）"},
+            "roundSpawnAttacker": {"type": "string",
+                                   "description": "重生时攻方进场点，如 \"100,0,200\"（x,y,z 或 x,z）"},
+            "roundSpawnDefender": {"type": "string", "description": "重生时守方进场点，语法同上"},
+            "randomSeed": {"type": "integer",
+                           "description": ("随机种子（-1 = 不设）。注意：伤害公式里的随机命中因子在 native 层掷，"
+                                           "同种子不保证逐值复现")},
+            "attackerGroups": {"type": "string",
+                               "description": ("攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔。"
+                                               "给了它则 attackerTroop/attackerCount 被忽略；与 orders 互斥")},
+            "defenderGroups": {"type": "string", "description": "守方多兵种/战术组，语法同上"}},
             "required": ["attackerTroop", "defenderTroop"], "additionalProperties": False},
     },
     {
@@ -935,6 +989,33 @@ def call_tool(name, args):
             "orders": args.get("orders") or "charge",
             "playerSide": args.get("playerSide") or "attacker",
         }
+        # ── v0.8.10：补齐 CLI 侧早已支持的参数（真机回归 F7：MCP 的参数面窄于 CLI，
+        #          导致多轮与多兵种组走不了 MCP）────────────────────────────────
+        # 校验口径与 bl_cmd.py **逐字对齐**：组 DSL 在本地先校验，非法绝不透传
+        # （游戏端也会拒，但先在本地说清楚能省一次往返，且消息带纠错提示）。
+        for arg_key in ("attackerGroups", "defenderGroups"):
+            raw = args.get(arg_key)
+            if not raw:
+                continue
+            try:
+                bl_common.parse_squad_groups(raw)
+            except ValueError as e:
+                return {"ok": False, "error": "%s 解析失败：%s" % (arg_key, e)}
+            params[arg_key] = raw
+        if args.get("rounds"):
+            params["rounds"] = int(args["rounds"])
+            if args.get("roundEndAlive") is not None:
+                params["roundEndAlive"] = int(args["roundEndAlive"])
+            if args.get("roundSwap") is True:
+                params["roundSwap"] = "true"
+            if args.get("roundSpawnAttacker"):
+                params["roundSpawnAttacker"] = str(args["roundSpawnAttacker"])
+            if args.get("roundSpawnDefender"):
+                params["roundSpawnDefender"] = str(args["roundSpawnDefender"])
+        if args.get("randomSeed") is not None:
+            params["randomSeed"] = int(args["randomSeed"])
+        if args.get("allowAnyState") is True:
+            params["allowAnyState"] = "true"
         # 靶场参数（v0.8.0~v0.8.2），口径与 bl_cmd.py 完全一致：
         #   布尔走 Jmini.Str ⇒ 必须发字符串 "true"；护甲走 Jmini.Num ⇒ 必须发**数字**。
         # 解析失败一律拒绝，不静默跳过（静默丢弃曾让 9 场护甲实验整批作废）。
@@ -960,7 +1041,14 @@ def call_tool(name, args):
         # 第三方模组的兵种会被判成"不存在"，那种情况必须能跳过。
         troop_check = None
         if not args.get("skipTroopCheck"):
-            troop_check = bl_sage.check_troops([params["attackerTroop"], params["defenderTroop"]])
+            # v0.8.10（F7）：组模式下单值的 attackerTroop/defenderTroop 会被游戏端**忽略**，
+            # 拿它们去查索引是查错对象 —— 改成校验真正生效的那一组（与 bl_cmd.py 同口径）。
+            ids = []
+            ids += ([g["troop"] for g in bl_common.parse_squad_groups(args["attackerGroups"])]
+                    if args.get("attackerGroups") else [params["attackerTroop"]])
+            ids += ([g["troop"] for g in bl_common.parse_squad_groups(args["defenderGroups"])]
+                    if args.get("defenderGroups") else [params["defenderTroop"]])
+            troop_check = bl_sage.check_troops(ids)
             if troop_check.get("available") and troop_check.get("missing"):
                 return {"ok": False,
                         "error": "兵种 id 在索引里不存在：%s" % ", ".join(troop_check["missing"]),
@@ -1154,8 +1242,13 @@ def handle(req):
             _result(req_id, {"content": [{"type": "text", "text": text}],
                              "isError": bool(isinstance(out, dict) and out.get("ok") is False)})
         except Exception as exc:  # noqa: BLE001
-            _result(req_id, {"content": [{"type": "text", "text": "工具执行失败: %r" % (exc,)}],
-                             "isError": True})
+            # v0.8.10（F5）：参数类异常（ValueError/IOError）直接给消息，不要套一层 `ValueError('…')` 的
+            # repr —— 调用方（人或 agent）要的是"哪儿错了、正确格式是什么"，不是 Python 类型名。
+            if isinstance(exc, (ValueError, IOError, OSError)):
+                text = str(exc)
+            else:
+                text = "工具执行失败: %r" % (exc,)
+            _result(req_id, {"content": [{"type": "text", "text": text}], "isError": True})
         return
     _error(req_id, -32601, "method not found: %s" % method)
 

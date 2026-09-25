@@ -161,15 +161,22 @@ namespace BlBridge
             try
             {
                 float limit = affectedAgent.HealthLimit;
-                float hp = affectedAgent.Health;
+                float hp = affectedAgent.Health;   // ⚠️ OnScoreHit 时**已经扣过血**
 
                 // 引擎给的实际扣血就是权威值；同时用 HP 差分做交叉校验
-                // （被挡下时 damagedHp == 0 且 HP 未变，两者应当一致）
+                // （被挡下时 damagedHp == 0 且 HP 未变，两者应当一致）。
+                //
+                // v0.8.10 修正（真机回归 F8）：`byHp = limit - hp` 只有在"本次命中**前**靶子恰好满血"
+                // 时才等于本次伤害。命中密集时（100v100 实测 7/2388）上一击尚未回满的欠额会被算进来
+                // —— 逐条满足 `byHp = 上一击残留 + 本次 applied`（applied=20/byHp=37、27/58 …），
+                // 于是 `_mismatchCount` 和下游那句"应为 0"变成**口径误报**。
+                // 现在只在该口径成立的样本上给值；不成立时写 -1（明确"不可用"，不再假装是校验值）。
                 float applied = damagedHp;
                 if (applied < 0f) applied = 0f;
-                float byHp = limit - hp;
-                if (byHp < 0f) byHp = 0f;
-                if (System.Math.Abs(applied - byHp) > 1.5f) _mismatchCount++;
+                float hpBefore = hp + applied;                 // 反推本次命中前的血量
+                bool byHpUsable = hpBefore >= limit - 0.01f;   // 命中前满血 ⇒ 差分 = 本次伤害
+                float byHp = byHpUsable ? (limit - hp) : -1f;
+                if (byHpUsable && System.Math.Abs(applied - byHp) > 1.5f) _mismatchCount++;
 
                 _seq++;
                 _appliedSum += applied;

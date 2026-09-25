@@ -18,6 +18,20 @@
 会话身份（`runToken` + `processStartedUtc`）、版本硬校验、`outcomeUncertain` 不盲重试等规范，
 抄自 Bannerlord Coop 团队的 `CoopMcpServer` / `LiveTestProtocol`（见 `阶段2-复用尽调报告.md`）。
 
+**请求里的 `method` 只有这 6 个**（`src/CommandPump.cs`；名字**不是** CLI 子命令名 ——
+直接手写请求时容易猜错，v0.8.10 真机回归实测踩到 `unknown_method: start`）：
+
+| method | 参数 | 等价入口 |
+|---|---|---|
+| `ping` | — | `bl_cmd.py ping` / MCP `bl_status` |
+| `status` | — | `bl_cmd.py status` / MCP `bl_battle_status` |
+| `start_battle` | `attackerTroop`/`defenderTroop`/`attackerCount`/`defenderCount`/`scene`/`durationCapSec`/`orders`/`playerSide`/`dummySide`/`dummyArmor*`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`/`allowAnyState`/`rounds`/`roundEndAlive`/`roundSwap`/`roundSpawnAttacker`/`roundSpawnDefender`/`randomSeed`/`attackerGroups`/`defenderGroups` | `bl_cmd.py start` / MCP `bl_start_battle` |
+| `abort` | — | `bl_cmd.py abort` / MCP `bl_abort` |
+| `fast_forward` | `enabled`（`"true"`/`"false"`） | `bl_cmd.py fastforward` / MCP `bl_fast_forward` |
+| `speed` | — | `bl_cmd.py speed` |
+
+> 布尔参数一律发**字符串** `"true"`/`"false"`（C# 侧走 `Jmini.Str`）；`dummyArmor*` 走数字（`Jmini.Num`）。
+
 ---
 
 ## 二、目录

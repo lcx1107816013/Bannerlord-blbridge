@@ -1917,13 +1917,25 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 - **O2（low）协议 method 名是 `start_battle`**（不是 `start`）—— raw 调用方容易猜错（本轮实测踩到
   `unknown_method: 未知方法: start`）。建议在 README 协议章节列一张 method 表。
 
-### 8. 仍待决策的修复项
+### 8. 修复记录（用户裁定"全部修"）
 
-| # | 修复建议 | 风险 |
+| # | 实际落地的修法 | 验证状态 |
 |---|---|---|
-| F2 | `Abort` 在 loading 态改为只置 `_endRequested=true`，不直接 `EndMission()` | 低（更保守） |
-| F5 | `apply_config` 对数值键做类型校验；`edits` 形状错时给出正确格式 | 低 |
-| F6 | `bl_analyze`/`bl_compare` 缺 `end` 事件时回退用 `round_*` 取时长/人数 | 低 |
-| F7 | MCP `bl_start_battle` 补齐 8 个参数（多轮 + 多兵种组） | 中（schema 变更） |
-| F8 | `byHp` 只在"已回满"时计入校验；或改相邻 hp 差分（会动 `dummy_hit.appliedByHp` 语义，需同步工具断言） | 低-中 |
-| F4 / F9 / O1 / O2 | 提示与文档类改动 | 极低 |
+| F2 | `ScenarioRunner.Abort()`：`State == RunStateLoading` 时**只置** `_endReason` / `_endRequested`，**不调** `EndMission()`；running 态行为不变（由 tick 消费标志后 `Finish("aborted")`） | 编译 ✓；真机见 §9 |
+| F8 | `DummyRangeBehavior.OnScoreHit`：用 `hpBefore = hp + applied` 反推"本次命中**前**是否满血"，满血才算差分值，否则写 `-1`（不可用）并跳过校验；`bl_dummy_analyze` 只统计可用样本，并把跳过的条数一并报出 | 编译 ✓；真机见 §9 |
+| F7 | `bl_mcp.py` 的 `bl_start_battle` 补 9 个参数（`allowAnyState` / `rounds` / `roundEndAlive` / `roundSwap` / `roundSpawnAttacker` / `roundSpawnDefender` / `randomSeed` / `attackerGroups` / `defenderGroups`），组 DSL 本地先校验；兵种校验改为**组感知**（组模式下查组内兵种，而非被忽略的单值） | `bl_selftest` ✓（16 工具断言不变）；真机见 §9 |
+| F5 | `apply_config`：入参必须是 `[{"path": …, "value": …}]`（形状错时给正确格式）；拒绝空值/布尔值/含 XML 特殊字符的值；新增 `warnings` 数值启发式（旧值是数字、新值不是 ⇒ 提醒，不拒绝） | 编译/自测 ✓；离线复测见 §9 |
+| F6 | `bl_common.end_metrics()`：缺 `end` 时用最后一个 `round_*` 取时长、`unit` 按 `side` 取人数；`bl_analyze` 与 `bl_compare` 均已接入 | 离线复测见 §9 |
+| F4 | `_load_json_list` 报错补提示：默认路径指向**不入库**的 `.sdd/…`，请显式 `--ids-file` | 离线可验 |
+| F9 | `--attacker-groups` / `--defender-groups` 的 help 改为"组内兵力取代 `--attacker/--a`，但 `--attacker/--defender` **仍须照常提供**（仅用于回显）" | 离线可验 |
+| O2 | README 增**协议 method 表**（6 个，与 `src/CommandPump.cs` 逐字核对）+ 布尔/数字参数的类型约定 | ✓ |
+
+### 9. 修复后的复测清单
+
+| # | 步骤 | 期望 |
+|---|---|---|
+| F2 | `start`（100v100）后**立刻** `abort` | `state=ended` / `reason=aborted`，**不再** loading 卡死 + 看门狗 120 s 兜底 + `MissionState` 残留 |
+| F8 | 跑一场 100v100 靶场 → `bl_dummy_analyze --mode range` | 交叉校验"不一致 **0**/N"，并报出"另 M 条未回满、该口径不适用" |
+| F7 | 用 MCP `bl_start_battle` 跑 `rounds=3`（100v100）与多兵种组（100v100） | 两条都 `accepted` 并正常收尾（多轮产出 3 文件） |
+| F5 | `bl_apply_config` 传错形状 / 含 `<` 的值 / 数值键写非数字 | 形状错与 XML 特殊字符 ⇒ **拒绝并给格式**；数值键写非数字 ⇒ 通过但带 `warnings` |
+| F6 | 对多轮回应用 `bl_analyze` / `bl_compare` | 中间轮不再显示"时长 -" / "A:D = None:None" |
