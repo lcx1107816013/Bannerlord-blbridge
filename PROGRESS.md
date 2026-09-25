@@ -1382,13 +1382,18 @@ t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5
 
 ## 十九、v0.8.9 发布（2026-09-25）
 
-**tag**：`v0.8.9`（注释 tag，锚定 `65db2b3`）
+**tag**：`v0.8.9`（注释 tag，锚定 `d2a2be2`）
 **版本落点**：`module/SubModule.xml` = `v0.8.9`；`src/BridgeConfig.cs` `Version` = `"0.8.9"`
-**部署产物**：`Modules/BlBridge/bin/Win64_Shipping_Client/BlBridge.dll`，sha256 前缀 `14d788d2010560443551006d`
+**部署产物**：`Modules/BlBridge/bin/Win64_Shipping_Client/BlBridge.dll`，sha256 前缀 `c935fa3d0ca6b99a03490317`
 
-### 1. 本次发布包含的唯一代码改动
+> **tag 重建说明**：本 tag 最初锚在 `65db2b3`（仅含时钟修复，产物 sha `14d788d2`）。
+> 随后在真机测试中因传入不存在的场景名导致引擎崩溃，新增了场景存在性校验（`d2a2be2`），
+> 产物变为 `c935fa3d`。因 v0.8.9 从未向外发布，故**弃用旧 tag、重建在本提交上**，
+> 使「tag = 可部署产物」这一语义成立。
 
-**多轮日志内时钟不同源**（外部评审发现，详见 §十六 ④ 与 README 第 402 行）。
+### 1. 本次发布包含的代码改动（两处）
+
+#### 修复 1：多轮日志内时钟不同源（外部评审发现，详见 §十六 ④ 与 README 第 402 行）
 
 - **缺陷**：同一 jsonl 内 `round_start` / `round_cleanup` / `round_all_done` 的 `time` 复用了
   `RoundOrchestratorBehavior._elapsed`（整场累计值），而每轮遥测是独立文件、其
@@ -1400,7 +1405,66 @@ t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5
 - **修复**：`Advance` 内 `_round++` 之后、`RoundLog("round_start")` 之前补 `_elapsed = 0f;`，
   与 `tb.BeginNewRound` 共用同一原点。15 行插入 / 0 行删除，不新增字段。
 
-### 2. 真机回归证据（判据：§十一 第 6 条「时钟同源」）
+#### 修复 2：开 mission 前校验场景存在性（2026-09-25 实测崩溃后新增）
+
+- **缺陷**：`Start` 把请求里的 `scene` 字符串**直接**交给 `new MissionInitializerRecord(scene)`。
+  **引擎侧没有可判的失败路径** —— 反编译 `TaleWorlds.Engine.dll` 可见：
+
+  ```csharp
+  public void Read(string sceneName)
+  {
+      EngineApplicationInterface.IScene.Read(base.Pointer, sceneName, ref initData, "");
+  }
+  ```
+
+  整个实现体就是一次原生调用，**无返回值、不抛托管异常**。场景名不存在时 native 侧拿到空指针，
+  直接 **`0xC0000005`（访问违规）终止进程** —— `try/catch` 在结构上拦不住（崩在 C++ 层）。
+- **实测证据**（本机时间线，2026-09-25）：
+
+  ```
+  11:40:31.509  Opening new mission BlBridgeScenario
+  11:40:31.868  Loading xml file: SceneObj/bridge/scene.xscene
+  11:40:31.874  Unhandled Exception Code 0xC0000005        ← 6 ms 后，进程死
+  ```
+
+  栈帧全在 `TaleWorlds.Native`，末尾一个 `MonoMod.Utils` 帧（Harmony 的 IL 管线，**被动牵连，非元凶**）。
+- **对照证据**（同一 `start` 路径，仅场景名不同）：
+
+  | 会话 | 场景 | 结果 |
+  |---|---|---|
+  | 02:15 / 02:31 / 02:38 / 11:14 | `SandBoxCore/SceneObj/battle_terrain_a/scene.xscene` | 全部正常 |
+  | **11:40（本次）** | `SceneObj/bridge/scene.xscene` | **崩溃 `0xC0000005`** |
+
+  `bridge` 在本机**全盘不存在**：游戏根目录、`bin/Win64_Shipping_Client/`、全部 `Modules/*/SceneObj/`
+  均无此目录；`SandBoxCore/SceneObj/` 下可用的野战场景是 `battle_terrain_a` ~ `_035` 及 `_biome_*` 系列。
+- **修复**：`Start` 参数校验新增 **2c) 场景存在性检查**，在开 mission **之前**执行
+  （`src/ScenarioRunner.cs` 新增 `SceneExists` / `ValidateScene`，共 110 行）：
+
+  1. 遍历 `ModuleHelper.GetAllModules()` 的每个 `ModuleInfo.FolderPath`，
+     探测 `FolderPath + "SceneObj/" + scene + "/scene.xscene"` ——
+     **与引擎自身的场景寻址方式一致**（引擎就是扫所有模块的 `SceneObj/`），故不需要进 native 就能判定；
+  2. 拒绝含 `/` `\` 的名字（防路径穿越）；
+  3. 不存在则返回 `unknown_scene`，并在消息里附**可用野战场景清单**（最多 12 个），
+     避免调用方反复试错撞崩溃；
+  4. 校验自身出错时**不静默放行**（按"不存在"处理）——
+     宁可拒绝一次合法请求，也不放一次会崩进程的请求过去。
+
+- **受控样本对验证（7/7 通过）**：
+
+  | 输入 | 期望 | 实得 |
+  |---|---|---|
+  | `bridge` | 拒绝 | 拒绝 ✅ |
+  | `battle_terrain_a` | 放行 | 放行 ✅ |
+  | `battle_terrain_001` | 放行 | 放行 ✅ |
+  | `battle_terrain_zzz` | 拒绝 | 拒绝 ✅ |
+  | `""`（空串） | 拒绝 | 拒绝 ✅ |
+  | `../etc/passwd` | 拒绝 | 拒绝 ✅ |
+  | `a/b` | 拒绝 | 拒绝 ✅ |
+
+  ⚠️ **本修复尚未做真机回归** —— 游戏在崩溃后未重启。样本对验证的是
+  「校验逻辑有区分力」，**不等于**验证了「它在游戏内真的拦得住」（尽管前者是后者的必要条件）。
+
+### 2. 修复 1 的真机回归证据（判据：§十一 第 6 条「时钟同源」）
 
 | 判据 | 修前 | 修后 |
 |---|---|---|
@@ -1429,4 +1493,18 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 - `README.md` §七 数据字典 `state` 行补**量纲警告**：`speed` 是 `MovementVelocity.Length`（世界单位 m/s），
   而 `maxSpeed` / `combatSpeed` 是 `MaxSpeedMultiplier` / `CombatMaxSpeedMultiplier`（**倍率**，基准 1.0）
   ⇒ **三者不可直接比较**。
-- 同期提交：`cfaad3d`（修复）→ `5db19ed`（必跑项 + 脚本脚手架）→ `baec499`（对照组纪律）→ `65db2b3`（README 量纲）。
+- 同期提交：`cfaad3d`（修复 1）→ `5db19ed`（必跑项 + 脚本脚手架）→ `baec499`（对照组纪律）
+  → `65db2b3`（README 量纲）→ `2543034`（发布段）→ `d2a2be2`（修复 2，tag 锚点）。
+
+### 5. 一条教训：请求参数是「不可信输入」，不是「本地配置」
+
+修复 2 的根因不是代码缺陷，而是**一次操作失误**：为了「复现上次配置」，从旧日志里读了
+`meta.mission = "bridge"` 并当成 `scene` 参数传入 —— **`meta.mission` 是遥测记录的 mission 标识，
+不是场景名**（`SubModule.MissionOrigin = "bridge"`，见 `src/ScenarioRunner.cs:362`）。
+
+暴露出的真问题比这次失误更值得记：
+
+**凡是「请求里带来的字符串」直接喂给引擎原生 API 的地方，都必须先校验。**
+引擎的原生边界不做防御（`Scene.Read` 连返回值都没有），
+托管侧的 `try/catch` 在这里是**结构性无效**的 —— 它拦得住托管异常，拦不住 native 访问违规。
+⇒ 判据：**调用点如果在托管/原生边界上，且失败后果是进程级，就必须在调用前自己校验。**

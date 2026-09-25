@@ -94,4 +94,31 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 
 - PowerShell 5.1 读**无 BOM 的 UTF-8 `.ps1`** 会按 ANSI 解 ⇒ `build.ps1` 刻意只用 ASCII；
   往脚本里写中文前先确认编码，或保持 ASCII。
+
+## 五、托管/原生边界：请求参数是「不可信输入」，不是「本地配置」
+
+**凡把请求里带来的字符串直接喂给引擎原生 API 的地方，都必须先自己校验。**
+
+理由是结构性的，不是「小心一点」就能解决：
+
+- 引擎的原生边界**不做防御**。反编译 `TaleWorlds.Engine.dll` 可见 `Scene.Read(string sceneName)`
+  的整个实现体就是一次 `EngineApplicationInterface.IScene.Read(...)` —— **无返回值、不抛托管异常**。
+- 因此托管侧的 `try/catch` 在这种调用点上**结构性无效**：它拦得住托管异常，拦不住 native 访问违规。
+  失败后果是**进程级**（`0xC0000005`），不是「这个请求失败」。
+
+⇒ **判据**：一个调用点若同时满足「跨托管/原生边界」+「失败后果是进程级」，
+则**必须在调用前自己校验**，不能指望 catch、不能指望引擎报错。
+
+实测案例（v0.8.9，2026-09-25）：`Start` 把请求里的 `scene` 字符串直接交给
+`new MissionInitializerRecord(scene)`。传入不存在的 `bridge` ⇒ 6 ms 后
+`Loading xml file: SceneObj/bridge/scene.xscene` → `0xC0000005`，整个游戏进程死。
+对照：同一请求传 `battle_terrain_a`（存在于 `SandBoxCore/SceneObj/`）则完全正常。
+
+修复方式值得照抄：**绕开原生边界去校验** —— 引擎自己就是扫所有模块的 `SceneObj/`，
+所以托管侧遍历 `ModuleHelper.GetAllModules()` 的 `FolderPath` 探测
+`SceneObj/<scene>/scene.xscene`，判定结果与引擎一致，且**不需要进 native**。
+
+顺带记一条操作教训：**`meta.mission` 不是场景名。** 本次崩溃的触发方式是从旧日志里读了
+`meta.mission = "bridge"` 当成 `scene` 传进去 —— 那是遥测记录的 mission 标识
+（`SubModule.MissionOrigin`）。**日志字段的语义要从写它的代码确认，不能从名字猜。**
 - 脚本里 `print` 非 ASCII 时不要靠控制台编码兜底 —— 见第一节的 `safe_streams()`。
