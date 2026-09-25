@@ -1881,10 +1881,11 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 
 ### 5. 本轮已修
 
-| # | 修法 | 产物 |
+| # | 修法 | 产物 / 验证 |
 |---|---|---|
-| F3 | `HERE` 定义位置（Python，不影响 dll） | `tools/register_mcp.py` |
-| F1 文案 | 新增 `StuckMissionHint()` 并接进 `wrong_state` 分支 | dll `21903D82…`（`out\` 与部署逐字节一致） |
+| F3 | `HERE` 定义位置（Python，不影响 dll） | `tools/register_mcp.py`；`--show` 实测通过 |
+| F1 文案 | 新增 `StuckMissionHint()` 并接进 `wrong_state` 分支 | dll `21903D82…` |
+| F2 / F5 / F6 / F7 / F8 / F4 / F9 / O2 | 修法见 §8；**真机复测见 §9（三项全过）** | dll `41D5BE0D…`（`out\` 与部署逐字节一致） |
 
 ### 6. 操作坑（本轮新增）
 
@@ -1930,12 +1931,15 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 | F9 | `--attacker-groups` / `--defender-groups` 的 help 改为"组内兵力取代 `--attacker/--a`，但 `--attacker/--defender` **仍须照常提供**（仅用于回显）" | 离线可验 |
 | O2 | README 增**协议 method 表**（6 个，与 `src/CommandPump.cs` 逐字核对）+ 布尔/数字参数的类型约定 | ✓ |
 
-### 9. 修复后的复测清单
+### 9. 修复后的真机复测（13:40–13:43，部署产物 `41D5BE0D…`）—— 三项全部通过 ✅
 
-| # | 步骤 | 期望 |
-|---|---|---|
-| F2 | `start`（100v100）后**立刻** `abort` | `state=ended` / `reason=aborted`，**不再** loading 卡死 + 看门狗 120 s 兜底 + `MissionState` 残留 |
-| F8 | 跑一场 100v100 靶场 → `bl_dummy_analyze --mode range` | 交叉校验"不一致 **0**/N"，并报出"另 M 条未回满、该口径不适用" |
-| F7 | 用 MCP `bl_start_battle` 跑 `rounds=3`（100v100）与多兵种组（100v100） | 两条都 `accepted` 并正常收尾（多轮产出 3 文件） |
-| F5 | `bl_apply_config` 传错形状 / 含 `<` 的值 / 数值键写非数字 | 形状错与 XML 特殊字符 ⇒ **拒绝并给格式**；数值键写非数字 ⇒ 通过但带 `warnings` |
-| F6 | 对多轮回应用 `bl_analyze` / `bl_compare` | 中间轮不再显示"时长 -" / "A:D = None:None" |
+| # | 步骤 | 期望 | 实得 |
+|---|---|---|---|
+| F2 | `start`(100v100) → **立刻** `abort` | 正常收尾、无引擎残留 | ✅ `aborted:true` → **10 s 内** `state=ended` / **`reason=aborted`** / `missionActive=false` / `verdict=no_mission`（修复前：loading 卡死 → **120 s** 后 `reason=watchdog_loading` → `MissionState` 残留） |
+| F2 | 紧接着再 `start` | `accepted`（而不是 `wrong_state`） | ✅ `accepted:true`，且该场正常打完（13:41:04） |
+| F8 | 靶场 100v100 → `bl_dummy_analyze --mode range` | 不一致 **0/N** | ✅ **不一致 0/2838 (0.0%)**，并如实报出"另 10 条未回满、该口径不适用（写 -1）"（修复前 7/2388 误报） |
+| F7 | MCP `bl_start_battle` 带 `rounds=3` + `roundSwap` + `roundEndAlive=3`（100v100） | `accepted` 且产出 3 文件 | ✅ accepted；3 文件（6.1/1.3/2.8 MB）、时钟校验 **3/3 PASS**、`probe` 无越界 |
+| F7 | MCP `bl_start_battle` 带 `attackerGroups`/`defenderGroups`（100v100） | `accepted` | ✅ accepted（组求和 100+100），正常收尾 |
+
+> F2 这一条是本轮最有价值的闭环：**"loading 态 abort 把桥卡死、只能重启游戏"的根因消除** ——
+> 复测里 abort 后 10 秒内就干净收尾，且下一次 `start` 立刻被接受。
