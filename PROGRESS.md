@@ -1377,3 +1377,56 @@ t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5
 
 ⇒ **T13 缺陷关闭**。这条也再次印证：`MovementOrder`/编队 order 这类问题**只能靠游戏内判据**，
 离线编译与 jsontest 在结构上发现不了（与 T12 同一教训）。
+
+---
+
+## 十九、v0.8.9 发布（2026-09-25）
+
+**tag**：`v0.8.9`（注释 tag，锚定 `65db2b3`）
+**版本落点**：`module/SubModule.xml` = `v0.8.9`；`src/BridgeConfig.cs` `Version` = `"0.8.9"`
+**部署产物**：`Modules/BlBridge/bin/Win64_Shipping_Client/BlBridge.dll`，sha256 前缀 `14d788d2010560443551006d`
+
+### 1. 本次发布包含的唯一代码改动
+
+**多轮日志内时钟不同源**（外部评审发现，详见 §十六 ④ 与 README 第 402 行）。
+
+- **缺陷**：同一 jsonl 内 `round_start` / `round_cleanup` / `round_all_done` 的 `time` 复用了
+  `RoundOrchestratorBehavior._elapsed`（整场累计值），而每轮遥测是独立文件、其
+  `TelemetryBehavior.BeginNewRound` 已把遥测侧 `_elapsed` 归零 ⇒ **两条不衔接的时间轴**。
+  实测样本 `battle_20260924_220146_854.jsonl`：遥测主时钟 `0.01 → 155.70`，
+  而 `round_all_done` 落在 **300.45**（超出 144.75 秒）。
+- **性质**：**静默失真** —— 不抛异常、不丢数据，仅让按 `time` 切窗口的下游分析算错。
+  这正是它能在 v0.8.5–v0.8.8 四轮里存活的原因：离线编译、jsontest、人工读日志**全都看不见**。
+- **修复**：`Advance` 内 `_round++` 之后、`RoundLog("round_start")` 之前补 `_elapsed = 0f;`，
+  与 `tb.BeginNewRound` 共用同一原点。15 行插入 / 0 行删除，不新增字段。
+
+### 2. 真机回归证据（判据：§十一 第 6 条「时钟同源」）
+
+| 判据 | 修前 | 修后 |
+|---|---|---|
+| `round_start.time` | 144.72（整场累计） | **0**（该轮起点） |
+| `round_all_done.time` | 300.45（超出主时钟上限 155.70） | **17.23**（落在主时钟区间内） |
+| `round_cleanup.time` vs 同文件末条遥测 `time` | 不衔接 | **完全相等**（均 `224.3619`，两条时间轴合流） |
+
+- 新产物 **3/3 PASS**；历史 9 份 v0.8.7 日志**仍报 FAIL** ⇒ 对照组两侧都对，判定可信。
+- 校验器：`tools/bl_check_clock_reset.py`（从日志**自动发现** `round_*` 事件成员，不硬编码事件名）。
+
+### 3. 必跑项变化（AGENTS.md §三）
+
+由 **4 项升为 5 项**，新增：
+
+```
+python tools\bl_check_clock_reset.py --since <部署时刻 ISO>   # 新产物：期望 PASS
+python tools\bl_check_clock_reset.py                          # 全量：历史已知失败样本必须仍报 FAIL
+```
+
+带 `--since` 时**自动追加全量对照扫描**，一次运行即给「新产物 + 历史」两侧结论。
+
+### 4. 同期落地的文档与方法论
+
+- `AGENTS.md` 新增 **§四「发现与结论的纪律：必须能附上对照组」**：四种对照组类型
+  （受控实验 → 代码内对照 → 数据对照 → 受控样本对，强度递减）+「事实层与后果层要各自有对照」。
+- `README.md` §七 数据字典 `state` 行补**量纲警告**：`speed` 是 `MovementVelocity.Length`（世界单位 m/s），
+  而 `maxSpeed` / `combatSpeed` 是 `MaxSpeedMultiplier` / `CombatMaxSpeedMultiplier`（**倍率**，基准 1.0）
+  ⇒ **三者不可直接比较**。
+- 同期提交：`cfaad3d`（修复）→ `5db19ed`（必跑项 + 脚本脚手架）→ `baec499`（对照组纪律）→ `65db2b3`（README 量纲）。
