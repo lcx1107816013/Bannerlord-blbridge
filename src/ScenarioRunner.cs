@@ -416,7 +416,12 @@ namespace BlBridge
                 RoundOrchestratorBehavior.DefenderSquads = _pendingDefenderGroups;
                 RoundOrchestratorBehavior.AttackerSquadTroops = attackerGroupChars;
                 RoundOrchestratorBehavior.DefenderSquadTroops = defenderGroupChars;
-                OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
+                // v0.8.11：城池场景必须走 siege mission（理由见 IsSiegeScene 的实测说明）
+                SiegePending = IsSiegeScene(scene);
+                if (SiegePending)
+                    OpenSiegeMission(scene, attackerTroop, defenderTroop, aCount, dCount);
+                else
+                    OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;
 
@@ -756,6 +761,199 @@ namespace BlBridge
             "11.4.124.4345.4345.768.768.1.0.0.163.0.5.512.512.769.764.1.0.0",
             "11.45.126.4345.4345.768.768.1.0.0.462.0.13.512.512.769.764.1.0.0"
         };
+
+        // ── v0.8.11：攻城场景走官方 siege mission ────────────────────────────────
+
+        /// <summary>
+        /// 本场是否为 siege（攻城）模式。`Start` 每次开战前设置，供 `ScenarioProbe` 读。
+        /// </summary>
+        internal static bool SiegePending;
+
+        /// <summary>
+        /// 场景名 → 是否攻城场景（启发式）。
+        ///
+        /// 为什么必须区分（2026-09-25 真机受控对照）：城池场景（SandBox/SandBoxCore 的
+        /// `*_castle_*` / `*_town_*`）在 `MissionTeamAITypeEnum.FieldBattle` 装配下加载**必崩**
+        /// （native `0xc0000005`，进程死，只来得及写 meta 行）；同一请求换 `battle_terrain_a`
+        /// 则完全正常（2.24 MB 落盘）。城池场景必须由 siege mission 初始化。
+        ///
+        /// ⚠️ 这是**启发式**（按名字），不是引擎判据：排除 `*_keep_*` / `*_interior`
+        /// （领主大厅等室内场景，名字里也含 `_castle_`）。后续应改为显式请求参数。
+        /// </summary>
+        internal static bool IsSiegeScene(string scene)
+        {
+            if (string.IsNullOrEmpty(scene)) return false;
+            string s = scene.ToLowerInvariant();
+            if (s.IndexOf("_keep_", System.StringComparison.Ordinal) >= 0) return false;
+            if (s.IndexOf("interior", System.StringComparison.Ordinal) >= 0) return false;
+            if (s.IndexOf("_castle_", System.StringComparison.Ordinal) >= 0) return true;
+            if (s.IndexOf("_town_", System.StringComparison.Ordinal) >= 0) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 攻城开战：照官方自定义战斗（`CustomBattleHelper.StartGame` 的 "Siege" 分支）与
+        /// 官方 CPU benchmark（`CPUBenchmarkMissionLogic` 的 siege 分支）的用法。
+        ///
+        /// 与野战路径的两处关键差异：
+        ///   1) 入口是 `BannerlordMissions.OpenSiegeMissionWithDeployment` —— 城墙/攻城器械/攻城 AI/
+        ///      部署流程全部由引擎装配，BlBridge 的 `CreateBehaviors` 不参与；
+        ///   2) 它**返回 Mission** ⇒ 官方同款做法是随后 `AddMissionBehavior` 挂自己的行为
+        ///      （`CPUBenchmarkMissionLogic.cs:1341`）。此处挂 `ScenarioProbe`：
+        ///      它的 `OnBehaviorInitialize` 不会跑，但状态机全在 `OnMissionTick` 里，照常工作。
+        /// </summary>
+        private static void OpenSiegeMission(string scene, BasicCharacterObject attackerTroop,
+            BasicCharacterObject defenderTroop, int aCount, int dCount)
+        {
+            SiegeTrace("enter scene=" + scene + " a=" + aCount + " d=" + dCount);
+
+            BasicCultureObject culture = MBObjectManager.Instance.GetObject<BasicCultureObject>("empire");
+
+            CustomBattleCombatant attacker = new CustomBattleCombatant(
+                new TextObject("{=!}BlBridge Attacker"), culture, new Banner(Banners[0]));
+            attacker.Side = BattleSideEnum.Attacker;
+            attacker.AddCharacter(attackerTroop, aCount);
+
+            CustomBattleCombatant defender = new CustomBattleCombatant(
+                new TextObject("{=!}BlBridge Defender"), culture, new Banner(Banners[1]));
+            defender.Side = BattleSideEnum.Defender;
+            defender.AddCharacter(defenderTroop, dCount);
+
+            // 墙段血量：官方 `CustomBattleHelper.GetWallHitpointPercentages(0)` 就是 {1f, 1f}（两段完好）
+            float[] wallHitPointPercentages = new float[2] { 1f, 1f };
+
+            // 器械清单：id 与数量照 CPUBenchmarkMissionLogic 的 siege 分支
+            // （攻方 = 4 远程 + 1 攻城塔 + 1 撞车；守方 = 4 远程）
+            List<MissionSiegeWeapon> attackerMachines = BuildSiegeMachines(new string[]
+            {
+                "fire_ballista", "fire_ballista", "trebuchet", "trebuchet", "siege_tower_level2", "ram"
+            });
+            List<MissionSiegeWeapon> defenderMachines = BuildSiegeMachines(new string[]
+            {
+                "fire_ballista", "fire_ballista", "fire_ballista", "fire_ballista"
+            });
+            SiegeTrace("machines atk=" + attackerMachines.Count + " def=" + defenderMachines.Count);
+
+            bool isPlayerAttacker = _pendingPlayerSide == BattleSideEnum.Attacker;
+            CustomBattleCombatant playerParty = isPlayerAttacker ? attacker : defender;
+            CustomBattleCombatant enemyParty = isPlayerAttacker ? defender : attacker;
+
+            // 官方入口的第一个参数是"玩家角色"：无玩家也必须有（`CustomBattleHelper.StartGame`
+            // 会先写 `Game.Current.PlayerTroop`，CPUBenchmark 传的是 commander_1）。
+            BasicCharacterObject playerCharacter =
+                MBObjectManager.Instance.GetObject<BasicCharacterObject>("commander_1");
+            if (playerCharacter == null) playerCharacter = attackerTroop;
+            try { Game.Current.PlayerTroop = playerCharacter; }
+            catch { }
+            // 照 CPUBenchmarkMissionLogic：玩家角色**必须在该方的 combatant 里**
+            // （它把 commander_1 也 AddCharacter 进 playerParty）。代价：该方人数 +1 —— 记着这个口径偏移。
+            try { playerParty.AddCharacter(playerCharacter, 1); }
+            catch (Exception ex) { AppendSiegeError("add playerCharacter: " + ex.GetType().Name); }
+
+            SiegeTrace("calling OpenSiegeMissionWithDeployment playerChar="
+                + (playerCharacter == null ? "null" : playerCharacter.StringId)
+                + " isPlayerAttacker=" + isPlayerAttacker
+                + " atk=" + attacker.NumberOfHealthyMembers + " def=" + defender.NumberOfHealthyMembers);
+
+            Mission mission = BannerlordMissions.OpenSiegeMissionWithDeployment(
+                scene,
+                playerCharacter,
+                playerParty,
+                enemyParty,
+                false,          // isPlayerGeneral：**改为 false** ——
+                                //   官方自定义战斗里玩家是真人、会下命令；传 true 时攻方（玩家侧）
+                                //   疑似在等玩家指挥，实测推到墙下后全体停摆（aiState 只剩 AlarmStateMask）。
+                                //   commander_1 仍留在 party 里（不留在 party 的话首次尝试崩过）。
+                wallHitPointPercentages,
+                true,           // hasAnySiegeTower：与清单里的 siege_tower_level2 对应
+                attackerMachines,
+                defenderMachines,
+                isPlayerAttacker,
+                3,              // sceneUpgradeLevel（CPUBenchmark 同值）
+                "",             // seasonString
+                false,          // isSallyOut
+                false,          // isReliefForceAttack
+                6f);            // timeOfDay
+
+            SiegeTrace("returned mission=" + (mission == null ? "null" : "ok"));
+
+            if (mission != null)
+            {
+                mission.AddMissionBehavior(new ScenarioProbe());
+                SiegeTrace("probe attached");
+                // 关键诊断：确认"攻城语义"真的开着（`IsSiegeBattle == MissionTeamAIType == Siege`）。
+                // 若它是 false，则引擎的攻城 AI 与 SiegeAIFix 的攻城逻辑**整段不执行** ⇒ 攻方必然停摆。
+                try
+                {
+                    SiegeTrace("mission flags: IsSiegeBattle=" + mission.IsSiegeBattle
+                        + " TeamAIType=" + mission.MissionTeamAIType
+                        + " IsFieldBattle=" + mission.IsFieldBattle
+                        + " IsSallyOut=" + mission.IsSallyOutBattle);
+                }
+                catch (Exception ex)
+                {
+                    SiegeTrace("flags read failed: " + ex.GetType().Name);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 按 id 批量取 `SiegeEngineType` 并包成 `MissionSiegeWeapon`。
+        /// 取不到 / 工厂返回 null 一律**跳过**（宁可少一件器械，也不让 null 进引擎），并记账到 LastError。
+        /// </summary>
+        private static List<MissionSiegeWeapon> BuildSiegeMachines(string[] engineTypeIds)
+        {
+            List<MissionSiegeWeapon> machines = new List<MissionSiegeWeapon>();
+            MBObjectManager om = MBObjectManager.Instance;
+            if (om == null) return machines;
+            for (int i = 0; i < engineTypeIds.Length; i++)
+            {
+                SiegeEngineType type = om.GetObject<SiegeEngineType>(engineTypeIds[i]);
+                if (type == null)
+                {
+                    AppendSiegeError("siege engine type 不存在: " + engineTypeIds[i]);
+                    continue;
+                }
+                MissionSiegeWeapon weapon = MissionSiegeWeapon.CreateDefaultWeapon(type);
+                if (weapon == null)
+                {
+                    AppendSiegeError("CreateDefaultWeapon 返回 null: " + engineTypeIds[i]);
+                    continue;
+                }
+                machines.Add(weapon);
+            }
+            return machines;
+        }
+
+        private static void AppendSiegeError(string detail)
+        {
+            string entry = "siege: " + detail;
+            if (LastError.Contains(entry)) return;
+            LastError = string.IsNullOrEmpty(LastError) ? entry : LastError + " | " + entry;
+        }
+
+        /// <summary>
+        /// 攻城路径的定向插桩：把装配节点追加写到 `&lt;LogDir&gt;\siege_debug.log`。
+        ///
+        /// 为什么需要：真机失败是**进程级**的（BUTR CrashReport + 进程消失），日志里拿不到托管栈。
+        /// 最后写成功的那一行就是"界碑"—— 它能区分「崩在我们自己的代码里」与「崩在引擎内部
+        /// （`OpenSiegeMissionWithDeployment` 返回之前）」，而这正是当前最需要知道的事。
+        /// 整体 try/catch：插桩绝不能成为新的崩溃源。
+        /// </summary>
+        private static void SiegeTrace(string message)
+        {
+            try
+            {
+                string dir = BridgeConfig.LogDir;
+                if (string.IsNullOrEmpty(dir)) return;
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "siege_debug.log"),
+                    Jw.UtcNow() + " " + message + "\n", new UTF8Encoding(false));
+            }
+            catch
+            {
+            }
+        }
 
         private static void OpenMission(string scene, BasicCharacterObject attackerTroop,
             BasicCharacterObject defenderTroop, int aCount, int dCount)
@@ -1395,6 +1593,93 @@ namespace BlBridge
                 }
             }
 
+            // ── v0.8.11：攻城路径跳过「部署阶段」────────────────────────────────────
+            // ⚠️ 必须是**实例**字段（不是 `static`）：`ScenarioProbe` 每场新建一个实例，
+            //    写成 static 会让"已结束部署"跨场保留 ⇒ 第二场一进来就 return、部署永远结束不了。
+            //    2026-09-25 真机踩到：第二次跑攻城卡在部署界面，插桩里连一行都没有。
+            private bool _siegeDeploymentFinished;
+
+            /// <summary>
+            /// 无玩家时结束攻城部署阶段。照官方 CPU benchmark 的两步
+            /// （`CPUBenchmarkMissionLogic.cs:376-381`）：
+            ///   1) 给引擎一个"玩家代理"：`Mission.Current.MainAgent = AttackerTeam.ActiveAgents[0]`
+            ///      —— 官方 benchmark 是无玩家自动跑的，它也是这么干的；
+            ///   2) `DeploymentHandler.FinishDeployment()` 结束部署。
+            /// 只做一次；handler/agent 还没就绪就下帧再试（那不是错误）。整体 try/catch，绝不抛。
+            /// ⚠️ 尚未真机验证：若部署仍不结束，下一步改成官方那种 `Utilities.ConstructMainThreadJob(...)` 排队调用。
+            /// </summary>
+            private bool _siegeWaitLogged;
+            private bool _flagsLogged;
+
+            private void TryFinishSiegeDeployment(Mission m)
+            {
+                if (_siegeDeploymentFinished) return;
+                try
+                {
+                    DeploymentHandler handler = null;
+                    foreach (MissionBehavior behavior in m.MissionBehaviors)
+                    {
+                        DeploymentHandler candidate = behavior as DeploymentHandler;
+                        if (candidate != null) { handler = candidate; break; }
+                    }
+                    if (handler == null) return;
+
+                    // 官方同款第一步：无玩家也得有个 MainAgent（CPUBenchmarkMissionLogic.cs:379）。
+                    // ★ 没有 agent 就**必须等** —— 在 MainAgent=null 时调 FinishDeployment 会抛异常，
+                    //   而且部署阶段会永远结束不了（2026-09-25 真机实测）。
+                    if (m.MainAgent == null)
+                    {
+                        if (m.AttackerTeam != null)
+                        {
+                            foreach (Agent agent in m.AttackerTeam.ActiveAgents)
+                            {
+                                m.MainAgent = agent;
+                                break;
+                            }
+                        }
+                        if (m.MainAgent == null)
+                        {
+                            if (!_siegeWaitLogged)
+                            {
+                                _siegeWaitLogged = true;
+                                SiegeTrace("waiting for attacker agents; atkActive=" + AgentCount(m.AttackerTeam)
+                                    + " defActive=" + AgentCount(m.DefenderTeam) + " runState=" + State);
+                            }
+                            return;
+                        }
+                        SiegeTrace("mainAgent set; atkActive=" + AgentCount(m.AttackerTeam)
+                            + " defActive=" + AgentCount(m.DefenderTeam) + " runState=" + State);
+                    }
+
+                    handler.FinishDeployment();
+                    _siegeDeploymentFinished = true;
+                    SiegeTrace("FinishDeployment OK; runState=" + State);
+                }
+                catch (Exception ex)
+                {
+                    // 不每帧重试（异常 + 刷日志成本高）：把**异常原文**落盘，下次真机就能据它定位
+                    _siegeDeploymentFinished = true;
+                    SiegeTrace("FinishDeployment FAILED: " + ex.GetType().Name + ": " + ex.Message);
+                    LastError = "siege_deploy: " + ex.GetType().Name + ": " + ex.Message;
+                }
+            }
+
+            /// <summary>数该方 active agent（诊断用；取不到一律 -1）。</summary>
+            private static int AgentCount(Team team)
+            {
+                if (team == null) return -1;
+                try
+                {
+                    int n = 0;
+                    foreach (Agent agent in team.ActiveAgents) n++;
+                    return n;
+                }
+                catch
+                {
+                    return -1;
+                }
+            }
+
             public override void OnMissionTick(float dt)
             {
                 base.OnMissionTick(dt);
@@ -1403,6 +1688,79 @@ namespace BlBridge
                     if (_endCalled) return;
                     Mission m = this.Mission;
                     if (m == null) return;
+
+                    // v0.8.11：攻城路径的部署收尾**必须在 State 判断之前**无条件尝试 ——
+                    // 真机实测（2026-09-25）：agent 生成晚于最初几帧，而 Loading 分支一旦因
+                    // CountAlive>0 切到 Running 就再也不进 ⇒ 部署永远结束不了 ⇒ 主线程死锁
+                    // （症状：游戏卡在部署界面、命令通道 no_response、进程仍在但 CPU 灌满）。
+                    if (SiegePending) TryFinishSiegeDeployment(m);
+
+                    // v0.8.11：攻城语义/TeamAI 只能在 **tick 阶段**读 —— `MissionCombatantsLogic`
+                    // 是在 `EarlyStart()` 里设 `Mission.MissionTeamAIType` 并挂
+                    // `TeamAISiegeAttacker`/`TeamAISiegeDefender` 的，而 `OpenSiegeMissionWithDeployment`
+                    // 返回时 `EarlyStart` 还没跑（实测在返回点读到的是初始值 `NoTeamAI`，属误判）。
+                    // 每场只读一次，并直接读每队的 TeamAI 类型（没挂上 = 没有攻城战术）。
+                    if (SiegePending && !_flagsLogged)
+                    {
+                        _flagsLogged = true;
+                        try
+                        {
+                            string attAI = "?";
+                            string defAI = "?";
+                            try
+                            {
+                                attAI = m.AttackerTeam == null ? "nullTeam"
+                                    : (m.AttackerTeam.TeamAI == null ? "null" : m.AttackerTeam.TeamAI.GetType().Name);
+                            }
+                            catch (Exception ex) { attAI = "err:" + ex.GetType().Name; }
+                            try
+                            {
+                                defAI = m.DefenderTeam == null ? "nullTeam"
+                                    : (m.DefenderTeam.TeamAI == null ? "null" : m.DefenderTeam.TeamAI.GetType().Name);
+                            }
+                            catch (Exception ex) { defAI = "err:" + ex.GetType().Name; }
+                            SiegeTrace("flags@tick runState=" + State
+                                + " IsSiegeBattle=" + m.IsSiegeBattle
+                                + " TeamAIType=" + m.MissionTeamAIType
+                                + " attackerTeamAI=" + attAI
+                                + " defenderTeamAI=" + defAI);
+                        }
+                        catch (Exception ex)
+                        {
+                            SiegeTrace("flags@tick failed: " + ex.GetType().Name + ": " + ex.Message);
+                        }
+
+                        // 若"攻城语义/TeamAI"没挂上 ⇒ 按官方 `MissionCombatantsLogic.EarlyStart` 的
+                        // 代码补齐：设 `MissionTeamAIType = Siege`，并给每队挂
+                        // `TeamAISiegeAttacker` / `TeamAISiegeDefender`（那是攻城战术的真身）。
+                        // **只在缺失时补**（`team.TeamAI != null` 就完全不动）⇒ 不干扰引擎自己的行为。
+                        try
+                        {
+                            if (m.MissionTeamAIType != Mission.MissionTeamAITypeEnum.Siege)
+                            {
+                                m.MissionTeamAIType = Mission.MissionTeamAITypeEnum.Siege;
+                                SiegeTrace("fixup: MissionTeamAIType -> Siege");
+                            }
+                            foreach (Team team in m.Teams)
+                            {
+                                if (team == null || team.TeamAI != null) continue;
+                                if (team.Side == BattleSideEnum.Attacker)
+                                {
+                                    team.AddTeamAI(new TeamAISiegeAttacker(m, team, 5f, 1f));
+                                    SiegeTrace("fixup: added TeamAISiegeAttacker");
+                                }
+                                else if (team.Side == BattleSideEnum.Defender)
+                                {
+                                    team.AddTeamAI(new TeamAISiegeDefender(m, team, 5f, 1f));
+                                    SiegeTrace("fixup: added TeamAISiegeDefender");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            SiegeTrace("fixup failed: " + ex.GetType().Name + ": " + ex.Message);
+                        }
+                    }
 
                     if (State == RunStateLoading)
                     {
