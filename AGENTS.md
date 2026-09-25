@@ -42,19 +42,27 @@ python tools\check_repo_encoding.py                  # 编码体检：UTF-8 无 
 python tools\bl_selftest.py                          # 离线自测（合成数据 + MCP 协议 + 控制通道 + 构建链）
 python tools\bl_metrics_selftest.py                  # 指标模块自测
 powershell -ExecutionPolicy Bypass -File tools\jsontest\build_and_run.ps1   # C# 离线单测（Jmini/RequestGuard/SquadSpec…）
+python tools\bl_check_clock_reset.py                 # 多轮日志「时钟同源」校验（见下）
 ```
 
-**多轮实验（`--rounds > 1`）跑完之后，另跑一次时钟同源校验**：
+**第 5 项（时钟同源校验）是正式必跑项**，理由不是「它很重要」，而是**它的判据本身就是对照实验**：
 
-```powershell
-python tools\bl_check_clock_reset.py --since <部署时刻 ISO>   # 只看新产物
-python tools\bl_check_clock_reset.py                          # 全量：历史日志的已知失败样本必须仍被报出
+```
+python tools\bl_check_clock_reset.py --since <部署时刻 ISO>   # 新产物：期望 PASS
+python tools\bl_check_clock_reset.py                          # 全量：历史已知失败样本**必须仍报 FAIL**
 ```
 
-这条不是可选的：`round_*` 事件的 time 曾经用过整场累计值而当轮内值用
-（v0.8.5–v0.8.8，详见 PROGRESS §十一 判据 6 与 §十二 ④），**症状是静默错**——
-没有异常、没有报错，只是下游按 time 切窗口时算错。所以不变量必须可执行。
-注意两次都要跑：只看新产物的话，一个永远返回 PASS 的脚本也能骗过你。
+**一次跑必须同时给出两边结果**：
+- 新产物 **0 失败** —— 说明修复生效；
+- 历史日志里的已知失败样本**仍被报出** —— 说明这个校验器**真的在判定**，而不是永远返回 PASS。
+
+只有新产物那半边，等于没有对照组：一个恒返回 PASS 的脚本、一个数据源接错的脚本、
+一个正则写错把所有事件都跳过的脚本 —— 都会「通过」。**这也是整个项目所有验证的通用纪律**：
+`bl_metrics` 的合成事件手算期望、`bl_compare` 的换边双跑、jsontest 的「应报 / 不应报」样本对，
+本质都是同一件事 —— **没有对照组的验证不是验证，只是自证**。
+
+细节见修复记录与 PROGRESS §十一 判据 6：`round_*` 的 time 曾用整场累计值当轮内值
+（v0.8.5–v0.8.8），**症状是静默错** —— 无异常、无报错，只是下游按 time 切窗口时算错。
 
 另外两条与编码相关的纪律（踩过坑）：
 

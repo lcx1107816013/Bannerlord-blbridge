@@ -18,16 +18,18 @@
 **教训：写「覆盖某类事件」的校验器时，先枚举该类事件的完整成员表。**
 
 用法：
-    python tools/bl_check_clock_reset.py                       # 扫默认 battles 目录
-    python tools/bl_check_clock_reset.py <日志目录>
-    python tools/bl_check_clock_reset.py --since 2026-09-25T11:10:00   # 只查该时刻之后的文件
+    python tools/bl_check_clock_reset.py                       # 全量：所有多轮日志
+    python tools/bl_check_clock_reset.py --since 2026-09-25T11:10:00   # 只查新产物 + 自动对照组
     python tools/bl_check_clock_reset.py --json-out result.json        # 结果落盘
 
-退出码：0 = 通过（有 PASS 且无 FAIL）；1 = 有 FAIL 或无 PASS；2 = 环境问题。
+**关于 `--since` 与对照组（重要）**：
+带 `--since` 时，脚本会在查完新产物之后**自动再扫一遍全量**，作为对照组 ——
+因为「新产物 0 失败」单独拿出来**证明不了任何事**：一个恒返回 PASS 的脚本、
+一个数据源接错的脚本、一个把所有事件都跳过的脚本，都会得到这个结果。
+只有当**历史日志里的已知失败样本仍被报出 FAIL**，才说明这个校验器真的在判定。
+所以这一步不做成「请用户手动再跑一次」，而是脚本自己完成（`--json-out-only` 可跳过）。
 
-注意：`--since` 是本脚本的关键用法。回归时历史日志里存着**修复前**的失败样本，
-不筛掉它们会淹没新结果；但同时**必须**在历史日志上再跑一次，
-确认脚本能抓出那些已知失败 —— 只报 PASS 的脚本可能是永远返回 PASS。
+退出码：0 = 通过（新产物有 PASS 且无 FAIL）；1 = 有 FAIL 或无 PASS；2 = 环境问题。
 """
 
 import argparse
@@ -147,6 +149,8 @@ def main(argv):
                     help="只查 mtime 晚于该 ISO 时间（如 2026-09-25T11:10:00）的文件")
     ap.add_argument("--json-out", dest="json_out", default=None,
                     help="把完整结果写入该 JSON 文件")
+    ap.add_argument("--json-out-only", dest="json_out_only", action="store_true",
+                    help="配合 --since：跳过自动对照组（脚本化调用时用）")
     args = ap.parse_args(argv[1:])
 
     if not os.path.isdir(args.battles_dir):
@@ -209,10 +213,43 @@ def main(argv):
         print("      （先看 mtime：早于部署时刻的是修复前历史产物，不构成本轮回归失败）")
     elif n_pass:
         print("结论: **通过** —— %d 份多轮文件时钟同源，0 份失败。" % n_pass)
-        print("      ⚠️ 仅此不足以定论：还须在历史日志上跑一次，确认脚本仍能抓出已知失败样本。")
+        if args.since and not args.json_out_only:
+            print("      对照结果见下方（脚本已自动跑全量，验证本校验器有区分力）。")
+        else:
+            print("      ⚠️ 这只说明「这些文件没问题」，不能证明本校验器有判定能力。")
+            print("         加 --since <部署时刻> 可让脚本自动带上对照组。")
     else:
         print("结论: 无法判定（全部 INCONCLUSIVE）。")
     print("=" * 72)
+
+    # ── 对照组：不带 --since 时，自动把「已知失败样本是否仍被报出」一并给出 ──
+    # 理由：只看新产物等于没有对照。一个恒返回 PASS 的脚本、一个数据源接错的脚本、
+    # 一个把所有事件都跳过的脚本 —— 都会「通过」。只有「历史失败样本仍报 FAIL」才能证明
+    # 这个校验器真的在判定。所以这一步不做成「请用户手动再跑一次」，而是脚本自己完成。
+    if args.since and not args.json_out_only:
+        print()
+        print("=" * 72)
+        print("对照组（全量扫描，验证本校验器有区分力）")
+        print("=" * 72)
+        all_res = [analyze(p) for p in files]
+        all_multi = [r for r in all_res if r["has_round"]]
+        all_fail = [r for r in all_multi if r["verdict"] == "FAIL"]
+        all_pass = [r for r in all_multi if r["verdict"] == "PASS"]
+        print("  全量多轮文件 %d 份：PASS %d / FAIL %d"
+              % (len(all_multi), len(all_pass), len(all_fail)))
+        for r in all_fail[:5]:
+            print("    FAIL %-38s v%-7s %s" % (r["file"], r["version"] or "?", r["detail"]))
+        if len(all_fail) > 5:
+            print("    ... 共 %d 份" % len(all_fail))
+        print()
+        if all_fail:
+            print("  ⇒ 区分力成立：新产物 0 失败 + 历史 %d 份仍报 FAIL —— **两侧都对，判定可信**。"
+                  % len(all_fail))
+        else:
+            print("  ⚠️ 对照组为空：全量扫描没有任何 FAIL。")
+            print("     这不能证明新产物是对的 —— 只能说明这个校验器**从未报出过任何失败**。")
+            print("     请用一个**已知含缺陷的样本**（如修复前的历史日志）验证它确实会报 FAIL。")
+        print("=" * 72)
 
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as fh:
