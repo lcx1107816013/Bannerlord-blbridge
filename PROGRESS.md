@@ -1,6 +1,6 @@
 # BlBridge 进度列表
 
-> **最后核实：2026-09-25（v0.8.10 修复轮，见 §二十）**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37；本轮只做机理取证与工具准备，见 §十四）
+> **最后核实：2026-09-25（v0.8.10 修复轮，见 §二十；**最近一次游戏内验证 = §二十 §5**，2026-09-25 12:50–12:57）**（本文件由 Reasonix 会话建立并维护）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
 > 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
 > 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
@@ -1538,7 +1538,9 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 **版本落点**：`module/SubModule.xml` = `v0.8.10`；`src/BridgeConfig.cs` `Version` = `"0.8.10"`
 **离线验证**：`build.ps1` csc **0 error / 0 warning**（产物 81.5 KB，manifest 版本 0.8.10）；
 `check_repo_encoding.py` 65 文件全合规；`bl_selftest.py` / `bl_metrics_selftest.py` / `jsontest` 全部 `结果: 全部通过`
-**真机状态**：❌ **未部署、未真机回归** —— 本轮只做到「编译 + 离线判据 + 判据自身的双侧对照」
+**真机状态**：✅ **已部署并完成真机回归**（2026-09-25 12:50–12:57，见 §5）——
+场景守卫样本对 6/6、`probe` 时钟 3 轮同源、看门狗熔断受控实验全部通过；
+期间另外发现 2 条既有问题/细节（§5.3 附带发现、§5.4 多轮被压成单轮）
 
 ### 0. 本轮的两份输入：同一批代码、两个独立视角
 
@@ -1660,17 +1662,14 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 - `docs/`：本轮两份输入都落盘 —— `bug-hunt-2026-09-25-v0.8.9.md`（此前未跟踪）与本审查报告
   `code-review-2026-09-25-v0.8.9-ocr.md`（新落盘，顶部附 B1–B7 的处置结果表）。
 
-### 4. 未做（下次开游戏时的真机待办，按优先级）
+### 4. 真机待办（**已执行**，结果见 §5）
 
-1. **场景守卫（B3）** —— 这是本轮唯一"改完仍未运行过"的代码，且它是**所有 `start` 的必经之路**：
-   一次传 `battle_terrain_a`（应放行）+ 一次传 `bridge`（应被拒且不崩）。
-   若 `GetActiveModules()` 在 `start` 时机返回空，表现是**所有场景都被拒**（fail-closed、不崩）⇒ 看返回消息即可判定。
-2. **`probe` 时钟（B2）** —— 跑一场 `--rounds 3`，再跑 `tools/bl_check_clock_reset.py --since <部署时刻>`，
-   期望：新产物 3 份 **PASS**（`probe` 不再越界）+ 历史 11 份仍 **FAIL**。
-3. **看门狗** —— 构造一次 loading 卡死，期望 120 s 后状态从 `loading` 变 `error`、`busy=false`，
-   且 `result.reason = "watchdog_loading"`；同时确认**下一次 `start` 能被接受**（这是它存在的理由）。
-4. **一条待办（本轮刻意没做）**：把时钟判据的"应报/不应报"样本做成 `bl_selftest.py` 里的**合成 jsonl 断言**，
+1. ~~场景守卫（B3）：`battle_terrain_a` 应放行 + `bridge` 应被拒且不崩~~ ⇒ **§5.1 通过**（6/6）
+2. ~~`probe` 时钟（B2）：`--rounds 3` 后跑校验器，新产物 PASS + 历史仍 FAIL~~ ⇒ **§5.2 通过**
+3. ~~看门狗：构造 loading 卡死，验证 120 s 后收尾且后续 `start` 能被接受~~ ⇒ **§5.3 通过**（受控实验，阈值临时 0.5 s）
+4. **仍待办（本轮刻意没做）**：把时钟判据的"应报/不应报"样本做成 `bl_selftest.py` 里的**合成 jsonl 断言**，
    这样判据退化时不必依赖真实游戏日志就能被抓到。
+5. **新登记（真机副产品）**：`--rounds` 多轮被压成单轮（§5.4）—— 既有缺陷，与本轮修复无关，建议单独立项。
 
 **已知限制（如实标注）**：
 
@@ -1679,4 +1678,88 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
   影响很小：该文件的 `state` 只被 `bl_mcp` 的**崩溃归因**使用（进程存活时直接判 `running`），
   而卡死时进程仍活着。之所以不顺手调用 `SubModule.NotifyBattleFinished()`：若随后的
   `EndMission()` 竟生效，`TelemetryBehavior.OnEndMission` 会再回调一次 ⇒ `missionsThisSession` 双计。
-- **真机未验证**：本轮所有修复（含工作区里已存在的看门狗）都只到「编译 + 离线判据」这一层。
+  （§5.3 的实验证实了第二种情形确实会发生 —— `EndMission` 在"mission 正常但状态被判 error"时会生效。）
+
+### 5. 真机回归结果（2026-09-25 12:50–12:57）
+
+**环境**：部署产物 sha `b0548d88…`，与 `out\BlBridge.dll` **逐字节一致**；`bl_cmd.py buildcheck` 判
+**四段一致**（源码 = 构建产物 = 部署文件 = **进程内 DLL**，版本 0.8.10，`fileChangedSinceLoad=false`）；
+`bridge_status.json` 的 `role=game`；`SubModule.xml` 也是 `v0.8.10`。
+
+> 部署过程中的一个环境细节：`Bannerlord.BLSE.Launcher` **会预加载** `Modules/*/bin/.../*.dll`
+> 并跑 `OnSubModuleLoaded`（所以它自己就写了 `bridge_status.json` 的 `pid/version`），
+> 因此**它开着就无法覆盖 dll**（`build.ps1 -Deploy` 会报 "The deployed DLL is locked"）。
+> 本机该机型的游戏本体进程名就是 `Bannerlord.BLSE.Launcher`（不是 `Bannerlord`）。
+
+#### 5.1 场景守卫（B3/B4/B5）—— **通过** ✅
+
+受控样本对 = 同一 `start` 路径，**只换场景名**：
+
+| 输入 | 期望 | 实得 |
+|---|---|---|
+| `battle_terrain_a` | 放行 | `accepted:true`，战斗正常跑完（`defenderWiped`，18.84 s） |
+| `bridge` | 拒绝 + **不崩** | `unknown_scene` + 12 个可用场景清单，进程 `Responding=True` |
+| `..` | 拒绝 | `unknown_scene` |
+| `../etc/passwd` | 拒绝 | `unknown_scene` |
+| `a/b` | 拒绝 | `unknown_scene` |
+| `battle_terrain_zzz` | 拒绝 | `unknown_scene` |
+
+> 这是 v0.8.9 那道守卫**第一次真正跑起来**：旧版本对这 6 条**每一条**（含合法的 `battle_terrain_a`）
+> 都会返回 `unknown_scene`。同时**证伪**了 §十九 记的「7/7 通过」—— 其中「`battle_terrain_a` 放行」
+> 在旧代码下不可能出现（该记录已就地更正）。
+
+#### 5.2 `probe` 时钟同源（B2）—— **通过** ✅
+
+`--rounds 3 --round-swap --round-end-alive 3`（8v8）产出 3 个独立文件。缺陷**只在轮次 ≥2 可见**，
+故直接比对每份文件里 `probe` 与锚时钟（`state`）的范围：
+
+| 文件 | 轮 | `probe.time` | 同文件其余事件上界 | v0.8.9 同类文件的对照 |
+|---|---|---|---|---|
+| `battle_20260925_125226_819.jsonl` | 1 | 10.03–190.21 | 191.82 | （轮 1 本来不可见） |
+| `battle_20260925_125246_230.jsonl` | **2** | **10.03–110.19** | 110.19 | `…_111509_578`：230.39–310.42 |
+| `battle_20260925_125257_247.jsonl` | **3** | **10.04–20.05** | 24.75 | `…_111518_709`：320.44–330.45 |
+
+`probe` 现在从 10.03 起（= `_nextReportAt` 随 `BeginNewRound` 归零后的首次上报），与锚时钟同源。
+
+校验器：`--since 2026-09-25T12:45:00` ⇒ 新产物 **3 份 PASS / 0 失败**，自动对照组显示历史 **11 份仍 FAIL**
+（区分力成立，退出码 0）。
+
+顺带印证 `OVER_TOL = 3.0 s` 的取值：本轮 `round_cleanup.time` 超出锚上界最多 **1.81 s**
+（191.82 vs 190.01 —— 末条 `state` 到轮末的死区），落在容差内；而异源时钟的平移量是整轮时长（数十~数百秒）。
+
+#### 5.3 看门狗（loading 卡死熔断）—— **通过**（受控实验）✅
+
+**为什么用受控实验而不是"造一次真卡死"**：原构造法（传不存在的场景名触发原生异常）已被 5.1 的守卫堵住；
+而正常 loading 只需 1–3 s，且 `LastHeartbeatUnix` **只在 running 态每 tick 更新**（loading 期不更新）
+⇒ 把阈值压到 0.5 s 等价于「用可复现的方式把 loading 拖过阈值」，不必再造一个会崩进程的场景。
+
+**实验设计**：只改 `ScenarioRunner.WatchdogLoadingSeconds` **一个变量**（`120f` → `0.5f`），
+用 `git checkout` 兜底恢复；部署前用 `ilspycmd` 反编译确认部署产物里确实是 `0.5f`。
+
+| 步骤 | 期望 | 实得 |
+|---|---|---|
+| `start`（`battle_terrain_a`） | `accepted` + `loading` | ✅ `accepted:true` |
+| ~0.5 s 后 `status` | `state=error` / `busy=false` / `reason=watchdog_loading` | ✅ 两次运行分别 0.5134 s / 0.5018 s 触发 |
+| `lastError` | 带秒数与阈值 | ✅ "看门狗：状态 loading 已 0.501794338 秒无 mission tick 推进（阈值 0.5），判定卡死并强制收尾" |
+| **再一次 `start`** | **`accepted`**（而不是"已有一场推演在进行中"） | ✅ `accepted:true` —— **熔断后桥恢复可用** |
+| 进程 | 不崩 | ✅ `Responding=True` |
+
+**附带发现（读码注释已补）**：`EndMission()` 在"mission 正常加载、只是状态被判 error"时会**真的生效**，
+其 `OnEndMission()` 会**重写 `ResultJson`** ⇒ 看门狗写的 `stuckState`/`stuckSec` 被覆盖
+（`reason` 因两者共用 `_endReason` 而保留）。真卡死时 `EndMission` 无效，看门狗那份 result 才会原样保留。
+⇒ 两条路径都能拿到 `reason=watchdog_loading`，但**诊断字段只在真卡死路径可见**。
+另：`EndMission` 生效时引擎在主线程卸载 mission，命令泵被挤住 ⇒ 熔断后 `status` 会**短暂超时（约 10 s）**，
+重试即恢复（实测一次）。
+
+#### 5.4 真机副产品：**多轮被压成单轮**（既有缺陷，非本轮引入）
+
+首跑 `--rounds 3 --round-swap`（8v8，`roundEndAlive` 默认 1）只产出 **1 个**文件、**无任何 `round_*` 事件**，
+结束 reason 是 `attackerWiped`。根因（读码 + 本轮实测）：
+
+- `RoundOrchestratorBehavior.OnMissionTick` 每 **0.5 s** 才检查一次换轮条件（某方 ≤ `EndAlive`）；
+- `ScenarioRunner` 自己的探针**每 tick** 检查 `aAlive == 0` ⇒ 立即 `Finish("attackerWiped")`；
+- 正常路径下轮次在"一方剩 1 人"时被编排器提前清场，探针看不到 0；
+  但**最后两名 agent 在同一 0.5 s 窗口内同时战死**时，探针抢先结束 mission ⇒ 后面的轮次没了。
+
+⇒ 换 `--round-end-alive 3` 后稳定产出 3 轮（5.2 的数据即来自该配置）。
+**该缺陷独立于本轮修复**，建议单独立项（可选修法：多轮启用时让探针跳过 `*Wiped` 判定，交给编排器）。

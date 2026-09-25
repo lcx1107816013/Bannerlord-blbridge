@@ -466,6 +466,12 @@ namespace BlBridge
         /// 判据：自 LastHeartbeatUnix 起超过阈值仍无 tick ⇒ 判定卡死，状态侧强制收尾。
         /// 收尾顺序：**先**落状态（Busy 立刻转 false，调用方能拿到失败原因并继续发请求），
         /// **后**尝试 EndMission（引擎已异常时大概率无效，历史实测"abort 无效"但不新增崩溃）。
+        ///
+        /// 实测补记（v0.8.10 真机受控实验，见 PROGRESS §二十 §5.3）：`EndMission()` 在
+        /// "mission 正常加载、只是状态被判卡死"时会**真的生效**，其 `OnEndMission()` 会**重写 ResultJson**
+        /// ⇒ 下面写的 `stuckState` / `stuckSec` 会被覆盖（`reason` 因两者共用 `_endReason` 而保留）。
+        /// 真卡死时 EndMission 无效，本函数写的 result 才原样保留 ⇒ 两条路径都能拿到
+        /// `reason="watchdog_loading"`，但**诊断字段只在真卡死路径可见**（`LastError` 两路都有）。
         /// </summary>
         public static void Watchdog()
         {
