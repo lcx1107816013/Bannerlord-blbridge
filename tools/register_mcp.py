@@ -31,7 +31,9 @@ def build_entry():
         "command": sys.executable,
         "args": [os.path.join(HERE, "bl_mcp.py")],
         "env": {"BANNERLORD_DIR": DEFAULT_GAME_DIR},
-        "description": "BlBridge - 骑砍2 战斗遥测：分析战斗日志(血量/伤害模型校验)、回读/修改 Warbandlord 配置（6 个工具）",
+        "description": ("BlBridge - 骑砍2 战斗遥测与 AI 推演桥：战斗日志分析（血量/伤害模型校验）、"
+                        "配置回读与改写、AI 对 AI 开战、无人值守启动游戏（BLSE）、"
+                        "桌面/游戏 GUI 操作（列窗口 / 截图+网格 / 按格点击 / 按键）"),
     }
 
 

@@ -883,7 +883,186 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "bl_launch_game",
+        "description": ("无人值守启动 Bannerlord（走 BLSE）：带完整模块列表，并自动应答两个模态弹窗"
+                        "（Safe Mode -> 否；Mod change detected -> 确定）。"
+                        "不带模块列表启动会以「no mods 模式」起来、BlBridge 不会加载；"
+                        "两个弹窗没人答则 launcher 自己退出、游戏永远起不来 —— 这两点都踩过。"
+                        "成功判据是游戏窗口出现（不需要看屏幕）。约 20~60 秒。"
+                        "落地实现 = tools/bl_launch.ps1，本工具只是它的可调用入口。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timeoutSec": {"type": "integer", "description": "等待游戏窗口的上限秒数，默认 150"},
+                "skipModuleList": {"type": "boolean",
+                                   "description": "调试用：不带 _MODULES_ 列表启动（结果是 no-mods 模式）"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_desktop_windows",
+        "description": ("列出当前可见的顶层窗口：标题 / 进程号 / **物理像素**坐标与尺寸（本机 3840x2160@150%，"
+                        "已 DPI 校正）。用于判断游戏是否在跑、窗口是否在前台、拿 windowId 给其它工具用。"
+                        "后端 = gridhand（外部 CLI，软依赖；未安装时返回 available=false 与安装提示）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": {"type": "string", "description": "按标题子串过滤（大小写不敏感），如 bannerlord"},
+                "limit": {"type": "integer", "description": "最多返回条数，默认 40"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_desktop_screenshot",
+        "description": ("截屏（全屏或某个窗口），可叠加 16x9 的**带标签网格**（每格中心有十字准星），"
+                        "也可放大到某一格看子网格。返回 PNG 路径 —— 用 view_image 读它即可看到画面。"
+                        "为什么用网格：agent 从截图目测像素坐标误差极大（本机 150% 缩放时曾整体偏 1.5 倍，"
+                        "把两次点击砸到主菜单的「退出游戏」上）。先截图读格名，再用 bl_desktop_click 点该格。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "windowId": {"type": "integer", "description": "窗口 id（bl_desktop_windows 拿）；不传则截全屏"},
+                "grid": {"type": "boolean", "description": "叠加带标签网格，默认 true"},
+                "cell": {"type": "string", "description": "放大到某格看子网格，如 C5；支持递归 B2.C1"},
+                "out": {"type": "string", "description": "输出 PNG 路径；默认写到日志目录的 ui\\ 子目录"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_desktop_click",
+        "description": ("按**格子名**点击（如 C5；跨格用 I5+I6；递归用 B2.C1），或按物理像素坐标点击。"
+                        "一条命令完成「移动+点击」。可选先聚焦目标窗口（focus=true，默认 true）。"
+                        "已知边界：合成输入能驱动官方界面（实测点主菜单 C5 一次即中），但**到不了我们自写"
+                        "Gauntlet 层的按钮**（同一坐标手搓注入与 gridhand 都不响应）——"
+                        "所以对自写面板，正解是文件 IPC（open_ui），不要指望模拟鼠标。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cell": {"type": "string", "description": "格子名，如 C5；跨格用 I5+I6；递归放大用 B2.C1"},
+                "windowId": {"type": "integer", "description": "目标窗口 id（格子名需要它来换算；聚焦也用它）"},
+                "button": {"type": "string", "description": "left / right，默认 left"},
+                "focus": {"type": "boolean", "description": "点击前先把该窗口提到前台，默认 true"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_desktop_key",
+        "description": ("按键或输入文本：keys 走组合键（enter / ctrl+a / alt+f4），text 走文本输入。"
+                        "Bannerlord 与 BLSE 的对话框用得上（例如 Mod change detected 的按钮是中文「确定」，"
+                        "WM_COMMAND IDOK 无效、回车有效）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keys": {"type": "string", "description": "组合键，如 enter / ctrl+a / alt+f4"},
+                "text": {"type": "string", "description": "要输入的文本"},
+                "windowId": {"type": "integer", "description": "目标窗口 id（可选）"},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 桌面 / 游戏 GUI 能力（后端 = tools/bl_launch.ps1 + gridhand 外部 CLI）
+#
+# 为什么不直接接一个 computer-use MCP（如 betrayzl/windows-computer-use-mcp）：
+#   它的 Structured Mode 依赖 UI Automation，而游戏（Bannerlord 的 Gauntlet UI）不在
+#   accessibility tree 里；Visual Mode 就是我们已有的「截图 + SendInput 模拟输入」，
+#   实测同源注入到不了自写面板层。所以能力面借鉴、实现自持，避免 Node/Rust 依赖。
+#   详见 docs/prototype-ui-probe-2026-09-25.md
+# ─────────────────────────────────────────────────────────────────────
+
+_GRIDHAND_CANDIDATES = [
+    os.path.join(os.path.expanduser("~"), ".cargo", "bin", "gridhand.exe"),
+    r"D:\Program Files\Rust\cargo\bin\gridhand.exe",
+    "gridhand.exe",
+    "gridhand",
+]
+
+
+def gridhand_path():
+    """定位 gridhand 可执行文件；找不到返回 None（软依赖，不让其它工具受影响）。"""
+    import shutil as _shutil
+    for cand in _GRIDHAND_CANDIDATES:
+        if os.path.isabs(cand):
+            if os.path.isfile(cand):
+                return cand
+        else:
+            found = _shutil.which(cand)
+            if found:
+                return found
+    return None
+
+
+def _ui_dir():
+    d = os.path.join(log_dir(), "ui")
+    if not os.path.isdir(d):
+        try:
+            os.makedirs(d)
+        except OSError:
+            pass
+    return d
+
+
+def _run_ps(script, extra_args=None, timeout=200.0):
+    """跑一个 PowerShell 脚本（显式 UTF-8，见 AGENTS.md 编码规则）。"""
+    import subprocess
+    cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", script]
+    if extra_args:
+        cmd += list(extra_args)
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return p.returncode, (p.stdout or ""), (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout after %.0fs" % timeout
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def _run_gridhand(sub_args, timeout=90.0):
+    """跑 gridhand；返回 (rc, stdout, stderr)。未安装时 rc=127。"""
+    import subprocess
+    exe = gridhand_path()
+    if not exe:
+        return 127, "", "gridhand not found"
+    cmd = [exe] + list(sub_args)
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return p.returncode, (p.stdout or ""), (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout after %.0fs" % timeout
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def _gridhand_json(sub_args, timeout=90.0):
+    """跑 gridhand 并把 stdout 解析成 JSON（去掉 ANSI 高亮码）。"""
+    import re as _re
+    rc, out, err = _run_gridhand(sub_args, timeout=timeout)
+    clean = _re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out).strip()
+    data = None
+    for line in clean.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                data = json.loads(line)
+                break
+            except ValueError:
+                continue
+    if data is None:
+        try:
+            data = json.loads(clean)
+        except ValueError:
+            data = None
+    return rc, data, clean, err
 
 
 def call_tool(name, args):
@@ -1190,6 +1369,115 @@ def call_tool(name, args):
             return {"ok": True, "available": st.get("available"), "reason": st.get("reason"),
                     "count": len(rows), "troops": rows}
         return {"ok": True, "sage": bl_sage.status()}
+
+    # ── 桌面 / 游戏 GUI 能力 ──────────────────────────────────────────
+
+    if name == "bl_launch_game":
+        import time as _time
+        script = os.path.join(_TOOLS_DIR, "bl_launch.ps1")
+        if not os.path.isfile(script):
+            return {"ok": False, "error": "找不到 %s" % script}
+        timeout_sec = int(args.get("timeoutSec") or 150)
+        ps_args = ["-TimeoutSec", str(timeout_sec)]
+        if args.get("skipModuleList"):
+            ps_args.append("-SkipModuleList")
+        started = _time.time()
+        rc, out, err = _run_ps(script, ps_args, timeout=timeout_sec + 90.0)
+        res = {"ok": rc == 0, "exitCode": rc, "launchOk": "LAUNCH OK" in (out or ""),
+               "seconds": round(_time.time() - started, 1),
+               "log": (out or "")[-4000:], "stderr": (err or "")[-800:]}
+        if rc != 0:
+            res["hint"] = ("失败常见原因：① 游戏已在运行（先 bl_status 看 pid）；"
+                           "② 没人答弹窗（本脚本会自动答 Safe Mode/Mod change）；"
+                           "③ 模块列表与当前安装不符（改 tools/bl_launch.ps1 里的 $mods）")
+        else:
+            res["hint"] = "启动成功后 bl_status 会给出新的 pid（state=loaded）"
+        return res
+
+    if name == "bl_desktop_windows":
+        if not gridhand_path():
+            return {"ok": False, "available": False, "error": "gridhand 未安装",
+                    "hint": "cargo install gridhand（本机 Rust 在 D:\\Program Files\\Rust）"}
+        rc, data, clean, err = _gridhand_json(["windows", "list"])
+        if rc != 0 or not isinstance(data, dict):
+            return {"ok": False, "exitCode": rc, "raw": clean[:1500], "stderr": err[:400]}
+        wins = list(data.get("windows") or [])
+        flt = (args.get("filter") or "").lower()
+        if flt:
+            wins = [w for w in wins if flt in (w.get("title") or "").lower()]
+        limit = int(args.get("limit") or 40)
+        wins = wins[:limit]
+        for w in wins:
+            w["isGame"] = "Mount and Blade" in (w.get("title") or "")
+        return {"ok": True, "available": True, "count": len(wins), "windows": wins,
+                "note": "坐标是物理像素（已 DPI 校正）；isGame=true 的那条就是游戏主窗口"}
+
+    if name == "bl_desktop_screenshot":
+        if not gridhand_path():
+            return {"ok": False, "available": False, "error": "gridhand 未安装",
+                    "hint": "cargo install gridhand"}
+        import time as _time
+        use_grid = args.get("grid")
+        use_grid = True if use_grid is None else bool(use_grid)
+        out = args.get("out") or os.path.join(
+            _ui_dir(), "ui_%s.png" % _time.strftime("%Y%m%d_%H%M%S"))
+        sub = ["screenshot"]
+        wid = args.get("windowId")
+        if wid:
+            sub += ["--window-id", str(int(wid))]
+        if use_grid:
+            sub.append("--grid")
+        cell = args.get("cell")
+        if cell:
+            sub += ["--cell", str(cell)]
+        sub += ["--output", out]
+        rc, data, clean, err = _gridhand_json(sub)
+        if rc != 0:
+            return {"ok": False, "exitCode": rc, "raw": clean[:800], "stderr": err[:400]}
+        return {"ok": True, "path": out, "grid": (data or {}).get("grid"),
+                "hint": "用 view_image 读 path 看画面；读格名（如 C5）后用 bl_desktop_click --cell 点它"}
+
+    if name == "bl_desktop_click":
+        if not gridhand_path():
+            return {"ok": False, "available": False, "error": "gridhand 未安装",
+                    "hint": "cargo install gridhand"}
+        cell = args.get("cell")
+        if not cell:
+            return {"ok": False,
+                    "error": "需要 cell（格子名，如 C5 / I5+I6 / B2.C1）",
+                    "why": "gridhand 刻意不提供像素坐标点击；先用 bl_desktop_screenshot --grid 读格名"}
+        wid = args.get("windowId")
+        focus = args.get("focus")
+        focus = True if focus is None else bool(focus)
+        if focus and wid:
+            _run_gridhand(["windows", "raise", str(int(wid))])
+        sub = ["mouse", "click", "--cell", str(cell)]
+        if (args.get("button") or "left") == "right":
+            sub += ["--button", "right"]
+        if wid:
+            sub += ["--window-id", str(int(wid))]
+        rc, data, clean, err = _gridhand_json(sub)
+        return {"ok": rc == 0, "exitCode": rc, "result": data,
+                "raw": clean[:400], "stderr": err[:300],
+                "caveat": ("合成输入对官方界面有效（实测点主菜单 C5 一次即中），"
+                           "但到不了 BlBridge 自写 Gauntlet 层的按钮 —— 那一块请走文件 IPC（open_ui）")}
+
+    if name == "bl_desktop_key":
+        if not gridhand_path():
+            return {"ok": False, "available": False, "error": "gridhand 未安装",
+                    "hint": "cargo install gridhand"}
+        if args.get("text") is not None:
+            sub = ["key", "type", str(args.get("text"))]
+        elif args.get("keys"):
+            sub = ["key", "press", str(args.get("keys"))]
+        else:
+            return {"ok": False, "error": "需要 keys（组合键）或 text（文本）之一"}
+        wid = args.get("windowId")
+        if wid:
+            sub += ["--window-id", str(int(wid))]
+        rc, data, clean, err = _gridhand_json(sub)
+        return {"ok": rc == 0, "exitCode": rc, "result": data,
+                "raw": clean[:400], "stderr": err[:300]}
 
     return {"ok": False, "error": "unknown tool: %s" % name}
 

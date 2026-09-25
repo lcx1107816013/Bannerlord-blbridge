@@ -748,8 +748,10 @@ def main():
     check(init.get("protocolVersion") == "2024-11-05", "initialize 返回协议版本", init.get("protocolVersion"))
     tools = by_id.get(2, {}).get("result", {}).get("tools", [])
     names = sorted(t["name"] for t in tools)
-    check(len(tools) == 16, "tools/list 返回 16 个工具", names)
+    check(len(tools) == 21, "tools/list 返回 21 个工具", names)
     check("bl_lookup_troop" in names, "bl_lookup_troop 已注册", names)
+    check("bl_launch_game" in names and "bl_desktop_click" in names,
+          "桌面/游戏 GUI 工具已注册", names)
     check("bl_apply_config" in names and "bl_analyze" in names, "关键工具存在", names)
     st = by_id.get(3, {}).get("result", {})
     check(st.get("content"), "bl_status 返回内容")
