@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Text;
 using TaleWorlds.Core;
 using TaleWorlds.Library;
 using TaleWorlds.Localization;
+using TaleWorlds.ModuleManager;
 using TaleWorlds.MountAndBlade;
 using TaleWorlds.MountAndBlade.MissionSpawnHandlers;
 using TaleWorlds.ObjectSystem;
@@ -318,6 +320,19 @@ namespace BlBridge
                 return Protocol.Failure(id, "unknown_troop", "守方兵种 id 不存在: " + defender, false);
             }
 
+            // 2c) 场景名必须真实存在。**这是唯一一道能拦住原生崩溃的检查** ——
+            //     见下方 SceneExists 的说明：引擎的 Scene.Read(sceneName) 是纯原生调用
+            //     （EngineApplicationInterface.IScene.Read），场景名不存在时托管侧拿不到任何
+            //     可判的返回值，直接进 native 访问违规（0xC0000005）**整个进程死掉**。
+            //     实测：v0.8.9 部署后一次 start 传 scene=bridge（该名字在全部 Modules 的
+            //     SceneObj/ 下都不存在）→ 6 ms 后崩溃。故必须在开 mission 之前先用文件系统查。
+            string sceneCode;
+            string sceneMsg;
+            if (!ValidateScene(scene, out sceneCode, out sceneMsg))
+            {
+                return Protocol.Failure(id, sceneCode, sceneMsg, false);
+            }
+
             _pendingAttackerGroups = attackerGrouped ? attackerGroups : null;
             _pendingDefenderGroups = defenderGrouped ? defenderGroups : null;
             AttackerGroupsDsl = attackerGrouped ? attackerGroupsDslRaw : "";
@@ -465,6 +480,101 @@ namespace BlBridge
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 场景存在性校验。**必须在 OpenMission 之前调用**，因为引擎侧没有可判的失败路径：
+        ///
+        ///   源码依据（反编译 TaleWorlds.Engine.dll）：
+        ///     Scene.Read(string sceneName) → EngineApplicationInterface.IScene.Read(...)
+        ///   `Scene.Read` 的整个实现体就是一次原生调用，**没有返回值、不抛托管异常**。
+        ///   场景名不存在时 native 侧拿到空指针，直接 0xC0000005（访问违规）终止进程 ——
+        ///   try/catch 在结构上拦不住（崩在 C++ 层，不是托管异常）。
+        ///
+        ///   实测依据（v0.8.9，2026-09-25 11:40）：
+        ///     11:40:31.868  Loading xml file: SceneObj/bridge/scene.xscene
+        ///     11:40:31.874  Unhandled Exception Code 0xC0000005   ← 6 ms 后
+        ///   对照：同一请求传 battle_terrain_a（存在于 SandBoxCore/SceneObj/）则正常。
+        ///
+        /// 检查方式：遍历**全部已加载模块**的 `SceneObj/&lt;scene&gt;/scene.xscene`。
+        ///   引擎自己的场景寻址就是"扫所有模块的 SceneObj"（$BASE/Modules/&lt;id&gt;/SceneObj/...），
+        ///   所以文件系统查与引擎查一致，且不需要进 native。
+        ///   ⚠️ 只认 `scene.xscene` 这一必需文件：`Modules/SandBoxCore/SceneObj/battle_terrain_a/`
+        ///      下还有 atmosphere.xml / terrain.bin / navmesh.bin，但只有 scene.xscene 是每个
+        ///      场景都必有的入口文件（实测该目录与其他场景目录均有）。
+        /// </summary>
+        private static bool SceneExists(string scene)
+        {
+            if (string.IsNullOrEmpty(scene)) return false;
+            try
+            {
+                // 场景名不得含路径分隔符（否则等于允许请求越权指向任意文件）
+                if (scene.IndexOf('/') >= 0 || scene.IndexOf('\\') >= 0) return false;
+
+                foreach (ModuleInfo mi in ModuleHelper.GetAllModules())
+                {
+                    if (mi == null || string.IsNullOrEmpty(mi.FolderPath)) continue;
+                    string probe = mi.FolderPath + "SceneObj/" + scene + "/scene.xscene";
+                    if (File.Exists(probe)) return true;
+                }
+                return false;
+            }
+            catch
+            {
+                // 校验本身失败时**不静默放行**：调用方按"不存在"处理并报错，
+                // 宁可拒绝一次合法请求，也不放一次会崩进程的请求过去。
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 场景校验 + 可读错误消息（含可用场景清单，避免调用方反复试错）。
+        /// 返回 false 时 code/message 已填好。
+        /// </summary>
+        private static bool ValidateScene(string scene, out string code, out string message)
+        {
+            code = null;
+            message = null;
+            if (SceneExists(scene)) return true;
+
+            code = "unknown_scene";
+            StringBuilder sb = new StringBuilder();
+            sb.Append("场景不存在: ").Append(scene);
+            sb.Append("。引擎侧无法安全失败（Scene.Read 崩在原生层，0xC0000005），故在此提前拦截。");
+
+            // 附上可用场景清单：只列野战战场（battle_*）与请求名最接近的若干，
+            // 避免把几百个城镇/城堡场景全刷出来。
+            try
+            {
+                List<string> battleScenes = new List<string>();
+                foreach (ModuleInfo mi in ModuleHelper.GetAllModules())
+                {
+                    if (mi == null || string.IsNullOrEmpty(mi.FolderPath)) continue;
+                    string sceneObj = mi.FolderPath + "SceneObj/";
+                    if (!Directory.Exists(sceneObj)) continue;
+                    foreach (string dir in Directory.GetDirectories(sceneObj))
+                    {
+                        string name = Path.GetFileName(dir);
+                        if (name.StartsWith("battle_", StringComparison.Ordinal))
+                        {
+                            battleScenes.Add(name);
+                        }
+                    }
+                }
+                battleScenes.Sort(StringComparer.Ordinal);
+                if (battleScenes.Count > 0)
+                {
+                    sb.Append(" 可用野战场景（最多列 12 个，默认 battle_terrain_a）: ");
+                    sb.Append(string.Join(", ", battleScenes.GetRange(
+                        0, Math.Min(12, battleScenes.Count)).ToArray()));
+                    if (battleScenes.Count > 12) sb.Append(" …");
+                }
+            }
+            catch
+            {
+            }
+            message = sb.ToString();
+            return false;
         }
 
         /// <summary>
