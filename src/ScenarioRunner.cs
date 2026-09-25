@@ -48,10 +48,13 @@ namespace BlBridge
 
         /// <summary>
         /// v0.8.10：看门狗在 loading 态的判定阈值（秒）—— 自开战请求起超过这么久
-        /// 仍无任何 mission tick 推进 ⇒ 判定卡死。正常 agent 生成只需数秒，取 120 留足余量。
-        /// running 态不用这个值，用 DurationCapSeconds + 60（见 Watchdog）。
+        /// 仍无任何 mission tick 推进 ⇒ 判定卡死。running 态不用这个值，用 DurationCapSeconds + 60（见 Watchdog）。
+        ///
+        /// v0.8.10 修订（真机回归 §二十一）：120 → **300**。全兵种分批测试每场有 400 个兵种组
+        /// （攻 200 + 守 200），loading 明显慢于常规场次（20~200 组）；120 s 会把"慢"误判成"卡死"
+        /// 并强行收尾。300 s 给慢加载留余量 —— 代价是"真卡死"要等更久才兜住（阈值越大越保守，这是权衡）。
         /// </summary>
-        internal static float WatchdogLoadingSeconds = 120f;
+        internal static float WatchdogLoadingSeconds = 300f;
 
         // 结果
         internal static string ResultJson = "null";
