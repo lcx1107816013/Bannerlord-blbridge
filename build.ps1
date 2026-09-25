@@ -90,6 +90,25 @@ if (-not ($refs | Where-Object { $_ -like '*netstandard.dll' })) {
     else { Write-Warning 'netstandard.dll facade not found; compile may fail with CS0012' }
 }
 
+# System.ValueTuple: InitialStateOption's constructor takes Func<(bool, TextObject)>, so the
+# compiler must resolve the ValueTuple type. The reference assemblies in use are the 4.0 runtime
+# fallback (its mscorlib predates ValueTuple) while the game assemblies were compiled against the
+# System.ValueTuple facade -- so add it explicitly, or the main menu entry cannot compile (CS0012).
+foreach ($cand in @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\System.ValueTuple\v4.0_4.0.0.0__cc7b13ffcd2ddd51\System.ValueTuple.dll'),
+        'C:\Program Files\dotnet\sdk\*\Microsoft\Microsoft.NET.Build.Extensions\net461\lib\System.ValueTuple.dll',
+        'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\System.ValueTuple.dll')) {
+    $hit = @(Get-Item $cand -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1)
+    if ($hit.Count -gt 0) {
+        $refs += $hit[0].FullName
+        Write-Host ("[0/3] System.ValueTuple: " + $hit[0].FullName)
+        break
+    }
+}
+if (-not ($refs | Where-Object { $_ -like '*System.ValueTuple.dll' })) {
+    Write-Warning 'System.ValueTuple.dll not found; InitialStateOption (main menu entry) will not compile'
+}
+
 # also reference every TaleWorlds.* assembly shipped next to the game executable.
 # (Deliberately limited to the TaleWorlds.* prefix: sweeping all DLLs pulls in native
 #  ones (CS0009) and framework duplicates such as System.Management.dll (CS1703).)
@@ -100,6 +119,31 @@ $refs += @(Get-ChildItem $gameBin -Filter 'TaleWorlds.*.dll' -File -ErrorAction 
         try { [void][Reflection.AssemblyName]::GetAssemblyName($_.FullName); $true } catch { $false }
     } |
     ForEach-Object { $_.FullName })
+
+# Also reference TaleWorlds.* assemblies that ship INSIDE module folders. The main menu entry
+# + a self-written Gauntlet screen need both of these, and neither is next to the game exe:
+#   Modules\CustomBattle\...\TaleWorlds.MountAndBlade.CustomBattle.dll  (CustomGameManager, CustomGame)
+#   Modules\Native\...\TaleWorlds.MountAndBlade.View.dll                ([GameStateScreen], ScreenBase helpers)
+# De-duplicate by FILE NAME, not path: several modules ship their own copy of the same assembly
+# (TaleWorlds.MountAndBlade.Multiplayer.dll exists under both CustomBattle and Multiplayer),
+# and referencing two paths with the same assembly identity fails with CS1703.
+$refNames = @{}
+foreach ($r in $refs) { $refNames[(Split-Path $r -Leaf).ToLowerInvariant()] = $true }
+$moduleBinDirs = @(Get-ChildItem (Join-Path $GameDir 'Modules') -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName 'bin\Win64_Shipping_Client' } |
+    Where-Object { Test-Path $_ })
+foreach ($dir in $moduleBinDirs) {
+    foreach ($dll in @(Get-ChildItem $dir -Filter 'TaleWorlds.*.dll' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -inotmatch '^TaleWorlds\.Native\.dll$' })) {
+        $key = $dll.Name.ToLowerInvariant()
+        if ($refNames.ContainsKey($key)) { continue }
+        # same readability guard as above: skip mixed-mode/native binaries
+        try { [void][Reflection.AssemblyName]::GetAssemblyName($dll.FullName) } catch { continue }
+        $refNames[$key] = $true
+        $refs += $dll.FullName
+    }
+}
+
 $refs = @($refs | Select-Object -Unique)
 
 # ---------- compile ----------
@@ -242,6 +286,19 @@ if ($Deploy) {
     Copy-Item $subModuleSrc (Join-Path $target 'SubModule.xml') -Force
     # ship the manifest next to the DLL so the MCP can verify what is deployed
     Copy-Item $manifestPath (Join-Path $target 'build_manifest.json') -Force
+
+    # Ship UI resources and localization with the module. Before this, the module carried only
+    # the DLL + SubModule.xml; a self-written Gauntlet prefab under module\GUI\Prefabs must land
+    # in Modules\BlBridge\GUI\Prefabs, otherwise LoadMovie("<name>", vm) cannot find it.
+    foreach ($sub in @('GUI', 'ModuleData')) {
+        $from = Join-Path $moduleSrc $sub
+        if (-not (Test-Path $from)) { continue }
+        $to = Join-Path $target $sub
+        if (-not (Test-Path $to)) { New-Item -ItemType Directory -Path $to -Force | Out-Null }
+        Copy-Item -Path (Join-Path $from '*') -Destination $to -Recurse -Force
+        $n = @(Get-ChildItem $from -Recurse -File).Count
+        Write-Host ("      deployed {0}/ ({1} file(s))" -f $sub, $n)
+    }
 
     # the user may have launched the game while we were copying -- check once more (by lock, not name)
     $dllBusy2 = $false

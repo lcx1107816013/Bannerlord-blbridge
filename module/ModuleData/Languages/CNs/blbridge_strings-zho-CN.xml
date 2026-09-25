@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<base xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" type="string">
+  <tags>
+    <tag language="简体中文" />
+  </tags>
+  <strings>
+    <string id="BlBridgeProto_Hello" text="OWN KEY OK：来自 BlBridge 自有语言文件" />
+    <string id="BlBridgeProto_MenuEntry" text="BlBridge 自定义战场（原型）" />
+  </strings>
+</base>

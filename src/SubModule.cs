@@ -46,6 +46,9 @@ namespace BlBridge
                 CommandPump.EnsureDirs();
                 // 可选外部配置（C24）：只在模块加载时读一次，加载即校验，改完需重启游戏
                 BridgeConfigFile.Apply(BridgeConfigFile.DefaultPath);
+                // PROTOTYPE (branch prototype/ui-probe): register the main-menu entry.
+                // Delete this line together with src/ProtoUi.cs when the prototype is archived.
+                ProtoUi.Register();
                 WriteStatus("loaded", null, 0);
             }
             catch

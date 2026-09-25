@@ -1,0 +1,49 @@
+<Prefab>
+  <!-- PROTOTYPE probe prefab.  Structure copied verbatim from the two working templates:
+       official Modules/SandBoxCore/GUI/Prefabs/CustomBattle/CustomBattleScreen.xml and
+       Enhanced Battle Test's GUI/Prefabs/*.xml  ->  <Prefab> {Constants, Variables,
+       VisualDefinitions} + <Window><Widget><Children><Standard.Background /> ...
+       Probes: bound TextWidgets / hardcoded TextWidget / plain BrushWidget / ButtonWidget. -->
+  <Constants>
+  </Constants>
+  <Variables>
+  </Variables>
+  <VisualDefinitions>
+  </VisualDefinitions>
+  <Window>
+    <Widget WidthSizePolicy="StretchToParent" HeightSizePolicy="StretchToParent">
+      <Children>
+        <Standard.Background />
+        <ListPanel WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   LayoutImp.LayoutMethod="VerticalTopToBottom">
+          <Children>
+            <TextWidget WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                        Brush="CustomBattle.Value.Text" Text="@TitleText" />
+            <TextWidget WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                        Brush="CustomBattle.Value.Text" Text="@LiteralText" />
+            <TextWidget WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                        Brush="CustomBattle.Value.Text" Text="@OfficialKeyText" />
+            <TextWidget WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                        Brush="CustomBattle.Value.Text" Text="@OwnKeyText" />
+            <TextWidget WidthSizePolicy="CoverChildren" HeightSizePolicy="CoverChildren"
+                        Brush="CustomBattle.Value.Text" Text="HARDCODED PROBE: no binding, ASCII only" />
+            <BrushWidget WidthSizePolicy="Fixed" HeightSizePolicy="Fixed"
+                         SuggestedWidth="300" SuggestedHeight="60"
+                         HorizontalAlignment="Center" MarginTop="12"
+                         Brush="WideButton.Flat" />
+            <ButtonWidget WidthSizePolicy="Fixed" HeightSizePolicy="Fixed"
+                          SuggestedWidth="260" SuggestedHeight="52"
+                          HorizontalAlignment="Center" MarginTop="12"
+                          Brush="WideButton.Flat" Command.Click="ExecutePing">
+              <Children>
+                <TextWidget WidthSizePolicy="StretchToParent" HeightSizePolicy="StretchToParent"
+                            Brush="CustomBattle.Value.Text" Text="@ButtonText" />
+              </Children>
+            </ButtonWidget>
+          </Children>
+        </ListPanel>
+      </Children>
+    </Widget>
+  </Window>
+</Prefab>
