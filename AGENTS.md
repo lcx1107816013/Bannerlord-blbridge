@@ -21,6 +21,18 @@
 
 > 改任何输出前，先读 `bl_common.safe_streams()` 的 docstring。
 
+### Gauntlet prefab 硬规则（2026-09-25 增，真机确证）
+
+- **`ButtonWidget`（或任何"自己处理点击"的 widget）只要内含子 widget，就必须写 `DoNotPassEventsToChildren="true"`。**
+  一手源码理由：`EventManager.CollectEnableWidgetsAt` 遍历时**子 widget 先进候选表**，而
+  `Widget.OnPreviewMousePressed/OnPreviewMouseReleased` 基类默认返回 `true`，
+  `GetWidgetAtPositionForEvent` 取**候选表里第一个**接受事件的 widget ⇒ 不写这个属性时，事件被内层
+  `TextWidget` 吃掉，`ButtonWidget.HandleClick()` 永不执行 ⇒ `Command.Click` 静默不触发
+  （**真人点与合成点一样没反应**，极易误诊成"输入不达"）。
+  官方 `SandBoxCore/GUI/Prefabs/CustomBattle/CustomBattleScreen.xml` 与 EBT 的所有按钮都带它。
+- **`GUI/Prefabs/**/*.xml` 是 XML**：注释里**不得出现 `--`**（`<!-- ... -- ... -->` 会让解析器报错），
+  别拿 `--` 当破折号，用逗号或冒号代替。
+
 ## 二、遇到「不支持 UTF-8 的代码」怎么处理
 
 **不是**把文案改成英文，**也不是**加"编码兼容"补丁（那只是把错配挪到另一边），而是

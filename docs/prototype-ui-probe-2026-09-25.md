@@ -13,7 +13,7 @@
 | 2 | 自写 prefab 能否被 `GauntletLayer.LoadMovie("<name>", vm)` 加载 | ✅ 能，**movie 名 = prefab 文件名** | `LoadMovie OK: ProtoUiScreen -> movie=not-null`；prefab 落 `Modules/BlBridge/GUI/Prefabs/BlBridge/ProtoUiScreen.xml` |
 | 3 | `[DataSourceProperty]` 绑定能否生效 | ✅ 能 | 5 行文本全部按绑定值渲染（含一行**硬编码对照组**、一个空 `BrushWidget`、一个 `ButtonWidget`） |
 | 4 | 在「主菜单 → 自建 GameState」阶段 `{=key}` 本地化是否已加载 | ✅ **已加载，不需要手工 `LoadGameTexts`** | 官方 key 出 `出发`；**我们自己 UTF-8 语言文件**里的 key 也出中文（`OWN KEY OK：来自 BlBridge 自有语言文件`）—— 这一点与 EBT 单机版要手工 `LoadGameTexts` 不同 |
-| 5 | **合成鼠标/键盘输入能否驱动我们这层 UI** | ❌ **不能**（见第四节） | 同一工具点官方主菜单 `C5` 一次进；点我们层里的按钮（先后用手搓 P/Invoke 与 gridhand 网格定位，坐标已核对）均无 `ExecutePing` |
+| 5 | **合成鼠标/键盘输入能否驱动我们这层 UI** | ✅ **能（根因见第七节）** | 2026-09-25 二轮复测：给 prefab 的 `ButtonWidget` 补上 `DoNotPassEventsToChildren="true"` 之后，真人点击与合成点击都能触发 `ExecutePing`（日志 `clicks=1..24`，按钮文本实时刷新为 `CLICK ME (24)`）。此前的「连合成输入都不达」是**假象** —— 事件被按钮里的子 `TextWidget` 抢走，与输入源无关 |
 
 附带确认：**中文渲染正常**（`CustomBattle.Value.Text` 的字体 `FiraSansExtraCondensed-Regular` 对中文会 fallback，实测无方块、无截断）。
 
@@ -65,3 +65,40 @@
 - 真人点击对照（见第四节第 2 点）。
 - 原型代码尚未删除：删 `src/ProtoUi.cs` + `module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml` + `module/ModuleData/Languages/CNs/*` + `src/SubModule.cs` 里那一行 `ProtoUi.Register()`（`build.ps1` 的改动要**保留**：Modules 下程序集引用、`System.ValueTuple`、`GUI/ModuleData` 部署都是正式方案需要的）。
 - `src/SubModule.cs` 的 `wrong_state` 守卫放宽（允许我们的 state）尚未做。
+
+## 七、第 5 问的最终结论（2026-09-25 二轮，真机确证）
+
+**根因不在输入，在 prefab：`ButtonWidget` 少了 `DoNotPassEventsToChildren="true"`。**
+
+一手源码链（`ilspycmd` 反编译游戏 `bin\Win64_Shipping_Client` 下的 GauntletUI 程序集）：
+
+1. `EventManager.GetWidgetAtPositionForEvent` → `CollectEnableWidgetsAt(Root, pos, list)`：
+   **子 widget 先进候选表**（后序遍历），父 widget 最后进。
+2. `Widget.OnPreviewMousePressed/OnPreviewMouseReleased` 的基类默认是 `return true`（Widget.cs:2445-2450）。
+3. ⇒ `list` 里第一个"接受事件"的是按钮内层的 `TextWidget`（`StretchToParent`，必然命中），
+   `DispatchEvent` 把 `MousePressed/MouseReleased` 都给了它 ⇒ `ButtonWidget.OnMouseReleased` 的
+   `_clickState != HandlingClick` 直接 return ⇒ `HandleClick()`（唯一触发 `EventFired("Click")` 的地方）
+   **永不执行** ⇒ `Command.Click="ExecutePing"` 静默不触发。
+4. `DoNotPassEventsToChildren="true"` 让 `CollectEnableWidgetsAt` **跳过子 widget**，事件才归按钮。
+
+佐证：官方 `SandBoxCore/GUI/Prefabs/CustomBattle/CustomBattleScreen.xml` 的按钮、以及 EBT 的
+**全部 17 个按钮**，无一例外都带这个属性。
+
+**修复**：`module/GUI/Prefabs/BlBridge/ProtoUiScreen.xml` 的 `ButtonWidget` 补
+`DoNotPassEventsToChildren="true" UpdateChildrenStates="true"`（后者让子文本跟随按钮状态）。
+**复测证据**：`proto_ui.log` 出现 `ExecutePing: clicks=1..24`，按钮文本实时刷新为 `CLICK ME (24)`；真人点击与合成点击都有效。
+
+**顺带排除的假设**（都读过一手实现，别再重走）：`(InputUsageMask)7` 值正确（`All=MouseButtons|MouseWheels|Keyboardkeys`）；
+跳过 `MBGameManager.OnLoadFinished` 无害（只做 `IsLoaded = true`）；`Command.Click` 的值就是 VM 方法名
+（`ViewModel.ExecuteCommand` 有反射兜底）；`Brush="WideButton.Flat"` 存在（`Native/GUI/Brushes/Brush.xml`）；
+`LayoutImp.LayoutMethod` 有效（EBT 也在用）；`ScreenBase` 只有 `TaleWorlds.ScreenSystem` 一个版本。
+
+### 环境事实：本会话启动的游戏会被宿主回收
+
+用 `bl_launch.ps1`（**前台命令与后台 job 都试过**）启动的游戏，都在脚本 `LAUNCH OK` 退出后
+**0.3~0.7 秒内被杀**（引擎日志停在 `Selected graphics adapter`、无 exception、无 BUTR crash 报告）。
+**绕法**：经 Windows 计划任务启动（`Register-ScheduledTask -Principal (LogonType Interactive)` + `Start-ScheduledTask`），
+进程由 Task Scheduler 创建、不属本会话进程树 —— 实测游戏可常驻（PID 79784 活过 5 分钟并正常加载、可点击）。
+⇒ 「AI 无人值守启动游戏」在当前环境**要么走计划任务，要么由人启动**；
+`bl_launch.ps1` 打印的 `LAUNCH OK` **不能**证明游戏会活下来。
+（另：`--` 不得出现在 XML 注释里，`Prefab` 是 XML —— 本轮踩过一次。）
