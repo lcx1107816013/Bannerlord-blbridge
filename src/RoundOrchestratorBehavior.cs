@@ -193,6 +193,17 @@ namespace BlBridge
                 {
                 }
             }
+            // v0.8.10：可用性探针的**轮内时钟**也要在同一处归零 —— 它是仓库里第三个时钟，
+            // v0.8.9 时漏了（第 2 轮起 probe 事件的 time 仍是整场累计值，与同文件其余事件不同源，
+            // 外部审查 B2 用真实产物实测发现）。探针是临时的，取不到就跳过。
+            try
+            {
+                ScoreHitProbeBehavior sp = m.GetMissionBehavior<ScoreHitProbeBehavior>();
+                if (sp != null) sp.BeginNewRound();
+            }
+            catch
+            {
+            }
             RoundLog("round_start", _round, killed);
 
             // 3) 重生两队（可交换攻守、可指定进场点）

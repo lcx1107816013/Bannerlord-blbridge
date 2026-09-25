@@ -31,6 +31,18 @@ namespace BlBridge
             get { return MissionBehaviorType.Other; }
         }
 
+        /// <summary>
+        /// 轮内时钟（秒）—— **每轮归零**，见 BeginNewRound。
+        ///
+        /// 缺陷背景（v0.8.10，外部审查 B2）：本字段曾从 mission 开始一直累加、全仓库无任何归零点，
+        /// 而 `Jw` 每轮换一个日志文件 ⇒ 第 2 轮起 `probe` 事件带的是**整场**时钟，
+        /// 与同文件其余事件的**轮内**时钟不同源（实测 battle_20260925_111509_578.jsonl：
+        /// probe 230.39–310.42，而同文件其余事件上界只有 91.43）。
+        /// 第 1 轮"看不出来"是同一缺陷的另一面：该轮整场时钟 ≡ 轮内时钟 ⇒ 单轮验证必然漏掉它。
+        ///
+        /// 同类实现的代码内对照：`TelemetryBehavior._elapsed` ✓ 归零、
+        /// `RoundOrchestratorBehavior._elapsed` ✓ 归零、本字段（v0.8.9）✗ —— 本次补齐。
+        /// </summary>
         private float _elapsed;
         private float _nextReportAt = 10f;
 
@@ -46,6 +58,20 @@ namespace BlBridge
         private float _sdSum;
         private int _sdCount;
         private int _blockedButPositive;   // isBlocked==true 却 damagedHp>0 —— 语义矛盾，应为 0
+
+        /// <summary>
+        /// 换轮：**轮内时钟归零**。由 `RoundOrchestratorBehavior.Advance` 在调用
+        /// `TelemetryBehavior.BeginNewRound` 的同一处调用 —— 三个时钟共用一个原点，日志才对得上。
+        ///
+        /// 注意：下面那些计数（`_hitCalls` / `_scoreCalls` / …）**刻意不归零** ——
+        /// 本探针的判据是"整场 OnScoreHit 与 OnAgentHit 是否配平"，跨轮累计正是它要的语义。
+        /// 归零的只是 time 的原点。
+        /// </summary>
+        internal void BeginNewRound()
+        {
+            _elapsed = 0f;
+            _nextReportAt = 10f;
+        }
 
         public override void OnMissionTick(float dt)
         {

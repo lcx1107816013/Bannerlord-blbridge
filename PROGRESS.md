@@ -1,6 +1,6 @@
 # BlBridge 进度列表
 
-> **最后核实：2026-09-24 21:07**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37；本轮只做机理取证与工具准备，见 §十四）
+> **最后核实：2026-09-25（v0.8.10 修复轮，见 §二十）**（本文件由 Reasonix 会话建立并维护；最近一次游戏内验证 = §八 v0.8.1 遥测补齐，2026-09-24 19:37；本轮只做机理取证与工具准备，见 §十四）
 > 项目权威页（共享知识库）：`E:\ObsidianDocument\entities\blbridge.md`
 > 上次交接快照：`E:\ObsidianDocument\raw\transcripts\reasonix-handoff-blbridge-2026-09-24.md`
 > 立项理由（别忘）：**"工具把决策依据从『猜』换成了『数据』，但数据还没取"**
@@ -534,6 +534,14 @@ ARMS `191459_538` / `191534_790` / `191610_398`
    `round_start.time ≈ 0`；`round_all_done.time` 应落在同文件遥测主时钟区间内（不超出）。
    ⚠️ v0.8.5–v0.8.8 违反本条（`round_*` 用了整场累计值，实测 round_all_done=300.45 vs 主时钟上限 155.70）——
    **分析这段版本的旧日志时，`round_*` 三条事件的 `time` 不可与同文件其它事件直接比较。**
+6b. **【v0.8.10 追加】同源的范围 = 文件内的每一个事件类型，不只 `round_*`**。
+   v0.8.9 只修了 `round_*`，而 `probe`（`ScoreHitProbeBehavior._elapsed`）同样从未归零
+   ⇒ 每轮文件里仍有两条时间轴（实测 `battle_20260925_111509_578.jsonl`：`probe` 230.39–310.42，
+   同文件其余事件上界 91.43）。**该缺陷在 v0.8.9 的校验器下被判成 PASS（假通过）**——
+   因为它的参考区间取的是"除 `round_*` 外全体事件的 min/max"，异源事件自己的大值会把区间抬高。
+   现行判据（`tools/bl_check_clock_reset.py`，v0.8.10）改为：**锚时钟 = `state`**（每轮必有），
+   轮内区间 = `[0, 锚上界 + 3 s]`，并要求**每个类型**的 `time` 起点不晚于锚上界（超出的类型逐一点名）。
+   ⚠️ 分析 v0.8.5–v0.8.9 的多轮日志时，`probe` 的 `time` 与同文件其它事件**不同源**（第 2 轮起必现）。
 
 ## 十二、首批实测结果（2026-09-24 20:20–20:27，10 场）
 
@@ -1464,6 +1472,20 @@ t= 0.42 ChargeToTarget → 2.43 Stop → 3.43 ChargeToTarget → 4.43 Stop → 5
   ⚠️ **本修复尚未做真机回归** —— 游戏在崩溃后未重启。样本对验证的是
   「校验逻辑有区分力」，**不等于**验证了「它在游戏内真的拦得住」（尽管前者是后者的必要条件）。
 
+  🔴 **v0.8.10 更正（2026-09-25，外部代码审查 B3）**：上表 7 项在**本仓库里找不到任何可复现入口**
+  （`rg "SceneExists|unknown_scene"` 只命中源码与本文档自身；`tools/` 下没有相关测试），
+  且**与当时的代码事实相反**：
+
+  - `SceneExists` 写的是 `mi.FolderPath + "SceneObj/" + scene + "/scene.xscene"`（裸拼接），
+    而 `FolderPath` **不含尾分隔符** —— 反编译 `TaleWorlds.ModuleManager.dll` 的
+    `ModuleInfo.LoadWithFullPath`：`FolderPath = fullPath;` 紧接着 `FolderPath + "/SubModule.xml"`，
+    与运行日志 `..\..\Modules\SandBoxCore/SubModule.xml` 逐字吻合（反斜杠在 `SandBoxCore` 处结束）；
+  - 因此拼出的路径是 `…\Modules\SandBoxCoreSceneObj/…`（恒不存在）⇒ 该守卫会把**每一次** `start`
+    都判成 `unknown_scene`（fail-closed：不崩，但桥不可用）。
+
+  ⇒ 上表里的「`battle_terrain_a` 放行」在真机上**不可能**出现。按 §四 的纪律，
+  **写不出可复现入口的"验证"应当视作未验证**（本次如实标注；修复与重新验证见 §二十）。
+
 ### 2. 修复 1 的真机回归证据（判据：§十一 第 6 条「时钟同源」）
 
 | 判据 | 修前 | 修后 |
@@ -1508,3 +1530,153 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 引擎的原生边界不做防御（`Scene.Read` 连返回值都没有），
 托管侧的 `try/catch` 在这里是**结构性无效**的 —— 它拦得住托管异常，拦不住 native 访问违规。
 ⇒ 判据：**调用点如果在托管/原生边界上，且失败后果是进程级，就必须在调用前自己校验。**
+
+---
+
+## 二十、v0.8.10 修复（2026-09-25）：外部审查 B1–B7 + 主线程看门狗
+
+**版本落点**：`module/SubModule.xml` = `v0.8.10`；`src/BridgeConfig.cs` `Version` = `"0.8.10"`
+**离线验证**：`build.ps1` csc **0 error / 0 warning**（产物 81.5 KB，manifest 版本 0.8.10）；
+`check_repo_encoding.py` 65 文件全合规；`bl_selftest.py` / `bl_metrics_selftest.py` / `jsontest` 全部 `结果: 全部通过`
+**真机状态**：❌ **未部署、未真机回归** —— 本轮只做到「编译 + 离线判据 + 判据自身的双侧对照」
+
+### 0. 本轮的两份输入：同一批代码、两个独立视角
+
+| 输入 | 方式 | 覆盖 | 主要结论 |
+|---|---|---|---|
+| `docs/bug-hunt-2026-09-25-v0.8.9.md` | 本会话自查（读码 + 现场取证） | 只查「有实测现场指向的缺陷」+ 必跑项回归 | 缺陷 1（loading 卡死无熔断）已修；缺陷 2（场景名未校验）已修但 **0 次真机运行** |
+| `docs/code-review-2026-09-25-v0.8.9-ocr.md` | 独立静态审查（OCR delegation，`66a036c..0f5d801`） | 5 份可评审变更文件 | **B1/B2/B3 high** + B4–B7 low |
+
+**两份文档的实质冲突（本轮逐条核验，三处均以审查侧为准）**：
+
+1. **「时钟同源已修」** —— 自查侧只验到 `round_*`（v0.8.9 修的就是它）；审查侧 B2 指出
+   `probe` 事件同样从未归零 ⇒ 每轮文件里仍有两条时间轴。**本轮用真实产物复核成立**：
+   `battle_20260925_111509_578.jsonl` 的 `probe` 落在 230.39–310.42，而同文件其余事件上界只有 91.43。
+   并且该缺陷比审查侧估计的更早：**3 份 v0.8.7 产物也能报出 `probe` 异源**（见 §2 表）。
+2. **「场景守卫已修」** —— 审查侧 B3 指出该守卫自己拼错了路径。**本轮反编译确证成立**
+   （`ModuleInfo.LoadWithFullPath` 的 `FolderPath + "/SubModule.xml"` vs 运行日志逐字吻合）
+   ⇒ `FolderPath` 不含尾分隔符，原守卫恒判"不存在"。§十九 的「7/7 通过」已就地更正。
+3. **「新产物 3/3 PASS」** —— 用的是 v0.8.9 首版判据，而 B1 证明该判据有**反单调性**：
+   异源事件自己的大值会抬高参考区间，反而让判定放宽。⇒ 那 3 份里的 2 份（578/709）**是假通过**。
+
+> 一句话：自查侧的两条"已修"都只到「编译通过」这一层，而**验证门本身**（时钟校验器）也有洞；
+> 审查侧的独立视角补上了"同一类缺陷在 `probe` 上仍在"与"新代码拼错路径"这两条自查看不见的缺口。
+
+### 1. 修复清单（7 条 + 看门狗）
+
+#### B1（high）时钟校验器的判据有洞 ⇒ 改为「锚时钟 + 逐类型点名」
+
+- **缺陷**：参考区间取"除 `round_*` 外全体事件的 min/max"，**从不检查其余类型之间是否同源**；
+  且该取法**反单调** —— 异源事件会把区间**抬高**，使 `round_*` 更容易通过。
+  实测 578：区间上界 310.42 完全由 `probe` 贡献，剔除后轮内真实上界只有 91.43，而脚本判它 **PASS**。
+- **修法**：锚时钟 = `state`（每轮必有，由 `TelemetryBehavior` 周期写出；缺失时退化为事件数最多的非 `round_*` 类型，
+  并在报告里打出锚名/条数）；轮内区间 = `[0, 锚上界 + OVER_TOL]`；
+  新增**判据 3**：每个非 `round_*` 类型的 `time` **起点**不得晚于锚上界，超出的类型**逐一点名**。
+- **`OVER_TOL = 3.0 s` 的理由**：锚是周期采样，末条 `state` 到轮末有死区（实测 `end`/`round_cleanup`
+  最多晚 1.95 s）；而异源时钟的平移量是**整轮时长**（实测 12.2 s 起，最大 320 s）⇒ 差一个数量级，区分力不受影响。
+
+#### B2（high）`probe` 时钟未随轮次归零
+
+- **缺陷**：`ScoreHitProbeBehavior._elapsed` 从 mission 开始一直累加、全仓库无归零点，
+  而 `Jw` 每轮换文件 ⇒ 第 2 轮起 `probe` 带整场时钟。**第 1 轮不可见**（该轮整场 ≡ 轮内）⇒ 单轮验证必然漏掉。
+- **对照（代码内三处并列）**：`TelemetryBehavior._elapsed` ✓ 归零 / `RoundOrchestratorBehavior._elapsed` ✓ 归零 /
+  本字段（v0.8.9）✗。
+- **修法**：`ScoreHitProbeBehavior.BeginNewRound()`（归零 `_elapsed` 与 `_nextReportAt`，**计数刻意不归零**——
+  探针判据是"整场配平"）；由 `RoundOrchestratorBehavior.Advance` 在调用 `tb.BeginNewRound` 的**同一处**触发。
+
+#### B3（high）场景守卫的路径拼接错 ⇒ 恒判不存在
+
+- **缺陷**：`mi.FolderPath + "SceneObj/" + scene + "/scene.xscene"`；`FolderPath` 不含尾分隔符
+  ⇒ 得到 `…SandBoxCoreSceneObj/…`。该守卫提交后 **0 次真机运行**，所以一直没暴露。
+- **确证（v0.8.10 新增证据，此前只是高置信推断）**：反编译 `TaleWorlds.ModuleManager.dll`：
+  `public void LoadWithFullPath(string fullPath) { FolderPath = fullPath; string text = FolderPath + "/SubModule.xml"; … }`，
+  与运行日志 `..\..\Modules\SandBoxCore/SubModule.xml` 逐字吻合 ⇒ **100% 排他**。
+- **修法**：`Path.Combine(mi.FolderPath, "SceneObj", scene, "scene.xscene")`（场景清单那处同样改）。
+
+#### B4（low）路径穿越守卫不完整：`..` 不含分隔符却不被拦
+
+- **修法**：新增 `IsSafeSceneName()`：拒绝含 `/` `\` 的名字，**并显式拒绝 `.` / `..`**
+  （`SceneObj/../scene.xscene` 会逃出 `SceneObj/`）。后果层仍不可达，但判据按 §五 纪律补全。
+
+#### B5（low）`GetAllModules()` vs 引擎的 `GetActiveModules()` + `IsActive`
+
+- **缺陷**：`SceneExists` 取 `GetAllModules()`（**含未启用模块**），不判 `IsActive`。
+- **对照**：引擎自己的"这个场景存在吗"用 `GetActiveModules()` + `IsActive` + `Path.Combine`。
+- **后果层**：**找不到**能触发它的真实数据（需要"存在未启用且带 `SceneObj/` 的模块"这一特定配置）
+  ⇒ 按 §四 纪律维持 **low**，**不主张**它已发生。
+- **修法**：新增 `SceneSearchModules()`，只收 `GetActiveModules()` 中 `IsActive == true` 且 `FolderPath` 非空的模块
+  （用 `GetAllModules()` 会把未启用模块里的同名 `SceneObj/` 也算存在 ⇒ fail-open）。
+  `IsActive` / `GetActiveModules()` 的存在性由 csc 编译验证（引用同一套游戏 DLL）。
+
+#### B6（low）`--since` 且无新多轮文件时提前 `return 1`，对照组被跳过
+
+- **缺陷**：部署后首次多轮战斗之前跑这道门，会得到**退出码 1**（与"判定失败"同码），
+  且因为提前 `return`，**对照组也不会打印** ⇒ 把"数据不足"误报成"未通过"。
+- **修法**：抽出 `print_control_group()`；该早退路径改为**先打印对照组、再返回 2**（2 = 环境/数据不足），
+  与脚本头部的退出码约定一致。
+
+#### B7（low）`AFFECTED_VERSIONS` 过时
+
+- **缺陷**：集合只到 `0.8.8`，而 B2 已证明 `0.8.9` 的 `probe` 事件同样异源（该集合只用于报告标注）。
+- **修法**：改为 `{0.8.5 … 0.8.9}`，并在常量处注明两个成因（`round_*` 整场累计 ≤0.8.8；`probe` 整场累计 ≤0.8.9）。
+
+#### 看门狗（本会话自查侧缺陷 1，审查侧未覆盖）
+
+- **缺陷**：mission tick 停住时（如 11:40 的原生崩溃现场），`durationCapSec` 超时与 `abort` 的
+  `_endRequested` 判定都写在 tick 内 ⇒ 状态机永久 `loading` + `busy=true`，后续 `start` 全被拒，只能重启游戏。
+  `LastHeartbeatUnix` 当时是**只写不读**的死字段。
+- **修法**：`ScenarioRunner.Watchdog()`，挂在 `SubModule.OnApplicationTick`（主线程每帧，实测卡死时仍在跑），
+  **不能**挂 mission tick（那正是会停掉的那条路径）。阈值：loading 用 120 s，running 用 `durationCap + 60 s`
+  （不抢在正常收尾之前误杀）。收尾顺序：**先**落状态（`State=error`、`Busy` 立即 false、`result` 带
+  `stuckState`/`stuckSec`），**后**尝试 `EndMission()`（引擎已异常时大概率无效，但不新增崩溃）。
+
+### 2. 判据本身的验证：同一批数据、改前 / 改后两侧对照
+
+`python tools/bl_check_clock_reset.py`（全量 109 份，15 份多轮）：
+
+| 判据版本 | FAIL | PASS | 其中 578 / 709（v0.8.9 产物） |
+|---|---|---|---|
+| v0.8.9 首版（反单调区间） | 9 | 6 | **PASS —— 假通过**（区间 `[0.00, 310.42]`，上界由 `probe` 自己贡献） |
+| v0.8.10（锚时钟 + 逐类型） | **11** | 4 | **FAIL，且点名 `probe`**（起点 230.39 / 320.44 晚于锚上界 90.03 / 16.02） |
+
+- **应报侧**：578、709（v0.8.9 的 `probe` 异源）+ 446 / 223 / 560（**v0.8.7 也有 `probe` 异源**，
+  说明该缺陷早于 v0.8.9 就存在）+ 9 份 `round_*` 历史失败样本 —— **全部仍报 FAIL**。
+- **不应报侧**：`battle_20260925_111446_466.jsonl`（第 1 轮，`probe` 与轮内时钟同源）与
+  396 / 403 / 227（`round_*` 正常）—— **仍 PASS**，说明新判据没有误报。
+- `--since 2026-09-25T11:10:00`（主路径）与 `--since <未来时刻>`（数据不足早退）两条路径都实测：
+  前者 `exit=1` 且自动带上对照组（`PASS 4 / FAIL 11`），后者 **`exit=2`** 且**先打印对照组**。
+
+> 这正是 §三 通用纪律的又一个实例：**修判据不能只看"新产物 0 失败"** ——
+> 必须同时看到"已知含缺陷的样本仍被报出"。首版判据的两侧**都不对**（假通过 + 区间被污染）。
+
+### 3. 必跑项与文档变化
+
+- `AGENTS.md`：§三 第 5 项补**现行判据（锚时钟 + 逐类型）**与 `exit=2` 的含义；
+  §四 新增一条纪律「**『验证』必须留下可复现入口**」（§十九 的 7/7 就是反例）；
+  §五 补一行：v0.8.9 新增的守卫本身有两处缺陷（裸拼接 + `GetAllModules`）。
+- `README.md`：§七 `time` 公共字段说明补 v0.8.10 段（`probe` 在 v0.8.5–v0.8.9 的多轮文件里不同源）；
+  §十 已知修复记录表补 v0.8.10 行。
+- `PROGRESS.md`：§十一 追加判据 **6b**；§十九 就地更正「7/7 通过」；本段（§二十）。
+- `docs/`：本轮两份输入都落盘 —— `bug-hunt-2026-09-25-v0.8.9.md`（此前未跟踪）与本审查报告
+  `code-review-2026-09-25-v0.8.9-ocr.md`（新落盘，顶部附 B1–B7 的处置结果表）。
+
+### 4. 未做（下次开游戏时的真机待办，按优先级）
+
+1. **场景守卫（B3）** —— 这是本轮唯一"改完仍未运行过"的代码，且它是**所有 `start` 的必经之路**：
+   一次传 `battle_terrain_a`（应放行）+ 一次传 `bridge`（应被拒且不崩）。
+   若 `GetActiveModules()` 在 `start` 时机返回空，表现是**所有场景都被拒**（fail-closed、不崩）⇒ 看返回消息即可判定。
+2. **`probe` 时钟（B2）** —— 跑一场 `--rounds 3`，再跑 `tools/bl_check_clock_reset.py --since <部署时刻>`，
+   期望：新产物 3 份 **PASS**（`probe` 不再越界）+ 历史 11 份仍 **FAIL**。
+3. **看门狗** —— 构造一次 loading 卡死，期望 120 s 后状态从 `loading` 变 `error`、`busy=false`，
+   且 `result.reason = "watchdog_loading"`；同时确认**下一次 `start` 能被接受**（这是它存在的理由）。
+4. **一条待办（本轮刻意没做）**：把时钟判据的"应报/不应报"样本做成 `bl_selftest.py` 里的**合成 jsonl 断言**，
+   这样判据退化时不必依赖真实游戏日志就能被抓到。
+
+**已知限制（如实标注）**：
+
+- **看门狗只收状态机，不刷新 `bridge_status.json`**。卡死收尾时 `ScenarioRunner.State` 变 `error`、
+  `busy=false`（后续 `start` 可继续），但该文件仍停在 `state="battle"`、`missionsThisSession` 不 +1。
+  影响很小：该文件的 `state` 只被 `bl_mcp` 的**崩溃归因**使用（进程存活时直接判 `running`），
+  而卡死时进程仍活着。之所以不顺手调用 `SubModule.NotifyBattleFinished()`：若随后的
+  `EndMission()` 竟生效，`TelemetryBehavior.OnEndMission` 会再回调一次 ⇒ `missionsThisSession` 双计。
+- **真机未验证**：本轮所有修复（含工作区里已存在的看门狗）都只到「编译 + 离线判据」这一层。

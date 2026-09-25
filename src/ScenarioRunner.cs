@@ -46,6 +46,13 @@ namespace BlBridge
         internal static double StartedAtUnix;
         internal static double LastHeartbeatUnix;
 
+        /// <summary>
+        /// v0.8.10：看门狗在 loading 态的判定阈值（秒）—— 自开战请求起超过这么久
+        /// 仍无任何 mission tick 推进 ⇒ 判定卡死。正常 agent 生成只需数秒，取 120 留足余量。
+        /// running 态不用这个值，用 DurationCapSeconds + 60（见 Watchdog）。
+        /// </summary>
+        internal static float WatchdogLoadingSeconds = 120f;
+
         // 结果
         internal static string ResultJson = "null";
 
@@ -447,6 +454,59 @@ namespace BlBridge
             }
         }
 
+        /// <summary>
+        /// v0.8.10 看门狗：**必须**挂在 SubModule.OnApplicationTick（主线程每帧），
+        /// **不能**挂在 Mission.OnMissionTick —— 后者恰恰是"卡死时会停掉"的那个回调
+        /// （v0.8.9 实测：tick 已停，但主线程仍在正常处理命令）。
+        ///
+        /// 缺陷背景：场景加载失败 / 引擎异常时 mission tick 不再推进，而
+        /// durationCapSec 超时与 abort 的 _endRequested 判定都写在 tick 内
+        /// ⇒ 状态机永久停在 loading、busy=true，后续 start_battle 全被拒，只能重启游戏。
+        ///
+        /// 判据：自 LastHeartbeatUnix 起超过阈值仍无 tick ⇒ 判定卡死，状态侧强制收尾。
+        /// 收尾顺序：**先**落状态（Busy 立刻转 false，调用方能拿到失败原因并继续发请求），
+        /// **后**尝试 EndMission（引擎已异常时大概率无效，历史实测"abort 无效"但不新增崩溃）。
+        /// </summary>
+        public static void Watchdog()
+        {
+            try
+            {
+                if (!Busy) return;
+                if (LastHeartbeatUnix <= 0) return;
+                double since = NowUnix - LastHeartbeatUnix;
+                double limit = State == RunStateLoading
+                    ? (double)WatchdogLoadingSeconds
+                    : (double)DurationCapSeconds + 60.0;
+                if (since < limit) return;
+
+                string stuck = State;
+                _endReason = "watchdog_" + stuck;
+                LastError = "看门狗：状态 " + stuck + " 已 " + Jw.N((float)since) +
+                            " 秒无 mission tick 推进（阈值 " + Jw.N((float)limit) + "），判定卡死并强制收尾";
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"reason\":").Append(Protocol.Q(_endReason));
+                sb.Append(",\"stuckState\":").Append(Protocol.Q(stuck));
+                sb.Append(",\"stuckSec\":").Append(Jw.N((float)since));
+                sb.Append(",\"durationSec\":").Append(Jw.N((float)ElapsedSeconds()));
+                sb.Append(",\"aAlive\":-1,\"dAlive\":-1");
+                sb.Append('}');
+                ResultJson = sb.ToString();
+                _endRequested = false;
+                State = RunStateError;
+                try
+                {
+                    Mission m = SafeMission();
+                    if (m != null) m.EndMission();
+                }
+                catch
+                {
+                }
+            }
+            catch
+            {
+            }
+        }
+
         // ── 内部实现 ─────────────────────────────────────────────────────
 
         /// <summary>解析 "x,z" 或 "x,y,z" → Vec3?（空串/格式错 = null，表示用引擎默认生成点）。</summary>
@@ -496,7 +556,7 @@ namespace BlBridge
         ///     11:40:31.874  Unhandled Exception Code 0xC0000005   ← 6 ms 后
         ///   对照：同一请求传 battle_terrain_a（存在于 SandBoxCore/SceneObj/）则正常。
         ///
-        /// 检查方式：遍历**全部已加载模块**的 `SceneObj/&lt;scene&gt;/scene.xscene`。
+        /// 检查方式：遍历**全部已激活模块**的 `SceneObj/&lt;scene&gt;/scene.xscene`（见 SceneSearchModules）。
         ///   引擎自己的场景寻址就是"扫所有模块的 SceneObj"（$BASE/Modules/&lt;id&gt;/SceneObj/...），
         ///   所以文件系统查与引擎查一致，且不需要进 native。
         ///   ⚠️ 只认 `scene.xscene` 这一必需文件：`Modules/SandBoxCore/SceneObj/battle_terrain_a/`
@@ -508,13 +568,11 @@ namespace BlBridge
             if (string.IsNullOrEmpty(scene)) return false;
             try
             {
-                // 场景名不得含路径分隔符（否则等于允许请求越权指向任意文件）
-                if (scene.IndexOf('/') >= 0 || scene.IndexOf('\\') >= 0) return false;
+                if (!IsSafeSceneName(scene)) return false;
 
-                foreach (ModuleInfo mi in ModuleHelper.GetAllModules())
+                foreach (ModuleInfo mi in SceneSearchModules())
                 {
-                    if (mi == null || string.IsNullOrEmpty(mi.FolderPath)) continue;
-                    string probe = mi.FolderPath + "SceneObj/" + scene + "/scene.xscene";
+                    string probe = Path.Combine(mi.FolderPath, "SceneObj", scene, "scene.xscene");
                     if (File.Exists(probe)) return true;
                 }
                 return false;
@@ -525,6 +583,49 @@ namespace BlBridge
                 // 宁可拒绝一次合法请求，也不放一次会崩进程的请求过去。
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 场景名必须是**单个目录段**：这个名字会被拼进文件系统路径。
+        ///
+        /// - 含路径分隔符 ⇒ 等于允许请求越权指向任意文件（v0.8.9 已拦）。
+        /// - `.` / `..` **不含分隔符却不被拦**，而 `SceneObj/../scene.xscene` 会逃出 SceneObj/
+        ///   （v0.8.10 审查发现）。按 AGENTS.md §五「请求参数是不可信输入」，
+        ///   判据取"归一化后仍须在 &lt;module&gt;/SceneObj/ 之下"，故显式拒绝这两个名字。
+        /// </summary>
+        private static bool IsSafeSceneName(string scene)
+        {
+            if (string.IsNullOrEmpty(scene)) return false;
+            if (scene.IndexOf('/') >= 0 || scene.IndexOf('\\') >= 0) return false;
+            if (scene == "." || scene == "..") return false;
+            return true;
+        }
+
+        /// <summary>
+        /// 场景搜寻用的模块清单：**只认已激活模块**。
+        ///
+        /// 判据来自引擎自己的同类实现（"这个场景存在吗"）：
+        /// `ModuleHelper.GetActiveModules()` + `activeModule.IsActive` + `Path.Combine(FolderPath, ...)`。
+        /// 用 `GetAllModules()` 会把**未启用**模块里同名 `SceneObj/` 也算存在 ⇒ 放行一个引擎解析不到的场景
+        /// （fail-open；后果层未观测到实例，按 AGENTS.md §四 属 low，但改法与引擎一致、零成本）。
+        ///
+        /// ⚠️ FolderPath 的形态（v0.8.10 反编译确证，此前只能是高置信推断）：
+        ///   `ModuleInfo.LoadWithFullPath`：`FolderPath = fullPath;` 紧接着 `FolderPath + "/SubModule.xml"`，
+        ///   而运行日志同一处渲染为 `..\..\Modules\SandBoxCore/SubModule.xml`
+        ///   ⇒ **FolderPath 不含尾分隔符**，必须用 `Path.Combine` 拼接。
+        ///   v0.8.9 写的 `mi.FolderPath + "SceneObj/"` 因此得到 `...SandBoxCoreSceneObj/...`（恒不存在）
+        ///   ⇒ 该守卫会把**每一次** start 都判成 unknown_scene。它提交后 0 次真机运行，故未被发现。
+        /// </summary>
+        private static List<ModuleInfo> SceneSearchModules()
+        {
+            List<ModuleInfo> modules = new List<ModuleInfo>();
+            foreach (ModuleInfo mi in ModuleHelper.GetActiveModules())
+            {
+                if (mi == null || !mi.IsActive) continue;
+                if (string.IsNullOrEmpty(mi.FolderPath)) continue;
+                modules.Add(mi);
+            }
+            return modules;
         }
 
         /// <summary>
@@ -547,10 +648,9 @@ namespace BlBridge
             try
             {
                 List<string> battleScenes = new List<string>();
-                foreach (ModuleInfo mi in ModuleHelper.GetAllModules())
+                foreach (ModuleInfo mi in SceneSearchModules())
                 {
-                    if (mi == null || string.IsNullOrEmpty(mi.FolderPath)) continue;
-                    string sceneObj = mi.FolderPath + "SceneObj/";
+                    string sceneObj = Path.Combine(mi.FolderPath, "SceneObj");
                     if (!Directory.Exists(sceneObj)) continue;
                     foreach (string dir in Directory.GetDirectories(sceneObj))
                     {

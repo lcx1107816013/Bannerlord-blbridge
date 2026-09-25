@@ -129,6 +129,9 @@ namespace BlBridge
         {
             base.OnApplicationTick(dt);
             CommandPump.Pump();
+            // v0.8.10：看门狗必须挂在这里而不是 Mission tick —— mission tick 卡住时
+            // 主线程仍在跑，这里能观察到「busy 但久无心跳」并强制收尾（见 ScenarioRunner.Watchdog）。
+            ScenarioRunner.Watchdog();
         }
 
         /// <summary>战斗结束时由 TelemetryBehavior 回调，刷新状态文件。</summary>

@@ -56,6 +56,14 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 - 新产物 **0 失败** —— 说明修复生效；
 - 历史日志里的已知失败样本**仍被报出** —— 说明这个校验器**真的在判定**，而不是永远返回 PASS。
 
+**判据长什么样（v0.8.10 起，三条）**：锚时钟 = `state`（每轮必有，由 `TelemetryBehavior` 写出），
+轮内区间 = `[0, 锚上界 + 3.0 s]`；
+① `round_start.time ≈ 0`；② 其余 `round_*` 落在轮内区间；③ **每个非 `round_*` 类型的 `time` 起点**
+不晚于锚上界（越界的类型逐一点名）。
+⚠️ **不要**把参考区间改回"除 `round_*` 外全体事件的 min/max" —— 那种取法**反单调**：
+异源事件自己的大值会抬高区间、反而让判定放宽（v0.8.9 首版因此把 2 份异源文件判成 PASS，见 PROGRESS §二十）。
+退出码：`0` 通过 / `1` 有 FAIL 或无 PASS / **`2` 环境或数据不足**（含"`--since` 下没有任何新的多轮文件"）。
+
 只有新产物那半边，等于没有对照组：一个恒返回 PASS 的脚本、一个数据源接错的脚本、
 一个正则写错把所有事件都跳过的脚本 —— 都会「通过」。**这也是整个项目所有验证的通用纪律**：
 `bl_metrics` 的合成事件手算期望、`bl_compare` 的换边双跑、jsontest 的「应报 / 不应报」样本对，
@@ -90,6 +98,15 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 找不到 ⇒ 后果不可达 ⇒ severity 必须下调。这一步能拦住绝大多数**严重度膨胀**
 （把推演出的后果当成已发生的问题写进「影响」段）。
 
+**另一条同样硬的纪律：「验证」必须留下可复现入口。**
+
+一条写着「验证通过 / N/N 通过」的结论，如果**说不清怎么复现**（没有命令、没有入口、没有样本文件），
+就应当**视作未验证**。实测教训（v0.8.10，2026-09-25）：PROGRESS §十九 记过场景守卫的
+「受控样本对验证（7/7 通过）」，但全仓库找不到任何能跑出这 7 项的入口，且**它与代码事实相反** ——
+守卫当时写的是裸拼接 `FolderPath + "SceneObj/"`，而 `FolderPath` 不含尾分隔符 ⇒ 每次 `start`
+都会被判成 `unknown_scene`，「放行」在真机上不可能发生（已就地更正）。
+⇒ 操作检查法：**写下"验证通过"之前，先写出那一条能复现它的命令**；写不出来，就不要写"通过"。
+
 另外两条与编码相关的纪律（踩过坑）：
 
 - PowerShell 5.1 读**无 BOM 的 UTF-8 `.ps1`** 会按 ANSI 解 ⇒ `build.ps1` 刻意只用 ASCII；
@@ -115,8 +132,17 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 对照：同一请求传 `battle_terrain_a`（存在于 `SandBoxCore/SceneObj/`）则完全正常。
 
 修复方式值得照抄：**绕开原生边界去校验** —— 引擎自己就是扫所有模块的 `SceneObj/`，
-所以托管侧遍历 `ModuleHelper.GetAllModules()` 的 `FolderPath` 探测
+所以托管侧遍历 `ModuleHelper.GetActiveModules()` 的 `FolderPath`、用 `Path.Combine` 探测
 `SceneObj/<scene>/scene.xscene`，判定结果与引擎一致，且**不需要进 native**。
+
+**v0.8.10 补充：这道守卫自己曾有两处缺陷（外部审查 B3/B5，已修）**
+① 拼接写成裸 `FolderPath + "SceneObj/"`，而 `FolderPath` **不含尾分隔符**
+（反编译 `ModuleInfo.LoadWithFullPath`：`FolderPath = fullPath;` 紧接着 `FolderPath + "/SubModule.xml"`），
+于是探测路径恒不存在 ⇒ **每一次 `start` 都被判成 `unknown_scene`**（fail-closed：不崩，但桥不可用）。
+该守卫提交后 **0 次真机运行**，所以一直没暴露；而 PROGRESS §十九 当时却记着「7/7 通过」（见 §四 新增的纪律）。
+② 遍历用 `GetAllModules()` 而非引擎同款 `GetActiveModules()` + `IsActive` —— 未启用模块里存在同名场景时
+会 fail-open（放行一个引擎解析不到的场景）。
+⇒ 结论：**思路（绕开原生边界自己校验）没问题，但校验器自己也要有对照组。**
 
 顺带记一条操作教训：**`meta.mission` 不是场景名。** 本次崩溃的触发方式是从旧日志里读了
 `meta.mission = "bridge"` 当成 `scene` 传进去 —— 那是遥测记录的 mission 标识
