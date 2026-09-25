@@ -184,21 +184,23 @@ namespace BlBridge
             {
                 ProtoUiLog.W("PrototypeScreen.OnInitialize: creating VM + GauntletLayer");
                 _vm = new ProtoBattleVM();
+                // Order copied VERBATIM from the official CustomBattleScreen.OnInitialize, because that
+                // is the known-good sequence for "a GameStateScreen with a Gauntlet prefab and working
+                // buttons":
+                //     new GauntletLayer -> LoadMovie -> [RegisterHotKeyCategory xN]
+                //     -> SetInputRestrictions -> AddLayer -> IsFocusLayer -> TrySetFocus
+                // Earlier revisions of this prototype did LoadMovie -> AddLayer -> focus -> THEN
+                // SetInputRestrictions and never registered a hotkey category; in that shape NEITHER a
+                // human click NOR synthetic input ever produced Command.Click (no ExecutePing line).
                 _layer = new GauntletLayer("BlBridgeProto", 1, true);
                 LoadMovie();
+                _layer.Input.RegisterHotKeyCategory(HotKeyManager.GetCategory("GenericPanelGameKeyCategory"));
+                _layer.Input.RegisterHotKeyCategory(HotKeyManager.GetCategory("GenericCampaignPanelsGameKeyCategory"));
+                _layer.InputRestrictions.SetInputRestrictions(true, (InputUsageMask)7);
                 AddLayer(_layer);
-                // Focus MUST be set after the layer is part of the screen.  This revision first
-                // had LoadMovie -> TrySetFocus -> AddLayer, and the clicks never reached
-                // Command.Click (no ExecutePing line in proto_ui.log) because the layer had no
-                // input focus.  Official CustomBattleScreen does: AddLayer in OnInitialize,
-                // then IsFocusLayer + TrySetFocus in OnActivate.
                 _layer.IsFocusLayer = true;
                 ScreenManager.TrySetFocus(_layer);
-                // Without this the layer never receives mouse input, so ButtonWidget.Command.Click
-                // never fires (the first two runs: no ExecutePing in proto_ui.log).  Official
-                // CustomBattleScreen: SetInputRestrictions(true, (InputUsageMask)7).
-                _layer.InputRestrictions.SetInputRestrictions(true, (InputUsageMask)7);
-                ProtoUiLog.W("PrototypeScreen.OnInitialize: done (layer added, focus set, input unmasked)");
+                ProtoUiLog.W("PrototypeScreen.OnInitialize: done (official order: movie, hotkeys, input, layer, focus)");
             }
             catch (Exception ex)
             {

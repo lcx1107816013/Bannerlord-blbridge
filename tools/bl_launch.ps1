@@ -120,8 +120,13 @@ while ((Get-Date) -lt $deadline) {
         if ($parts.Count -lt 3) { continue }
         $h = $parts[0]; $title = $parts[2]
         if ($title -eq '' -or $handled.ContainsKey($h)) { continue }
-        if ($title -match 'Reasonix|Vortex|Edge|QQ|Cua|HiddenDialog|Program Manager|cockpit') { continue }
-        # only windows that belong to the launcher process (or the game itself)
+        # Do NOT blacklist windows by title here.  The game window's own title contains the BLSE
+        # install path, which on this machine lives under Vortex
+        # (".../AppData/Roaming/Vortex/mountandblade2bannerlord/mods/Bannerlord Software Extender..."),
+        # so a title blacklist containing 'Vortex' skipped the very window we were waiting for:
+        # bl_launch_game reported LAUNCH FAILED while the game was up and BlBridge had already
+        # loaded (bridge_status.json state=loaded + a fresh Register line).  Ownership by pid is
+        # the reliable filter.
         $owner = 0
         [void][int]::TryParse($parts[1], [ref]$owner)
         $isOurs = ($owner -eq $p.Id)
