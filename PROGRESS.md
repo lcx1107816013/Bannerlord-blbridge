@@ -1686,6 +1686,12 @@ python tools\bl_check_clock_reset.py                          # 全量：历史�
 **四段一致**（源码 = 构建产物 = 部署文件 = **进程内 DLL**，版本 0.8.10，`fileChangedSinceLoad=false`）；
 `bridge_status.json` 的 `role=game`；`SubModule.xml` 也是 `v0.8.10`。
 
+> **交付产物的 sha 变化说明（如实标注）**：§5.1–§5.4 跑的是 `b0548d88…`；回归之后，为把 §5.3 的实验发现
+> 写进 `Watchdog()` 的注释，源码重新编译并部署，部署产物变为 **`B03E353D…`**（`out\` 与部署目录逐字节一致）。
+> **与回归产物的唯一差异是注释**（不参与行为），并已用 `ilspycmd` 反编译确认新产物里
+> `WatchdogLoadingSeconds = 120f`（正式版、非实验版）。⇒ 真机证据对应当前交付物的**行为**，
+> 但"验证过的二进制"与"最终部署的二进制"不是同一份（差一段注释）—— 按 §四 的纪律如实标注。
+
 > 部署过程中的一个环境细节：`Bannerlord.BLSE.Launcher` **会预加载** `Modules/*/bin/.../*.dll`
 > 并跑 `OnSubModuleLoaded`（所以它自己就写了 `bridge_status.json` 的 `pid/version`），
 > 因此**它开着就无法覆盖 dll**（`build.ps1 -Deploy` 会报 "The deployed DLL is locked"）。
