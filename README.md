@@ -61,7 +61,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 24 个（`bl_open_ui` / `bl_start_battle` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 32 个（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -99,7 +99,7 @@ BlBridge/
   build.ps1                       一键编译 + 部署（查游戏进程 + 备份旧 DLL + SHA256 + 写构建清单）
   blbridge.example.json           MCP 侧配置模板
   blbridge_game.example.json      游戏端配置模板
-  tools/bl_mcp.py                 MCP server（stdio，24 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
+  tools/bl_mcp.py                 MCP server（stdio，32 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
@@ -162,7 +162,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 
 ---
 
-## 六、MCP 工具（24 个）
+## 六、MCP 工具（32 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -174,8 +174,14 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 | `bl_apply_config` | 改 Warbandlord 配置（自动备份 + XML 校验） | 否（改完需重启游戏） |
 | `bl_rts_config` | 回读 **RTSCamera** 配置（攻城相机高度 / 自由相机 / 抬升触发） | 否 |
 | `bl_apply_rts_config` | 写 RTSCamera 配置（自动备份 + 校验 + 回读核对）；支持预设 `siege-god`/`free-always`/`elevated-always`/`god-full`。**实测改完下一场就生效**（它每场开始读一次配置；但它退出时会用内存值覆写文件 ⇒ 要"永久"得在游戏内 MCM 改） | 否 |
+| `bl_ghost_camera` | **幽灵/自由相机**（`mode` = status/on/off/toggle）：设引擎自带的 `MissionScreen.IsCheatGhostMode` —— 相机走引擎的 Free 观察镜头，且**命令 UI 开着也保持自由**（能观战 + 能下令）。**运行时即可切、对任何一场战斗都有效**（含你自己打的）；`cheat_mode`（只读项）未开时不能手动飞，但观察者镜头与切换都可用 | 是 |
+| `bl_camera_speed` | **相机移动速度**（v0.8.17；`mode` = status/shift/base/rts/boost）。三条腿：`shift`=引擎自由相机的 Shift 倍率（走官方控制台函数 `mission.set_shift_camera_speed`，**不需要作弊模式**，按住 Shift 生效）；`base`=引擎基础倍率（反射，⚠️ 引擎把速度分量 clamp 在 ±20）；`rts`=**RTSCamera** 的 `MovementSpeedFactor`（反射，最有效，上限随速度一起放大）；`boost`=三条可用腿一起设。每条腿**写完回读**，失败点名是哪条腿 | 是 |
+| `bl_skip_video` | **跳过开场动画**（v0.8.20）：判当前活动状态是不是 `VideoPlaybackState`，是就直接调 `OnVideoFinished()` —— **不模拟 ESC**（判据硬、无副作用）。做法学自 BUTR/Bannerlord.GABS 的 `core/skip_video` | 是 |
+| `bl_cheat_mode` | **开关作弊模式**（v0.8.20，带回读）：写 `NativeConfig.CheatMode`（私有 setter → 后备字段两条路）。开了它，**引擎自由相机的 `Ctrl+↑/↓`/`Ctrl+中键` 倍率热键与观察者 HUD 的「摄像机移动速度」读数才可用**（这是「相机太慢」的另一条正解）。⚠️ 等于打开开发者通道（F2/F3/F4 杀敌杀友等一并生效），工具**不做任何自动开启**；只作用于本次进程 | 是 |
+| `bl_order` | **战斗中途改令**（v0.8.24；**v0.8.29 扩到阵列/射击纪律，v0.8.30 扩到指定点移动，v0.8.31 扩到指定目标**）：对**进行中**的战斗里某方编队改 `movement` / `position` / `target` / `arrangement` / `firing`（**至少给一个**；`side` = player/attacker/defender；`formation` = Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或 0~4，不传 = 该方所有有兵的编队；`movement` = charge/advance/fallback/stop/retreat；`position` = `"x,y"` 或 `"x,y,z"`（米，z 省略 = 0，引擎按地面/导航网格补 Z）；`target` = **敌方编队**名或下标 ⇒ `MovementOrderChargeToTarget`，敌方 = 与 `side` 相对的那一方；**`movement` / `position` / `target` 三者互斥**）；`arrangement` = line/shieldwall/circle/square/skein/column/loose/scatter；`firing` = fireAtWill/holdFire —— 引擎只有这两档）。与开战 DSL 走**同一条**下发路径，每条都回传 `orderBefore`/`orderAfter`（引擎 `MovementOrder.OrderEnum`）——**判据是当场回读**，不是"我们调了 API"。`position` 另回传 `moveTarget`（引擎按导航网格算出的落点，可能被夹到合法位置）+ `formationCenter`；`target` 另回传 `targetAfter`（回读到的目标编队）+ `targetDistance`（双方编队重心距离）——后两者是**行为**判据：隔几秒再调一次，重心应朝目标点挪 / 距离应缩小。⚠️ `emptyFormations` > 0（applied 里对应条目带 `emptyFormation:true`、`count:0`、`formationCenter:(invalid)`）= **令写进去了但那个编队一个人都没有**（编队按兵种自动分：弓手在 Ranged、近战步兵在 Infantry）⇒ 没人执行，先核对 `formation`。⚠️ 只在 mission 内有意义（mission 之外碰 `MovementOrder` 会抛 `TypeInitializationException` 并把该类型**永久**标记为不可用 ⇒ 没有战斗时直接拒 `no_mission`）。**关键**：会同步改掉组路径"待重申的值"（回传 `pendingSpecsUpdated`），否则开战 DSL 那 **0.5 秒一次的周期重申**会把你的令改回去（真机踩过：12 秒后复读 `orderBefore` 又变回 `Charge`）；`position` / `target` 没有"名字"可重申，所以走**手动令优先**标记（重申时照原样重申同一个点/目标，用 `movement` 覆盖时该标记会被清掉；目标编队被打空后重申会**跳过**并记一条 order error，不偷偷退回冲锋）。`detachAI` 默认 true（连带 `SetControlledByAI(false,false)`）。未实现且**不静默忽略**：`riding`（上下马）、以及把 **agent/实体**当目标（本轮只做编队目标，理由：agent 会死、目标会失效，口径还没定）⇒ 传了就报 `unsupported_param` | 是 |
+| `bl_control_agent` | **接管某个友方士兵**（v0.8.26，**最小版**）：`mode` = take/release/status；目标用 `agentIndex` > `troop` > `formation`（不传 = 该方第一个存活者，**默认跳过当前 MainAgent**）。五步：老主角色交回 AI（否则同编队两个 `Player` 控制器会让编队逻辑栈溢出）→ `Mission.MainAgent = 目标` → 目标 `Controller = Player` + 清 `AIStateFlags` + 摘 `VictoryComponent` → 复位 `MissionScreen._isPlayerAgentAdded`（反射）→ **当场回读**。⚠️ **真机实测边界**：AI 对 AI（无真人）场次里主角色能换，但 `Controller` 回读仍是 `AI` ⇒ 工具如实报 `ok=false` / `controller_not_verified`，**不假装成功**；要真接管需**真人场次**。只允许玩家方（敌方 `not_player_team`）。未实现：`agentId`/`slot`/`mount`/`weapon`（传了报 `unsupported_param`） | 是 |
 | `bl_battle_status` | 推演状态机 + 双方存活数 + 战果 | 是 |
-| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头；**`rtsPreset` = 开战前套用 RTSCamera 预设**） | 是 |
+| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头（**本机装了 RTSCamera 时自动让位**，v0.8.16 起写明这条）；**`rtsPreset` = 开战前套用 RTSCamera 预设**） | 是 |
 | `bl_wait_for_state` | 等状态（idle/loading/running/ended/error） | 是 |
 | `bl_abort` | 中止当前推演 | 是 |
 | `bl_list_ui` | **列出游戏内可进入的入口** + **官方自定义战斗场景全表**（模式 / 地形 / 是否存在；可按 `scenesMode` 过滤） | 是 |
@@ -187,7 +193,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 | `bl_run_batch` | **按计划跑 N 场**（阶段 2④「一条命令跑 N 场」；支持换边双跑；`dryRun` 只回计划不碰游戏） | 是 |
 | `bl_batch_report` | **A/B 对比报告**（主指标 = 满编窗口；强制 95%CI；样本 < 3 局时拒绝下结论） | 否 |
 | `bl_lookup_troop` | 查兵种 id 是否存在（走 BannerlordSage 索引；第三方模组兵种不在索引里属正常） | 否 |
-| `bl_launch_game` | 无人值守启动游戏（BLSE + 自动应答模态弹窗；宿主会回收本会话进程树，见原型结论文档） | 否 |
+| `bl_launch_game` | 无人值守启动游戏（BLSE + 自动应答模态弹窗；宿主会回收本会话进程树，见原型结论文档）。`excludeModules` = 启动时**排除**某些模块（A/B 对照用：同一次启动只差一个模块；拼错即启动失败，不静默） | 否 |
 | `bl_desktop_windows` | 列窗口（结构化 JSON，**物理**坐标，已 DPI-aware） | 否 |
 | `bl_desktop_screenshot` | 截图（可叠带标签网格，按格定位） | 否 |
 | `bl_desktop_click` | 按格点击（`gridhand` 后端） | 否 |
@@ -443,8 +449,8 @@ manifest_missing         旧版部署，没有清单
 
 **已本地验证（无需游戏）**
 - Roslyn 编译通过：全部 `src\*.cs`（源文件数以 `out/BlBridge.manifest.json` 的 `sourceCount` 为准，DLL 体积以 `dllBytes` 为准 —— 不再手写数字避免漂移），已部署
-- **离线单测 69 项**（`tools/jsontest/build_and_run.ps1`）：JSON 读取器（含"字符串值劫持键查找"）、请求闸门、探针判定规则、构建身份、配置校验
-- **Python 自测 244 项断言**（`tools/bl_selftest.py`，2026-09-25 实测；`[OK]` 计数可复算）：分析器（血量偏差 0.0%）、MCP 协议（24 工具）、控制通道（含 `list_ui`/`open_ui`/`close_ui` 往返）、
+- **离线单测 121 项**（`tools/jsontest/build_and_run.ps1`）：JSON 读取器（含"字符串值劫持键查找"）、请求闸门、探针判定规则、构建身份、配置校验、编队 DSL、主菜单层面状态名、改令名字表/校验器
+- **Python 自测 287 项断言**（`tools/bl_selftest.py`，2026-09-26 实测；`[OK]` 计数可复算）：分析器（血量偏差 0.0%）、MCP 协议（32 工具）、控制通道（含 `list_ui`/`open_ui`/`close_ui` 往返、`bl_order` 往返、`bl_control_agent` 往返）、
   **构建链四段判定**、**配置加载即校验**、**崩溃判定**、真实 config.xml 回读与 dry-run
 - `bl_build_check` 在真实目录实跑：`builtVersion` 与 `deployedSha256` 与清单一致（游戏未启动时为 `game_offline`）
 

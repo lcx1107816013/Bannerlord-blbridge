@@ -152,9 +152,94 @@ def start_fake_game(logdir, token):
                               "spectate": bool((req.get("parameters") or {}).get("spectate"))}
                 elif method == "abort":
                     result = {"aborted": True, "state": "running"}
+                elif method == "control_agent":
+                    # v0.8.25：回显 mode + 一份假接管回读（断言"目标与 before/after 被带回"）
+                    op = req.get("parameters") or {}
+                    result = {"ok": True, "mode": op.get("mode", "take"), "how": "agentIndex=7",
+                              "target": {"index": 7, "troop": "imperial_legionary",
+                                         "formation": "Infantry", "controller": "Player",
+                                         "isHero": False, "isActive": True},
+                              "mainAgentBefore": {"index": 3, "controller": "Player"},
+                              "mainAgentAfter": {"index": 7, "controller": "Player"},
+                              "oldHandedToAI": True, "screenReset": True, "originalIndex": 3,
+                              "note": "fake"}
+                elif method == "order":
+                    # v0.8.23/0.8.28：回显改令参数 + 一条假回读（断言"参数确实被透传到端口"与"回读被带回"）
+                    op = req.get("parameters") or {}
+                    detach = op.get("detachAI", True)
+                    ap = {"formation": "Infantry", "index": 0, "count": 7,
+                          "orderBefore": "Charge", "orderAfter": "Stop",
+                          "aiDetachRequested": detach}
+                    if op.get("arrangement"):
+                        ap["arrangementBefore"] = "Line"
+                        ap["arrangementAfter"] = op["arrangement"].capitalize()
+                    if op.get("firing"):
+                        ap["firingBefore"] = "FireAtWill"
+                        ap["firingAfter"] = op["firing"].capitalize()
+                    pos = None
+                    pos_bad = False
+                    if op.get("position"):
+                        # v0.8.30：指定点移动 —— 回读 `orderAfter=Move` + 引擎算出的落点。
+                        # 假端也照 C# 的口径判一下语法（2~3 个分量、都是数字）；真机的唯一真相
+                        # 仍在 `OrderSpec.TryParsePosition`（离线单测锁它）。
+                        try:
+                            nums = [float(v) for v in str(op["position"]).split(",")]
+                            if len(nums) not in (2, 3):
+                                raise ValueError("分量数不是 2 或 3")
+                            while len(nums) < 3:
+                                nums.append(0.0)
+                            pos = {"x": nums[0], "y": nums[1], "z": nums[2]}
+                        except ValueError:
+                            pos_bad = True
+                    tgt = None
+                    tgt_bad = False
+                    if op.get("target"):
+                        # v0.8.31：指定目标 —— 回读 `orderAfter=ChargeToTarget` + 目标编队名 + 双方重心距离。
+                        # 假端按 C# 的口径认"编队名（大小写不敏感）或下标 0~4"，非法回 bad_target
+                        # （真机的唯一真相仍在 `OrderSpec.TryFormationIndex`，离线单测锁它）。
+                        _F = ["Infantry", "Ranged", "Cavalry", "HorseArcher", "Skirmisher"]
+                        t = str(op["target"]).strip()
+                        if t.isdigit() and 0 <= int(t) < len(_F):
+                            tgt = _F[int(t)]
+                        elif t.lower() in [f.lower() for f in _F]:
+                            tgt = [f for f in _F if f.lower() == t.lower()][0]
+                        else:
+                            tgt_bad = True
+                    if pos_bad:
+                        result = {"ok": False, "code": "bad_position",
+                                  "error": "position 需要写成 \"x,y\" 或 \"x,y,z\"（fake 端判的）"}
+                    elif tgt_bad:
+                        result = {"ok": False, "code": "bad_target",
+                                  "error": "target 只接受敌方编队名或下标 0~4（fake 端判的）"}
+                    else:
+                        if pos is not None:
+                            ap["orderAfter"] = "Move"
+                            ap["moveTarget"] = "(123.0,456.0)"
+                            ap["formationCenter"] = "(1.0,2.0)"
+                        if tgt is not None:
+                            ap["orderAfter"] = "ChargeToTarget"
+                            ap["targetAfter"] = tgt
+                            ap["formationCenter"] = "(1.0,2.0)"
+                            ap["targetDistance"] = "123.4 m"
+                        # v0.8.31：`formation=Skirmisher` 当"空编队"的代表（真机口径：count=0 ⇒
+                        # 令写进去了但没人执行）⇒ 断言这条信号能透传出去。
+                        empty = (op.get("formation") == "Skirmisher")
+                        if empty:
+                            ap["count"] = 0
+                            ap["emptyFormation"] = True
+                        result = {"ok": True, "side": op.get("side", "player"),
+                                  "movement": op.get("movement"), "detachAI": detach,
+                                  "position": pos, "target": tgt,
+                                  "targetSide": "defender" if tgt is not None else None,
+                                  "arrangement": op.get("arrangement"), "firing": op.get("firing"),
+                                  "appliedCount": 1, "totalUnits": 0 if empty else 7,
+                                  "emptyFormations": 1 if empty else 0, "applied": [ap],
+                                  "note": "fake"}
                 elif method == "list_ui":
                     # v0.8.14：入口清单 + 官方场景全表（这里只放三行代表三种模式）
-                    result = {"moduleLoaded": True, "activeState": "MainMenu",
+                    # 状态名用**真机实测值** `InitialState`（v0.8.22 更正：以前这里写的是虚构的 "MainMenu"，
+                    # 与真机不符 ⇒ 假端比真机"更好说话"，会掩盖 Python 侧的状态名假设）。
+                    result = {"moduleLoaded": True, "activeState": "InitialState",
                               "options": [{"id": "CustomBattle", "name": "自定义战斗", "orderIndex": 5000,
                                            "hidden": False, "disabled": False, "disabledReason": ""}],
                               "scenes": ["battle_terrain_a"],
@@ -697,6 +782,69 @@ def test_dummy_analyze_compare():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_menu_state_gate():
+    """⑬ 启动门 `bl_mcp._menu_state`：主菜单层面必须**同时**认 "" 与 "InitialState"。
+
+    存在理由（v0.8.22，真机依据 2026-09-25 23:00）：C# 的 `ScenarioRunner.ActiveStateName()` 改成
+    "静态 GameStateManager 优先"后，主菜单会**开始返回 `InitialState`**（真机实测值）。
+    若 Python 侧仍旧把"activeState 非空"一律当成"不在主菜单"，就会把**真主菜单判成未就绪**，
+    整个 enter-battle 流程反被打死 ⇒ 两处必须一起改，所以这里必须有对照断言（不许只靠真机临场发现）。
+    """
+    import bl_mcp
+
+    def ui(**kw):
+        base = {"moduleLoaded": True, "activeState": "", "topScreen": "GauntletInitialScreen",
+                "options": [{"id": "CustomBattle", "disabled": False}]}
+        base.update(kw)
+        return base
+
+    ready, why = bl_mcp._menu_state(ui())
+    check(ready, "activeState=''（取不到状态名）+ 真菜单屏 ⇒ 判主菜单就绪", why)
+
+    ready, why = bl_mcp._menu_state(ui(activeState="InitialState"))
+    check(ready, "activeState='InitialState'（真机实测的主菜单名）⇒ 仍判主菜单就绪", why)
+
+    for other in ("VideoPlaybackState", "CustomBattleState", "MapState", "CampaignState"):
+        ready, why = bl_mcp._menu_state(ui(activeState=other))
+        check(not ready and other in (why or ""),
+              "activeState=%s ⇒ 判未就绪，且把状态名写进原因" % other, why)
+
+    ready, why = bl_mcp._menu_state(ui(topScreen=""))
+    check(not ready and "topScreen" in (why or ""), "顶层还没有屏幕 ⇒ 判未就绪（启动初期硬门）", why)
+
+    ready, why = bl_mcp._menu_state(ui(topScreen="GameLoadingScreen"))
+    check(not ready and "Loading" in (why or ""), "topScreen 含 Loading ⇒ 判未就绪（GABS 的二次校验）", why)
+
+    ready, why = bl_mcp._menu_state(ui(moduleLoaded=False))
+    check(not ready, "moduleLoaded=false ⇒ 判未就绪", why)
+
+    ready, why = bl_mcp._menu_state(ui(options=[]))
+    check(not ready and "CustomBattle" in (why or ""), "没有 CustomBattle 入口 ⇒ 判未就绪", why)
+
+    ready, why = bl_mcp._menu_state(ui(options=[{"id": "CustomBattle", "disabled": True,
+                                                 "disabledReason": "加载中"}]))
+    check(not ready and "禁用" in (why or ""), "CustomBattle 入口被禁用 ⇒ 判未就绪", why)
+
+    # ── 跨语言同集合：C# 的唯一实现与 Python 镜像必须写同样的名字 ────────────────
+    # 「改一处忘另一处」在这件事上已经有真机代价（open_ui 被误拒），所以这条断言是必须的：
+    root = os.path.dirname(HERE)
+    check(bl_mcp._MAIN_MENU_ACTIVE_STATES == ("", "InitialState"),
+          "Python 侧集合 = ('', 'InitialState')", repr(bl_mcp._MAIN_MENU_ACTIVE_STATES))
+
+    cs = os.path.join(root, "src", "MainMenuStates.cs")
+    check(os.path.isfile(cs), "C# 的 MainMenuStates.cs 存在（跨语言对照物）", cs)
+    if os.path.isfile(cs):
+        src = io.open(cs, encoding="utf-8").read()
+        check('Name = "InitialState"' in src, "C# 侧常量写作 InitialState", "")
+        check("IsNullOrEmpty" in src, "C# 侧也接受空串（与 Python 的 '' 同集合）", "")
+
+    uientry = os.path.join(root, "src", "UiEntry.cs")
+    if os.path.isfile(uientry):
+        u = io.open(uientry, encoding="utf-8").read()
+        check("MainMenuStates.IsMenuLevel(stateBefore)" in u,
+              "open_ui 闸门走 MainMenuStates（不再自己写\"空串 = 主菜单\"）", "")
+
+
 def main():
     import bl_common
     bl_common.safe_streams()      # 输出统一 UTF-8（见其 docstring：消费端是 UTF-8 管道）
@@ -782,8 +930,10 @@ def main():
     check(init.get("protocolVersion") == "2024-11-05", "initialize 返回协议版本", init.get("protocolVersion"))
     tools = by_id.get(2, {}).get("result", {}).get("tools", [])
     names = sorted(t["name"] for t in tools)
-    check(len(tools) == 26, "tools/list 返回 26 个工具", names)
+    check(len(tools) == 32, "tools/list 返回 32 个工具", names)
     check("bl_lookup_troop" in names, "bl_lookup_troop 已注册", names)
+    check("bl_order" in names, "bl_order（战斗中途改令）已注册", names)
+    check("bl_control_agent" in names, "bl_control_agent（接管士兵）已注册", names)
     check("bl_launch_game" in names and "bl_desktop_click" in names,
           "桌面/游戏 GUI 工具已注册", names)
     check("bl_apply_config" in names and "bl_analyze" in names, "关键工具存在", names)
@@ -791,6 +941,21 @@ def main():
           "游戏内 UI 入口工具已注册（v0.8.12）", names)
     check("bl_rts_config" in names and "bl_apply_rts_config" in names,
           "RTSCamera 配置工具已注册（v0.8.15，B 方案）", names)
+    check("bl_ghost_camera" in names, "幽灵相机工具已注册（v0.8.16，C 方案）", names)
+    check("bl_camera_speed" in names, "相机速度工具已注册（v0.8.17）", names)
+    _cs = next((t for t in tools if t.get("name") == "bl_camera_speed"), None)
+    check(_cs is not None
+          and sorted((_cs.get("inputSchema") or {}).get("properties", {}).get("mode", {}).get("enum") or [])
+          == ["base", "boost", "probe", "rts", "shift", "status"],
+          "bl_camera_speed 的 mode 枚举齐全（status/shift/base/rts/boost/probe）",
+          (_cs or {}).get("inputSchema"))
+    check("bl_skip_video" in names and "bl_cheat_mode" in names,
+          "启动/流程控制工具已注册（v0.8.20：skip_video / cheat_mode）", names)
+    _cm = next((t for t in tools if t.get("name") == "bl_cheat_mode"), None)
+    check(_cm is not None
+          and sorted(((_cm.get("inputSchema") or {}).get("properties", {}).get("mode", {}) or {}).get("enum") or [])
+          == ["off", "on", "status", "toggle"],
+          "bl_cheat_mode 的 mode 枚举齐全（status/on/off/toggle）", (_cm or {}).get("inputSchema"))
 
     # ── v0.8.15：RTSCamera 配置读写（离线：全在临时文件上跑，绝不碰真配置）──
     import bl_rts
@@ -883,10 +1048,104 @@ def main():
     check(e3 is None and ((r3 or {}).get("result") or {}).get("accepted") is True,
           "start_battle 往返成功", e3)
 
+    # ── v0.8.23：战斗中途改令 `bl_order`（断言参数透传 + 回读带回 + 本地缺参就拒）──
+    ro1 = bl_mcp.call_tool("bl_order", {"movement": "stop", "side": "defender", "formation": "Infantry"})
+    ap1 = (ro1.get("applied") or [{}])[0]
+    check(ro1.get("ok") is True and ro1.get("movement") == "stop" and ro1.get("side") == "defender"
+          and ap1.get("orderBefore") == "Charge" and ap1.get("orderAfter") == "Stop",
+          "bl_order 往返成功，且带回 orderBefore/orderAfter（参数透传到端口）", ro1)
+
+    ro2 = bl_mcp.call_tool("bl_order", {"movement": "stop", "detachAI": False})
+    check(ro2.get("ok") is True and ro2.get("detachAI") is False
+          and (ro2.get("applied") or [{}])[0].get("aiDetachRequested") is False,
+          "bl_order 的 detachAI=false 能透传到端口（对照实验用）", ro2)
+
+    ro3 = bl_mcp.call_tool("bl_order", {})
+    check(ro3.get("ok") is False and "movement" in (ro3.get("error") or ""),
+          "bl_order 三者都不给时**本地**就拒（不发出请求）", ro3)
+
+    # ── v0.8.28：阵列 / 射击纪律（透传 + before/after 带回）──
+    ro4 = bl_mcp.call_tool("bl_order", {"movement": "stop", "arrangement": "shieldwall",
+                                        "firing": "holdFire"})
+    ap4 = (ro4.get("applied") or [{}])[0]
+    check(ro4.get("ok") is True and ro4.get("arrangement") == "shieldwall"
+          and ro4.get("firing") == "holdFire"
+          and ap4.get("arrangementAfter") == "Shieldwall" and ap4.get("firingAfter") == "Holdfire"
+          and ap4.get("arrangementBefore") == "Line" and ap4.get("firingBefore") == "FireAtWill",
+          "bl_order 的 arrangement/firing 透传，且带回 arrangement/firing 的 before→after", ro4)
+
+    ro5 = bl_mcp.call_tool("bl_order", {"arrangement": "shieldwall"})
+    check(ro5.get("ok") is True and ro5.get("movement") is None,
+          "只给 arrangement 也能发令（movement 不再是必填）", ro5)
+
+    # ── v0.8.30：指定点移动 `position`（透传 + 落点回读 + 与 movement 互斥）──
+    ro6 = bl_mcp.call_tool("bl_order", {"position": "100,200", "side": "defender",
+                                        "formation": "Infantry"})
+    ap6 = (ro6.get("applied") or [{}])[0]
+    check(ro6.get("ok") is True and (ro6.get("position") or {}).get("x") == 100
+          and (ro6.get("position") or {}).get("z") == 0
+          and ap6.get("orderAfter") == "Move" and ap6.get("moveTarget") == "(123.0,456.0)"
+          and ap6.get("formationCenter") == "(1.0,2.0)",
+          "bl_order 的 position 透传到端口，且带回 orderAfter=Move + moveTarget + formationCenter",
+          ro6)
+
+    ro7 = bl_mcp.call_tool("bl_order", {"movement": "stop", "position": "1,2"})
+    check(ro7.get("ok") is False and "互斥" in (ro7.get("error") or ""),
+          "movement 与 position 同时给 ⇒ **本地**就拒（互斥，一个编队只能有一个 movement order）", ro7)
+
+    ro8 = bl_mcp.call_tool("bl_order", {"position": "a,b"})
+    check(ro8.get("ok") is False and ro8.get("code") == "bad_position",
+          "position 语法非法时带回 bad_position（真机由 C# OrderSpec 判，Python 侧只透传）", ro8)
+
+    # ── v0.8.31：指定目标 `target`（透传 + 目标回读 + 从"未实现"里移出来）──
+    ro9 = bl_mcp.call_tool("bl_order", {"target": "Infantry", "side": "defender"})
+    ap9 = (ro9.get("applied") or [{}])[0]
+    check(ro9.get("ok") is True and ro9.get("target") == "Infantry"
+          and ro9.get("targetSide") == "defender"
+          and ap9.get("orderAfter") == "ChargeToTarget" and ap9.get("targetAfter") == "Infantry"
+          and ap9.get("targetDistance") == "123.4 m" and ap9.get("formationCenter") == "(1.0,2.0)",
+          "bl_order 的 target 透传到端口，且带回 orderAfter=ChargeToTarget + targetAfter "
+          "+ targetDistance + formationCenter", ro9)
+
+    ro10 = bl_mcp.call_tool("bl_order", {"movement": "stop", "target": "Infantry"})
+    check(ro10.get("ok") is False and "互斥" in (ro10.get("error") or ""),
+          "movement 与 target 同时给 ⇒ **本地**就拒（互斥）", ro10)
+
+    ro11 = bl_mcp.call_tool("bl_order", {"position": "1,2", "target": "Infantry"})
+    check(ro11.get("ok") is False and "互斥" in (ro11.get("error") or ""),
+          "position 与 target 同时给 ⇒ **本地**就拒（互斥；三者互斥要一次判全，别两两漏配）", ro11)
+
+    ro12 = bl_mcp.call_tool("bl_order", {"target": "bogus"})
+    check(ro12.get("ok") is False and ro12.get("code") == "bad_target",
+          "target 非法时带回 bad_target（真机由 C# OrderSpec 判，Python 侧只透传）", ro12)
+
+    ro13 = bl_mcp.call_tool("bl_order", {"movement": "stop", "formation": "Skirmisher"})
+    ap13 = (ro13.get("applied") or [{}])[0]
+    check(ro13.get("ok") is True and ro13.get("emptyFormations") == 1
+          and ap13.get("emptyFormation") is True and ap13.get("count") == 0,
+          "空编队信号（emptyFormations / emptyFormation）能透传：ok=true 但没人执行", ro13)
+
+    # ── v0.8.25：接管士兵 `bl_control_agent`（目标 / before-after 回读 / 降级字段要被带回）──
+    rc1 = bl_mcp.call_tool("bl_control_agent", {"agentIndex": 7})
+    check(rc1.get("ok") is True and (rc1.get("target") or {}).get("index") == 7
+          and (rc1.get("mainAgentAfter") or {}).get("index") == 7
+          and rc1.get("oldHandedToAI") is True and rc1.get("screenReset") is True,
+          "bl_control_agent take 往返成功（带回 target / mainAgentAfter / oldHandedToAI / screenReset）", rc1)
+
+    rc2 = bl_mcp.call_tool("bl_control_agent", {"mode": "release"})
+    check(rc2.get("ok") is True and rc2.get("mode") == "release" and rc2.get("how") == "agentIndex=7"
+          and rc2.get("originalIndex") == 3,
+          "bl_control_agent release 往返成功（参数透传到端口，v0.8.30 起 originalIndex 是结构化字段）",
+          rc2)
+
+    rc3 = bl_mcp.call_tool("bl_control_agent", {"mode": "nonsense"})
+    check(rc3.get("ok") is False and "mode" in (rc3.get("error") or ""),
+          "bl_control_agent mode 非法时**本地**就拒（不发出请求）", rc3)
+
     # ── v0.8.12 / v0.8.14：UI 入口三个方法的往返（含"带参数"与"不带参数"两种形态）──
     rui1, eui1 = bl_mcp.send_command("list_ui", {}, timeout=6)
     ui1 = (rui1 or {}).get("result") or {}
-    check(eui1 is None and ui1.get("activeState") == "MainMenu" and bool(ui1.get("options")),
+    check(eui1 is None and ui1.get("activeState") == "InitialState" and bool(ui1.get("options")),
           "list_ui 往返成功且带回入口清单", eui1 or ui1)
     st1 = ui1.get("sceneTable") or {}
     check(len(st1.get("rows") or []) == 3 and (st1.get("modes") or {}).get("naval") == 1,
@@ -1138,6 +1397,13 @@ def main():
     print("⑫ bl_dummy_analyze --compare：跨档对比（材质/护甲对照）")
     print("=" * 90)
     test_dummy_analyze_compare()
+
+    # ── ⑬ 启动门 `_menu_state`（主菜单层面："" 与 "InitialState" 都算）──────────────
+    print()
+    print("=" * 90)
+    print("⑬ 启动门 bl_mcp._menu_state（C# 静态优先后主菜单名 = InitialState）")
+    print("=" * 90)
+    test_menu_state_gate()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))

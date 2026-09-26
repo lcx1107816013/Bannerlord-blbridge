@@ -27,11 +27,39 @@ namespace BlBridge
         internal string Formation;
         internal string Movement;
 
-        private static readonly string[] Formations = new string[] {
+        /// <summary>
+        /// v0.8.30：**手动令优先**标记 —— 这个组所在的编队被"运行中改令"（`BattleOrders`）亲手改过
+        /// movement order，于是组路径每 0.5 s 的周期重申（`ScenarioProbe.ReapplySideOrders`）必须让它路。
+        ///
+        /// 存在理由（真机踩出来的，不是设计偏好）：重申只认**名字**（`s.Movement`），而
+        /// 指定点移动 / 指定目标编队**没有名字可重申** ⇒ 不给它让路，半秒内就会被我们自己重申回
+        /// `charge`（真机表现：`Formation` 上当场看是 `Move`，12 秒后 `orderBefore` 又变回 `Stop`）。
+        ///
+        /// 三态（而不是两个 bool）：一个编队只能有**一个** movement order，
+        /// 用两个独立 bool 就可能同时为真（自相矛盾的状态），所以做成单值枚举式常量。
+        /// `movement` 通道下发时置回 `ManualNone`（否则改回 movement 后旧目标点会被反复重申）。
+        ///
+        /// 为什么存数值而不存引擎对象（`WorldPosition` / `Formation`）：本类**只依赖 BCL**
+        /// （要进离线单测），且重申发生在下一帧，届时引擎句柄可能已失效，存数值/下标最稳。
+        /// </summary>
+        internal const int ManualNone = 0;          // 按 Movement 名字重申（默认，开战 DSL 那条路）
+        internal const int ManualPosition = 1;      // 重申"指定点"（MoveToPosition）
+        internal const int ManualChargeTarget = 2;  // 重申"冲锋到某个敌方编队"（ChargeToTarget）
+
+        internal int ManualKind = ManualNone;
+        internal float MoveX;
+        internal float MoveY;
+        internal float MoveZ;
+        /// <summary>`ManualChargeTarget` 用：目标**敌方**编队的下标（0~4）。</summary>
+        internal int TargetFormationIndex = -1;
+
+        // internal（而非 private）：`tools/jsontest` 的 GuardTest 要用它锁住"运行时改令（OrderSpec）
+        // 与开战 DSL 认同一套拼写"——两份名字表漂移会让"开战能写、中途改不了"这种 bug 很难查。
+        internal static readonly string[] Formations = new string[] {
             "Infantry", "Ranged", "Cavalry", "HorseArcher", "Skirmisher",
             "HeavyInfantry", "LightCavalry", "HeavyCavalry", "General", "Bodyguard"
         };
-        private static readonly string[] Movements = new string[] {
+        internal static readonly string[] Movements = new string[] {
             "charge", "advance", "fallback", "stop", "retreat"
         };
         // 已移除的 movement 及其替代（补位提示，GC3）：只放这一条，别顺手加别的。

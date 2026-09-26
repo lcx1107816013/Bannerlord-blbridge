@@ -2333,6 +2333,17 @@ LockToTeamMembers=5, LockToTeamMembersView=6, LockToPosition=7`；官方先例 `
 
 **为什么不做"把 RTSCamera 抄进我们 mod"（用户后来提的方案）**：
 - 分发包里**没有许可文件**（只有 CHANGELOG/README，且 README 只讲功能）⇒ 默认按"保留所有权利"处理，抄 DLL/反编译代码进我们要发布的包 = 侵权风险；功能可以自研（clean-room），代码不能抄。
+  > ⚠️ **更正（2026-09-25，用户给出 GitHub 链接后实查；措辞就地保留，不删历史）**：本条**结论作废**，只有"分发包里没有 LICENSE 文件"这个**事实**成立。
+  > - 依据**就在我们自己的安装包**里：`Modules\RTSCamera\README.html:1368`（中文版 `README.zh-CN.html:1366`）写着
+  >   `You can get source code at github.com/lzh-mb-mod/RTSCamera` ⇒ README **不只是讲功能**。
+  > - 上游仓实查（GitHub API）：`lzh-mb-mod/RTSCamera` = **MIT**，`Copyright (c) 2020 Li Zhenhuan`，C#，默认分支 `master`，最后推送 2026-09-15；
+  >   `source/` 内含 `RTSCamera.sln` + `RTSCamera` + **`RTSCamera.CommandSystem`** + `RTSCameraAgentComponent` + `library`；
+  >   同组织 `MissionLibrary` / `BattleMiniMap` / `CinematicCamera` / `EnhancedBattleTest` / `ImprovedCombatAI` **均为 MIT**。
+  > - ⇒ 正确定性：**RTSCamera 系可合法阅读 / 修改 / 分发（MIT），条件是保留版权与许可声明**；
+  >   "抄不得"只剩**合规手续**（附 LICENSE、保留版权行），不再是障碍。
+  > - **只改法律面，不改工程量面**：下面那条"体量"依旧成立，"用户要的效果只需改配置"（B 方案）也依旧是最省事的路径。
+  > - **可复现入口**：`curl -s https://api.github.com/repos/lzh-mb-mod/RTSCamera | findstr license` 与
+  >   `findstr /i "source code" "…\Modules\RTSCamera\README.html"`（本机两处路径已在上面写明）。
 - 体量：`RTSCamera.dll` 267 KB IL + 自带 `MissionLibrary.dll`(20 KB) + `RTSCameraAgentComponent.dll`(8 KB) + GUI prefabs + 60~70 个配置项 + 自己的 MCM 页面 + 战帆船只接管 ⇒ 全抄等于重写一个中型 View/输入 mod，维护从此归我们。
 - 而用户要的效果（攻城也能有抬升视角）**只需要改它的配置**。
 
@@ -2355,7 +2366,8 @@ RTSCamera **只在启动时读一次配置，退出时会用内存值把文件�
 ⇒ B 的正确姿势是"**每场开战前写**"（`--rts-preset` 正是如此），不是"改一次永久"；要永久必须在游戏内 MCM 改。
 另：`ElevatedCameraTriggerMode=Always` 属于**未证实的枚举值**（DLL 里存在 `Always` 串，但没有证据表明本键接受），已撤回为 `WhenOpeningOrderUI`。
 
-**仍待办**：① 需要一次游戏会话做"视角"验收（配置层已验证，视觉待看）；② 本地已编译的"C# 兜底降级"改动需要部署 + 重启才生效；③ README 的工具表要补两行。
+**已办（2026-09-25 真机，v0.8.16）**：① 视角验收完成 —— 见 §二十八；② "C# 兜底降级"已部署（`0.8.16` / 进程内 `loadedSha256=3042dec51a4ed7ac`）并真机读到让位日志；③ README 工具表已补（含 `bl_ghost_camera`）。
+**仍待办**：关掉游戏后跑一次 `build.ps1 -Deploy`，把最新 `tools\*.py` 同步进发货副本 —— 本次部署时游戏正在跑、DLL 被占用，之后又改了 `bl_mcp.py` / `bl_cmd.py` / `bl_launch.ps1`，所以 `Modules\BlBridge\mcp\` 里那两份落后于仓库（**MCP 实际加载的是仓库 `tools\bl_mcp.py`，见 §二十八第 4 条**，故不影响本机使用）。
 
 ### 3. ⚠️ 口径差异（重要，别当 bug 修）
 
@@ -2364,4 +2376,557 @@ RTSCamera **只在启动时读一次配置，退出时会用内存值把文件�
 唯一 id 只有 312），叠加 NavalDLC 与它的 9 条跨文件重名 ⇒ 引擎那份列表里会出现**重复行**。
 我们按 id 合并（后者覆盖），列表更干净、按 id 选场景无歧义 —— **有意的差异**，不是解析错误。
 若哪天要与官方界面做逐行对照，先记得这 14 条的差。
+
+---
+
+## [2026-09-25] §二十八 相机三案收口：A/B/C 全部真机验完（v0.8.16）
+
+用户裁定"**两个一起做**"（视角验收 + C 方案），并要求"**下次我开启先把 RTSCamera 关了**"。本轮把三件事一次验完。
+
+### 1. 三案的最终结论（每条都有真机出处）
+
+| 案 | 形态 | 真机结论 |
+|---|---|---|
+| **A** | 什么都不做（用户按 X 用 RTSCamera） | 可用，但"要人按键"；AI 场次无效 |
+| **B** | 我们当 RTSCamera 的**参数管理员**（`bl_apply_rts_config`） | 上一轮已验证写入/回读；本轮复跑 `god-full` 成功（自动备份 `RTSCameraConfig.xml.bak_20260925_211148`） |
+| **C** | 我们直接用**引擎自带**的幽灵/自由相机（`MissionScreen.IsCheatGhostMode`） | **本轮落地并真机通过**（见第 3 条） |
+
+**并查清了一件一直含糊的事**：`FlyCameraMissionView`（上一轮插桩里"抢在我们前面"的那个）**不在官方源码索引里** —— 搜 `GetMissionCameraLockMode` 全树只有 5 处（官方 `TournamentBehavior`、多人模式 2 处、接口自身、消费方 `MissionScreen`）⇒ 它属于 **RTSCamera**。于是：
+- 装了 RTSCamera：它的 `ICameraModeLogic` 排在我们前面（`[47:..., 88:我们]`，已有真机日志）⇒ 抢不过；
+- **不装 RTSCamera：我们就是唯一实现者** ⇒ 我们的 `Free` 生效。
+
+### 2. 我们自己的相机（RTSCamera 关掉后）到底怎么样 —— 真机
+
+启动方式（新增能力，见第 5 条）：`bl_launch.ps1 -ExcludeModules "RTSCamera,RTSCamera.CommandSystem"` ⇒ `kept 41 of 43`。
+
+证据链（`ui.log` + `siege_debug.log`）：
+```
+13:22:07  calling OpenSiegeMissionWithDeployment playerChar=commander_1 isPlayerAttacker=True atk=41 def=30
+13:22:08  spectate: SpectatorWatchBehavior 已挂载（兜底：本机未装 RTSCamera）   ← 这次真挂上了
+13:22:09  flags@tick IsSiegeBattle=True TeamAIType=Siege attackerTeamAI=TeamAISiegeAttacker
+13:22:09  FinishDeployment OK
+```
+画面（`ui\ui_20260925_212239.png`）：**攻城场景的抬高俯瞰全景** —— 城墙、城门、攻方营地、成排小兵；左下角是**引擎自带的观察相机 HUD**：
+```
+当前正在冲锋 · 命令距今 3.3 秒
+摄像机移动速度: 37.17 米/秒   ← 相机可驱动
+现在摄像机: 302
+上一个角色 / 下一个角色
+```
+⇒ **结论：我们的兜底相机在"没装 RTSCamera"的机器上确实可用**（不是纯粹的重复建设）。上一轮"重复建设"的判断只在**本机装了 RTSCamera** 的前提下成立 —— §二十七 2b 那条设计结论据此**收窄为条件成立**（措辞已在上文就地保留，不删历史）。
+
+### 3. C 方案（幽灵相机）真机通过
+
+`src/GhostCamera.cs` + `CommandPump` 的 `ghost_camera` + CLI `ghost` + MCP `bl_ghost_camera`（第 27 个工具）。
+
+引擎依据（反编译源码，行号来自检索返回）：`MissionScreen.cs:224` `IsCheatGhostMode { get; set; }` 公开可写；`:3809-3811` 打开它即 `val5 = Free`；**`:3840` 幽灵模式下命令 UI 开着也保持自由**；`:3298` 相机输入由引擎自己处理；`:833` 官方自己就这么开。
+
+真机（同一场围城内，**无需重启**）：
+```
+13:22:52.993 | ghost_camera: IsCheatGhostMode -> true（回读=true）
+13:22:53.498 | ghost_camera: IsCheatGhostMode -> false（回读=false）
+```
+接口回读：`ghost status` = `inMission=true, ghostCamera=true`；`ghost off` 后回读 false。
+
+**诚实边界（写清，免得被当成"全功能"）**：
+1. 要能**自己用 WASD 飞**还需 `Game.Current.CheatMode`（`:2868` 把输入门控在它下面），它只读、最终来自 `engine_config.txt` 的 `cheat_mode`（默认 0）—— **我们不去改全局作弊开关**；
+2. 它是**开发者通道**，行为未经 RTSCamera 那样的大量玩家验证；装了 RTSCamera 的机器优先用 B；
+3. 不在 mission 里调用会明确返回 `not_in_mission`，**不静默假装成功**。
+
+### 4. 通道复核（顺手验掉的两个疑点）
+
+- **面板删干净后通道没坏**：`open_ui CustomBattle` → `requested=true` →（稍后）`activeState=CustomBattleState` → 开战守卫放行（`state=loading` accepted）。
+- **`activeState` 出现过一次空串**：`open_ui` 触发后 ~7 s 内两次 `list_ui` 都读到 `""`，而同一场稍后（以及战斗结束后）都稳定读到 `CustomBattleState` ⇒ 那是"状态尚未落地"的**瞬时读数**（正落在 `InTransitionWindow` 想覆盖的时段），**不是回归**。若要更严，可把窗口内的 `activeState` 标成 `unknown(pending)` 而不是空串（本轮未改）。
+- **MCP 加载路径（重要，省得以后白部署）**：`~\.codebuddy\mcp.json` 里 `blbridge` 指向 **仓库** `tools\bl_mcp.py`，**不是** `Modules\BlBridge\mcp\` ⇒ 改工具脚本后**只要重启 MCP**，无需部署；`Modules\BlBridge\mcp\` 那份是**发货副本**（由 `build.ps1 -Deploy` 从 `tools\*.py` 复制）。
+
+### 5. 新增能力：无人值守 A/B 启动（`-ExcludeModules`）
+
+`tools\bl_launch.ps1` 加 `[string[]]$ExcludeModules`（MCP `bl_launch_game` 暴露为 `excludeModules`）。存在理由：A/B 对照要"同一次启动、只差一个模块"，而"去启动器里取消勾选"既不可复现、无人值守时也点不到。
+
+两条纪律（都来自本项目的老教训）：
+- **拼错即中止**：名字不在模块表里 → `EXCLUDE FAILED: ...` + 列出已知模块 + `exit 1`（否则就是"静默 no-op"）；
+- **兼容两种传参**：`-ExcludeModules A,B` 与 `-ExcludeModules "A,B"` 都接受。真机第一次就踩到 —— PS 把带引号的 `"A,B"` 绑成**一个** `[string[]]` 元素，被防呆逻辑当场拦下（**拦对了**，这是防呆的第一次实战）。
+
+### 6. 本轮交付清单
+
+| 面 | 内容 |
+|---|---|
+| C# | `src/GhostCamera.cs`（新）、`CommandPump.cs`（+`ghost_camera`）、`BridgeConfig.Version = 0.8.16` |
+| CLI | `bl_cmd.py ghost status\|on\|off\|toggle` |
+| MCP | `bl_ghost_camera`（第 27 个工具）、`bl_launch_game` 的 `excludeModules` |
+| 脚本 | `bl_launch.ps1` 的 `-ExcludeModules` |
+| 自测 | 257 条断言全过（工具数断言 26 → 27） |
+| 部署 | `build.ps1 -Deploy` → `0.8.16`；`module\SubModule.xml -> v0.8.16`；进程内 `loadedSha256=3042dec51a4ed7ac` |
+| 文档 | 本节 + README 工具表（27 个）+ §二十七 2c 待办收口 |
+
+### 7. 仍未做（诚实留档）
+
+- **发货副本落后**：`Modules\BlBridge\mcp\` 里的 `bl_mcp.py` / `bl_cmd.py` 是在部署**之后**才改的 ⇒ 关掉游戏后跑一次 `build.ps1 -Deploy` 即可（不影响本机 MCP）。
+- **玩家自用的"免按键"上帝视角**：`bl_ghost_camera` 目前只有端口通道。用户自己手打时若没装 RTSCamera，得先跟 AI 说一声才能切；要真正"自己按键切"需给 `ghost_camera` 加一个热键绑定（未做）。
+- **`MissionScreen` 的观察者相机 HUD**（"上一个角色/下一个角色"）来自引擎自带观察镜头，我们没接管任何 UI。
+
+---
+
+## [2026-09-25] §二十九 相机速度通道（v0.8.17）+ §二十七 2c 许可证更正 + 上游源码
+
+### 1. 起因（用户三句话）
+
+1. "上帝视角和俯视角怎么能进行命令和操纵" ⇒ 取证结论见第 2 条（**不是"能不能加功能"的问题，是"通道归谁"的问题**）；
+2. "原版相机移动速度太慢了" ⇒ 本轮做掉，见第 3 条；
+3. 给出 GitHub 链接 `github.com/lzh-mb-mod/RTSCamera`（并说明"这是最新的"）⇒ 连带把 §二十七 2c 那条**错误结论**更正掉，见第 5 条。
+
+### 2. "上帝视角/俯视角下怎么下令与操纵"（取证结论，本轮不改代码）
+
+| 问题 | 结论 | 依据 |
+|---|---|---|
+| 上帝视角下能下令吗 | **能，但那条通道是 RTSCamera 的**：按 X 进上帝视角 → 命令面板保持打开（`KeepOrderUIOpenInFreeCamera=true`）→ 鼠标点/拖下令 | 上游真源码；§二十八 第 1 条 |
+| 那我们自己的幽灵相机呢 | 只切镜头（`MissionScreen.IsCheatGhostMode`）；**命令面板是另一套系统，我们一行都没碰**。`Mission.IsOrderMenuOpen` 是 public 字段（`Mission.cs:980`），但整个反编译索引树里**找不到它的写入点** ⇒ 开关它的代码在**未索引的 GauntletUI 程序集**里，"程序化开面板"必须先反编译取证 | 索引检索 |
+| 俯视角（抬升相机）呢 | 它就是"跟随角色那台相机 + 本地偏移"，命令面板本来就能用；攻城默认不抬升（`ElevatedHeightInSiege=0`），用 `--rts-preset siege-god` 改 | §二十七 2b/2c |
+| "操纵"（接管士兵） | 原版**只在主角已阵亡**时才允许接管友军，且禁英雄 / 禁残血(<25%) / 禁正在用器械（`Mission.CanTakeControlOfAgent`，`Mission.cs:6332`）；`TakeControlOfAgent` 只做"关快进 + `Controller = Player`"，**不换 `Mission.MainAgent`**。随时接管只有两条：RTSCamera 的 `ControlTroop`，或 cheat 键 `Ctrl+Alt+小键盘5`（`CheatsHotKeyCategory.cs:65`）。**装了 RTSCamera 会把 `CanTakeControlOfAgent` 恒置 false**，原版那条路被它永久关掉 | 反编译索引 |
+| 我们要补什么 | 运行时下令：`Formation.SetMovementOrder`（我们已在用，`ScenarioRunner.cs:1425/1457/1600`）；接管：`Mission.MainAgent`(有 setter) + `Controller` + 关掉 `MissionMainAgentController`。**都还没做**，属候选 | — |
+
+### 3. 相机速度：为什么慢，以及三条腿（本轮落地）
+
+引擎自由相机的速度是**两个常量相乘**，本来就不是"配置项"：
+
+| 量 | 默认 | 事实 |
+|---|---|---|
+| `_cameraSpeedMultiplier` | 1 | 基础速度 = `10f * 它 * (…)`（`MissionScreen.cs:1741`）；改它的热键（Ctrl+↑ ×1.5 / Ctrl+↓ ×2÷3 / Ctrl+中键重置 / Ctrl+滚轮）**被 `Game.Current.CheatMode` 门控**（`:1714`） |
+| `_shiftSpeedMultiplier` | **3** | `:1749` `num6 *= (float)_shiftSpeedMultiplier` —— 这一句**不在**作弊门控里 ⇒ **不需要作弊模式** |
+| `_cameraSpeed` 分量值域 | ±20 | `:1710-1712` 硬 clamp ⇒ 倍率加到某个量之后**实际位移可能不再变快**（**未取证**，见第 6 条） |
+
+落地形态（`src/CameraSpeed.cs` + `CommandPump` 的 `camera_speed` + MCP `bl_camera_speed` + CLI `camera-speed`）：
+
+| 腿 | 手段 | 需作弊模式 | 备注 |
+|---|---|---|---|
+| `shift` | 官方控制台函数 `mission.set_shift_camera_speed`（`MissionScreen.cs:797`），经 `CommandLineFunctionality.CallFunction`（`TaleWorlds.Library`，**public static**） | 否 | 零反射零 Harmony；**必须先自己调 `CollectCommandLineFunctions()` 填表**，否则 `found=false` |
+| `base` | 反射写 `MissionScreen._cameraSpeedMultiplier` | 否 | ⚠️ 受上面那条 ±20 clamp 影响 |
+| `rts` | 反射 `ACameraControllerManager.Get().Instance.MovementSpeedFactor`（RTSCamera 的 `ICameraController`） | 否 | **最有效**：它的 clamp 随 `cameraBasicSpeed` 一起缩放（上游真源码 `FlyCameraMissionView.cs:506/577-580`），没有固定天花板 |
+
+三条腿统一"**写完回读**"，失败**点名是哪条腿**（`not_in_mission` / `leg_unavailable` / `bad_value`），不静默。
+
+### 4. 离线验证（全部实跑，可复现）
+
+| 项 | 结果 |
+|---|---|
+| `python tools\check_repo_encoding.py` | **合规**（76 个跟踪文本文件，UTF-8 无 BOM + LF） |
+| `python tools\bl_selftest.py` | **全部通过**（工具数断言 27 → **28**；新增两条：`bl_camera_speed` 已注册、`mode` 枚举齐全） |
+| `python tools\bl_metrics_selftest.py` | 全部通过 |
+| `powershell -File tools\jsontest\build_and_run.ps1` | 全部通过 |
+| `python tools\bl_check_clock_reset.py` | **FAIL 11 份 —— 这是预期的对照组那一侧**（全量跑时历史已知失败样本必须仍报 FAIL）。本轮没跑战斗，没有新产物，故无法给 `--since` 那一侧 |
+| `build.ps1 -Deploy` | `0.8.17`；`module/SubModule.xml -> v0.8.17`；`module/mcp/manifest.json -> 0.8.17`；`mcp/` 26 个文件已同步；`dll sha256 = 13A8940CAD274368…` |
+
+### 5. §二十七 2c 的许可证更正 + 上游源码（含可复现入口）
+
+- 更正**就地写在 §二十七 2c**（保留原文、不删历史）。核心：**RTSCamera 系是 MIT**；
+  依据是**本机安装包自己的 README**（`Modules\RTSCamera\README.html:1368` / `README.zh-CN.html:1366` → `github.com/lzh-mb-mod/RTSCamera`）。
+- 上游仓实查：`lzh-mb-mod/RTSCamera` = **MIT**（`Copyright (c) 2020 Li Zhenhuan`）；
+  `source/` 含 `RTSCamera` + **`RTSCamera.CommandSystem`** + `RTSCameraAgentComponent` + `library`（子模块 = MissionLibrary）+ `RTSCamera.sln`。
+- **已 clone 一份只读源码**：`E:\Document\rts-camera-upstream`（HEAD `c292c0d8`，2026-09-15）。
+  版本核对（这是"它到底对应我们哪个版本"的硬判据）：
+  `source\RTSCamera\Modules\RTSCamera\SubModule.xml` = **`<Version value="v5.4.16"/>`** 且 `DependedModule Native v1.4.8`
+  ⇒ 与本机安装的 v5.4.16 **同一版本**。tag 列表里对应 1.4.8 的最新就是 `release-v5.4.16-for-bannerlord-v1.4.8`；
+  另存在 `release-v5.5.0-for-bannerlord-v1.5.1` —— 那是给游戏 **1.5.1** 的，与本机 1.4.8 无关。
+- ⇒ **收益**：以后读 RTSCamera 用**原始 C# 源码**（常量、枚举、注释俱全），不必再用 `E:\Document\rts-decomp\` 的 ILSpy 产物；
+  文档里凡"枚举含义靠推断"的地方（例：`ElevatedCameraTriggerMode` 的合法值）可以一次性坐实。
+
+### 6. 仍待办（诚实留档）
+
+1. ✅ **`bl_camera_speed` 的真机验证（必做）**：已于 2026-09-25 22:03–22:12 执行 —— **结果见第 7 条**（四条负对照 + 三条腿全部生效，写前读后一致）。
+2. ⏳ **"真的更快吗"这一步还没做**：需要一次**排除 RTSCamera** 的启动（+ `spectate`）才读得到引擎那个速度读数，
+   理由见第 7 条 C-1；本轮未做（要关游戏重开），**等用户裁定**。
+3. `ElevatedCameraTriggerMode=Always` 那个"未证实枚举值"：现在有上游真源码了，应当去 `RTSCameraConfig.cs` 把它读死（本轮未做）。
+4. 🆕 **修第 8 条那处失败文案**（一行改动），随下次部署一起走 + 真机复验。
+
+### 7. 真机验证结果（2026-09-25 22:03–22:12，v0.8.17）
+
+**启动与身份**：`bl_launch_game` 起游戏 → 进程 `Bannerlord.BLSE.Standalone` pid **60920**；
+`bl_status` 回读 `assemblyVersion=0.8.17.0`、`mvid=dffe8eadbca34c79aafb8b083912f32d`、`loadedSha256=13a8940cad274368`
+⇒ **跑的就是本轮部署的那份 DLL**（构建身份自证，不是"以为部署了"）。
+
+**A. 四条负对照（主菜单，无 mission）—— 全部按设计报错，不静默**
+
+| 调用 | 结果 | 这条在验什么 |
+|---|---|---|
+| `camera-speed`（status） | `ok:true, inMission:false`；三条腿都 `available:false` 且**各带自己的 why** | "失败要点名"这条纪律 |
+| `camera-speed shift 20` | `ok:false, code=not_in_mission`，error = 引擎原话 `No Mission Available` | 引用了引擎的原话，不是自己编的 |
+| `camera-speed shift 0` | `ok:false, code=bad_value`（"value 必须在 0.1 ~ 1000 之间，收到 0"） | 值校验**先于** mission 校验 |
+| `camera-speed rts 5` | `ok:false, code=leg_unavailable`，why = "相机控制器尚未注册：RTSCamera 只在 mission 内把自己登记进去" | 说明反射**找到了类型**、只是实例为空 —— 能区分"没装 RTSCamera"与"装了但不在战斗里" |
+
+**B. 战斗内（`battle_terrain_a`，40v40，`orders=charge`，22:07–22:10）—— 三条腿全部生效**
+
+| 步骤 | 回读结果 |
+|---|---|
+| 初值 `status` | `inMission:true`；**`engineShift=3` / `engineBase=1` / `rtsCamera=1`** —— 与源码/文档里的默认值**逐个吻合**（对推导的独立验证） |
+| `shift 20` | `readBack=20, changed=true` ⇒ 官方控制台函数路径（含先调 `CollectCommandLineFunctions()` 填表）真机可用 |
+| `base 5` | `readBack=5, changed=true` ⇒ 反射字段名 `MissionScreen._cameraSpeedMultiplier` 在本版本仍正确 |
+| `rts 5` | `readBack=5, changed=true` ⇒ `ACameraControllerManager.Get().Instance` 那条反射链通，且**AI 场次里 RTSCamera 也把自己登记了** |
+| 复核 `status` | `20 / 5 / 5` —— 写进去的值确实留在引擎对象上，不是"发完就没了" |
+| `ghost on`（顺手复验） | `ghostCamera:true` —— C 方案在 v0.8.17 里没被本次改动弄坏 |
+
+**C. 本轮顺手查清的两件事（都属于"原来会误判"的）**
+
+1. **引擎那个"摄像机移动速度"读数只在观察者相机下出现**：装了 RTSCamera 时，它的
+   `Patch_MissionGauntletSpectatorControl` 会在**自由视角下隐藏 spectator HUD** ⇒ 幽灵相机里**看不到**那个数字。
+   所以"倍率改了到底有没有更快"必须在**排除 RTSCamera 的启动**里读（`-ExcludeModules RTSCamera,RTSCamera.CommandSystem` + `spectate`），
+   环境与 §二十八 第 2 条同款。⇒ 这也是第 6 条待办 2 的成因。
+2. **我们自己的 runner 还跑不了真海战**：`Mission.IsNavalBattle => MissionTeamAIType == MissionTeamAITypeEnum.NavalBattle`（`Mission.cs:1379`），
+   而 `ScenarioRunner` 只设 `FieldBattle`（`:1344`）或 `Siege`（`:1817-1825`）⇒ 拿海战场景名开战，`IsNavalBattle` 恒 false，
+   等于"**在海上地图打野战**"。⇒ 本文档 §29 那份"海战里哪些功能被禁"的核对，**本轮无法用我们自己的 runner 复现**
+   （要复现得走官方界面的海战入口，或给 runner 加 `NavalBattle` 分支）。
+
+### 8. 真机暴露的一处文案缺陷（已定位，待随下次部署修）
+
+主菜单下 `camera-speed shift 20` 的失败原因写成了 `读回值无法解析：No Mission Available` ——
+真实语义是"**不在 mission 里**"，现有文案会让人以为是自己解析出了 bug。
+
+修法（一行）：`src/CameraSpeed.cs` 的 `CliReadShift`，在 `"读回值无法解析"` 之前先判
+`r.IndexOf("No Mission Available") >= 0` ⇒ 返回 `why = "当前不在 mission 里（引擎原话：No Mission Available）"`。
+
+本轮**没有动源码**：游戏还在跑、DLL 被占用无法部署，改了就变成"源码 ≠ 已部署产物"
+（`bl_build_check` 会如实报 `stale_source` —— 这条纪律比"改得早"重要）。
+
+### 9. v0.8.18：启动拆两步 + 测速探针 + 第一轮真机 A/B（2026-09-25 22:20–23:0x）
+
+**9.1 用户要求：启动拆两步**（原话："第一步启动 blse，第二步检测到游戏窗口打开开始屏幕快照…出现启动动画时虚拟按 esc…然后每 5s 判定一次是否进入到了自定义里"）
+已落地：`bl_mcp._enter_custom_battle()`（`bl_launch_game` 默认在启动后自动走它；也单独暴露为 `bl_cmd.py enter-battle`）。
+判据不猜：主菜单就绪 = 控制通道能应答 + `moduleLoaded=true` + `activeState==""` + `CustomBattle` 入口未禁用；随后 ESC 跳过场（**有上限 40 s，且只在未就绪时发**）→ `open_ui` → **每 5 秒**轮询 activeState。
+
+真机时间线（两次都一样，可复现）：
+```
+t=0.4s   主菜单就绪（连发 ESC 0 次）
+t=0.7s   open_ui(CustomBattle) → requested=True
+t=+29.0s activeState=''            ← 空串其实是"还在落地"，不是主菜单
+t=+34.3s activeState='CustomBattleState'   ← 34.7 s 才真进去
+```
+⇒ **这就是"从菜单开始很慢"的真身**：不是检索慢，是 `CustomBattleState` 本身要 ~30 s 才落地；旧流程在这 34 s 里必然吃 `wrong_state`（表现为"等上一次失败"）。
+
+**9.2 新增测速探针**（`camera_speed` 的 `mode=probe` / CLI `camera-speed probe [--end]`）
+两次调用夹住一段飞行，量 `MissionScreen.CombatCamera.Frame.origin` 的位移 ÷ 墙钟秒数。存在理由见 §7 的 C-1：引擎那个"摄像机移动速度"读数我们拿不到，只能自己量。
+
+**9.3 第一轮真机 A/B（人按住 W，A/B/A2 各 6 s）—— 结果：`rts` 这条腿**没有**可测效果**
+
+| 段 | 设置 | 位移 | 平均速度 |
+|---|---|---|---|
+| A | `rts=1` | 197.7 m / 6.30 s | **31.37 m/s** |
+| B | `rts=5` | 221.6 m / 6.04 s | **36.67 m/s** |
+| A2 | `rts=1`（对照） | 220.3 m / 6.32 s | **34.84 m/s** |
+
+- 设置值本身没问题：三段 `readBack` 都等于请求值（1/5/1）。
+- **但 5 倍系数只差出 ~5%**，而且 **A 与 A2 自己就差了 10%**（31.4 vs 34.8）⇒ 差异落在噪声里。
+- 三个数字都挤在 **31~37 m/s**，恰好贴近**引擎**那条"每轴 ±20 的 clamp"的对角上限（20√3 ≈ 34.6）——
+  这提示真正在驱动这台相机的可能仍是**引擎的自由相机分支**，而不是 RTSCamera 的 `UpdateFlyCamera`。
+  （**未坐实**，下一步的对照就是去测 `base` / `shift` 两条腿：若它们能动、`rts` 不能动，则该假设成立。）
+- 诚实结论：**"rts=5 更快"这件事本轮没有证据支持**；`MovementSpeedFactor` 的源码链路（`FlyCameraMissionView.cs:506`）读起来是对的，但真机看不到效果。
+
+**9.4 本轮顺带发现的两个真 bug**
+
+1. ✅ **已修** `bl_mcp._game_window_id()`：只认 `isGame`，而 gridhand 的 `windows list` **不返回该字段** ⇒ 恒返回 None（真机实测）。改为标题兜底识别。
+2. ⏳ **未修** `tools/bl_launch.ps1`：它把**游戏主窗口当成模态对话框**反复发回车，最后误报 `LAUNCH FAILED (no game window within timeout)` —— 而进程（pid 66752）与窗口都在，游戏已到主菜单。
+   证据：日志里连续 `dialog -> answering [Mount and Blade II Bannerlord - Singleplayer PID: 66752 …]`。
+   修法方向：对话框只认窗口类 `#32770`，别按标题当对话框。
+
+**9.5 工具能力边界（读 gridhand `--help` 得到，别再猜）**：`screenshot --window-id/--grid/--cell`、`windows list|raise`、`mouse click --cell`（**必须带 `--window-id`**）、`key type`、`key press <combo>`。
+**没有 hold/时长参数** ⇒ "按住 W"这类持续输入**只能由人来做**；连发 `key press` 代替长按会引入大间隔（每次 gridhand 调用 ~0.4 s），实测会被惯性衰减吃掉。
+
+### 10. v0.8.20：把 BUTR/Bannerlord.GABS 的四条做法抄进来（用户："全部执行开写吧"）
+
+来源：读 `BUTR/Bannerlord.GABS` 的 `Tools/CoreTools.cs` / `MainThreadDispatcher.cs` / `docs/gauntlet-ui.md` 与 `pardeike/GABS` 的 `docs/GABP_BRIDGE_DEVELOPMENT.md`。
+**它不是状态机库**（是 MCP 服务端 + 游戏侧 mod 工具集），且 `supported-game-versions.txt` 全文是 `v1.3.15 v1.3.13 v1.2.12` —— **不含 1.4.8** ⇒ **思路抄，包不装**。
+
+| # | 抄的是什么 | 落地 | 真机结果 |
+|---|---|---|---|
+| 1 | **`wait_for_state` 的"Loading 屏二次校验"** | `bl_mcp._menu_state()` 现在要求 `topScreen` **非空**且不含 `Loading` | ✅ 见下 10.1 |
+| 2 | **`core/skip_video`**（判 `VideoPlaybackState` → `OnVideoFinished()`，不模拟 ESC） | 新 `src/GameFlow.cs::HandleSkipVideo` + 命令泵 `skip_video` + MCP `bl_skip_video` + CLI `skip-video` | ✅ 已接进等主菜单的循环（优先于 ESC） |
+| 3 | **`core/set_cheat_mode`**（反射私有 setter/后备字段 + 回读） | 新 `src/GameFlow.cs::HandleCheatMode` + `cheat_mode` 通道 + MCP `bl_cheat_mode` + CLI `cheat` | ✅ 已实现（判据：回读不符就 `ok:false` 并点名） |
+| 4 | **`core/list_commands` 的"重复键"陷阱** | `CameraSpeed.EnsureCliCollected()` 先看 `AllFunctions` 里有没有数据，有就不再 `CollectCommandLineFunctions()` | ✅ 加固 |
+
+工具数 28 → **30**（`bl_skip_video` / `bl_cheat_mode`）；`0.8.20` 已部署（`dll sha256 = 9C7A1F36DB28AC1F…`）；编码体检 / `bl_selftest`（含两条新断言）/ `bl_metrics_selftest` / jsontest 全过；`bl_check_clock_reset` 全量仍报历史样本 FAIL（预期对照组）。
+
+**10.1 崩游戏那条路被证据钉死了**（v0.8.20 实测，游戏 pid 74456）：
+- 启动后 **t=2.1 s**：`moduleLoaded=True, activeState='', topScreen='', options=9` —— **`topScreen` 是空串**，而 options 已经有 9 项、activeState 也是空串。
+  ⇒ 旧的"就绪"判据（activeState 空 + 有 CustomBattle 入口）在这种时刻**会误判**，这正是 9.6 把游戏打崩的条件。
+- 真主菜单：`topScreen='GauntletInitialScreen'`（非空）。
+- ⇒ 新判据：**`topScreen` 非空 + 不含 `Loading`**（空串 = 屏幕栈还没压上来）。
+- 截图核对：`ui\enter_battle_confirm.png` 就是主菜单（War Sails v1.2.8 / Bannerlord v1.4.8.119303）。
+
+**10.2 安全门 + 全链路端到端（autoOpen 显式打开）**：
+```
+t=0.2s  list_ui: topScreen='GauntletInitialScreen' options=9
+t=0.2s  主菜单就绪
+t=0.5s  open_ui(CustomBattle) → requested=True
+t=+20.7s list_ui 失败×1：no_response: 等待游戏响应超时（15s）…（**这条失败现在被记账了，不再静默**）
+t=+30.7s activeState=''
+t=+36.0s activeState='CustomBattleState'   ⇒ ok:true / in_custom_battle
+```
+⇒ 默认（`autoOpen=false`）仍然停在 `await_confirm` + 截图；这次是为了验证链路显式传了 `autoOpen=true`。
+
+**10.3 仍待验证**：新判据的**负例**（启动初期 `topScreen==''` 时必须判"未就绪"）目前只用**观测**（t=2.1 s 的读数）证明过，还没在**一次全新启动**里跑完整条链（需要再起一次游戏，约 1 分钟）。
+另：`bl_cheat_mode` / `bl_skip_video` 只有"实现 + 离线自测"，**尚未真机各打一次**（按 AGENTS.md 第一节，新控制通道参数必须真机过一遍）。
+
+**10.4 真机验证结果（2026-09-25 22:55–22:58，两轮全新启动，游戏 pid 89100）**
+
+| 项 | 结果 |
+|---|---|
+| **新判据的负例** | ✅ **第一次真正跑在启动窗口里**：`t=1.1s list_ui: moduleLoaded=True activeState='' topScreen='' options=9` → **没判就绪、没 fire open_ui**；`t=5.9s` 屏幕栈压上来后才"主菜单就绪"。⇒ 9.6 那次崩游戏的条件**已被判据挡住**（ESC 兜底 1 次，skip_video 0 次） |
+| **`bl_cheat_mode`（正例）** | ✅ 主菜单：`nativeConfig=false, gameCurrent=null` → 游戏内 `cheat on`：**`nativeConfig=true, gameCurrent=true, changed=true`**，复核仍为 true ⇒ **`Game.Current.CheatMode` 确实跟着翻** ⇒ 引擎自由相机的 `Ctrl+↑/↓`、`Ctrl+中键` 倍率热键与观察者 HUD 的"摄像机移动速度"读数**已解锁** |
+| **`bl_skip_video`（负例）** | ✅ 启动初期：`ok:false, code=not_in_game, error="Game.Current == null（游戏还没进入状态机阶段）"`（点名清楚、不静默） |
+| **`bl_skip_video`（正例）** | ❌ **未证**：两轮启动都没抓到 `VideoPlaybackState` |
+| **新发现（待办 #1）** | 主菜单与启动初期 **`Game.Current` 是 null**，而本实现走 `Game.Current.GameStateManager.ActiveState` ⇒ 开场动画那一段**可能根本够不到**（BUTR 用的是**静态** `GameStateManager.Current.ActiveState`）。修法：先试静态 `GameStateManager.Current`，拿不到再退回 `Game.Current.GameStateManager` |
+
+**现场状态（留档，便于下次接手）**：游戏停在官方自定义战斗界面；**作弊模式已开**（进程内有效，重启回到 `engine_config.txt` 的设置）——要关：`bl_cheat_mode off` / `bl_cmd.py cheat off`。
+
+**10.5 v0.8.21：`skip_video` 改走静态 `GameStateManager.Current`（正例 ✅，真机 23:00）**
+
+- **修因**（10.4 的发现）：旧实现走 `Game.Current.GameStateManager.ActiveState`，而启动期/主菜单 **`Game.Current` 是 null** ⇒ 开场动画那一段**根本够不到**，功能在最需要它的时刻失效。
+- **新实现**：先试 `TaleWorlds.Core.GameStateManager.Current`（**public static**，`GameStateManager.cs:53`），拿不到再退回 `Game.Current.GameStateManager`；返回里加 `via` 说明是哪条路拿到的。版本 `0.8.21` 已部署（`dll sha256 = 54C9043863832849…`）。
+- **真机状态序列**（pid 91328，启动窗口内每 3 s 采样，`via` 全程 `GameStateManager.Current(static)`）：
+
+| t | skip_video | 活动状态 | topScreen |
+|---|---|---|---|
+| 4.0 s | `not_video` | `''` | `''` |
+| **7.9 s** | **`ok:true`** | **`VideoPlaybackState`** | `GauntletInitialScreen` |
+| 11.3 s → 53 s | `not_video` | **`InitialState`** | `GauntletInitialScreen` |
+
+⇒ ① **正例成立**：t=7.9 s 时活动状态确实是 `VideoPlaybackState`，`OnVideoFinished()` 调成功（开场动画被跳过）；② 静态那条路在 `Game.Current == null` 的时刻照样可用 —— 换路是必要的，不是风格问题。
+⇒ 顺带把"从菜单开始很慢"的时间账算清了：动画 ~8 s 结束 → `InitialState`（主菜单）持续 ~35 s → `open_ui` 之后 `CustomBattleState` 还要 30+ s。
+
+- ⚠️ **新发现（待办，刻意不夹带修）**：**主菜单的真实活动状态名是 `InitialState`**，而我们的 `ScenarioRunner.ActiveGameStateName()`（即 `list_ui.activeState`）在启动期与主菜单**一直返回空串** —— 因为它只看 `Game.Current.GameStateManager`，与 10.4 那处**同一个根因**。
+  **不能只改一处**：`bl_mcp._menu_state()` 现在把 `activeState != ""` 判为"不在主菜单"，一旦 `activeState` 开始返回 `InitialState`，这条判据会**把真主菜单判成未就绪**。
+  ⇒ 一次性方案：`ActiveGameStateName()` 改用静态 manager **且** `_menu_state()` 接受 `""` 或 `InitialState`（并继续优先信 `topScreen` 非空 + 无 `Loading`）。
+
+**10.6 v0.8.22：状态名"静态优先"的连带修改 —— 一共**三处**，其中一处是**真机抓出来的****
+
+- **C# 取值唯一化**：新增 `ScenarioRunner.ActiveStateManager()`（静态优先，已兜异常）⇒ `ActiveGameStateName()`、`skip_video`、`close_ui` 的 PopState 全走它。效果：`activeState` 在**主菜单报 `InitialState`**（以前是空串），启动期也**不再**是"空串"一种解释。
+- **新增 `src/MainMenuStates.cs`**（只依赖 BCL）：`IsMenuLevel(name)` = `""`（取不到名字）或 `InitialState`（主菜单本体）——「主菜单层面」的**唯一实现**，供 C# 判据与**离线单测**共用（碰 TaleWorlds 的 `ScenarioRunner` 编不进离线单测，才单开这个文件）。
+- **Python 镜像**：`bl_mcp._MAIN_MENU_ACTIVE_STATES = ("", "InitialState")` + `_menu_state()` 按这个集合判（不再"非空即不在主菜单"）。
+- ⚠️ **第三处（改之前我没想到，真机当场抓到）**：`UiEntry` 的 **open_ui 闸门**原先写的是 `stateBefore.Length != 0`（"空串 = 主菜单"）。静态优先一改，真主菜单变成 `InitialState` ⇒ **`open_ui` 一律被拒**：
+  `wrong_state_for_ui`，连 `Exit` 都点不出去（0.8.21 真机 23:07 实测，最后只能**强杀进程**才部署得下去）。修：改用 `MainMenuStates.IsMenuLevel(stateBefore)`；修后 `open_ui CustomBattle` → `requested=true`、`stateBefore=InitialState`。
+  > 教训：**status 名换了来源，凡是对它做等值/空串判断的地方都要重新过一遍** —— 判据散在多处就是这个代价。
+- **防再漂移的断言（两层）**：
+  - 离线 C# 单测（`tools/jsontest`，已把 `MainMenuStates.cs` 纳入编译）：正例 `""`/`null`/`InitialState`，反例 `VideoPlaybackState`/`CustomBattleState`/`MapState`/`CampaignState`/`MissionState`；
+  - `bl_selftest.py` ⑬：`_menu_state` 同套正/反例 **+ 跨语言同集合**（直接读 `src/MainMenuStates.cs` 断言常量写法、读 `src/UiEntry.cs` 断言闸门确实走 `MainMenuStates`）。
+- **真机（0.8.22，dll sha `10E0F8BD84F20E6F`，23:10~23:14）**：
+  启动序列 `''`/空屏 → **`VideoPlaybackState`**（skip_video 成功，`via=GameStateManager.Current(static)`）→ **`InitialState`**（门就绪，t≈15 s）→ `open_ui CustomBattle` `requested=true`（`stateBefore=InitialState`）→ **`CustomBattleState`/`CustomBattleScreen`**；`close_ui` + `open-ui Exit` 也恢复正常（0.8.21 时被自己的闸门拒）。
+- 顺带修掉一个**编码体检的盲区**：新建的 4 个 `.cs`（`CameraSpeed`/`GameFlow`/`GhostCamera`/`MainMenuStates`）写盘时是 **CRLF**，而 `check_repo_encoding.py` 只查 **git 跟踪**的文件 ⇒ 没报；`bl_cmd.py buildcheck` 的 **`stale_source`**（改动 4 个）抓到了，归一为 LF 后**必须重建+重部署**。
+  ⇒ 纪律补充：**新文件写盘后，要么 `git add` 进体检范围，要么单独验字节**（`$b=[IO.File]::ReadAllBytes(...); $b -contains 13`；注意 .NET 的相对路径按**进程启动目录**解析，要用绝对路径）。
+
+**10.7 v0.8.23/0.8.24：`order` —— 第一个"战斗中途改令"通道（真机 ✅，含一个被真机抓出的自家坑）**
+
+- 新增 `src/BattleOrders.cs`（协议层）+ `src/OrderSpec.cs`（**只依赖 BCL** 的名字表/校验器 ⇒ 可进离线单测）+ `CommandPump` 的 `order` 方法 + MCP 工具 `bl_order` + CLI `bl_cmd.py order`。
+- 两条硬约束写进代码注释：① **必须在 mission 内**（mission 之外碰 `MovementOrder` 会抛 `TypeInitializationException` 并把该类型**永久**标记为不可用 ⇒ 直接拒 `no_mission`，不做"先试试看"）；② **连带 `SetControlledByAI(false,false)`**（`detachAI`，默认 true）。
+- 判据：每条报 `orderBefore` / `orderAfter`（`MovementOrder.OrderEnum`）—— "生效没有"靠**当场回读**，不靠"我们调了 API"。未实现的参数（`arrangement`/`firing`/`target`/`position`）传了就报 `unsupported_param`（`Jmini` 是扁平读取器、枚举不了键，故"任意怪键"由 MCP 侧 `additionalProperties:false` 挡）。
+
+**⚠️ 真机抓出的自家坑（这轮最有价值的一条）**：`order` 设完 stop、回读 `Charge→Stop` ✅，可 **12 秒后复读 `orderBefore` 又是 `Charge`**。
+不是引擎战术，是**我们自己的 T13 周期重申**：组路径每 `OrderRefreshSeconds = 0.5s` 把各组 `spec.Movement` 重新下发（`ReapplyGroupOrders`，`ScenarioRunner.cs:1582` 起）。
+⇒ 修法（v0.8.24）：`order` 同时改掉"待重申的那个值"（新增 `ScenarioProbe.OverridePendingMovement`，改 `spec.Movement`），并回传 `pendingSpecsUpdated` 让调用方看得见（**0 = 该方没走组路径 / 该编队上没有组** ⇒ 可能被 team 战术改回，如实写在 `note` 里）。
+修后真机：t1 `Stop→Charge`（pend=1）→ 10~12 秒后复读 **`orderBefore = Charge`（留住了）**。
+
+- **真机证据**（0.8.24，dll sha `0BB301D4AF2C8938`；判据来自 `bl_order` 返回值与 `logs/battles/*.jsonl` 的 `end` 事件）：
+  - **行为证据（最关键）**：开战 DSL 双方都 `stop` ⇒ 基线 `aAlive=4 / dAlive=4` 且不掉人；中途把攻方改成 `charge` 后，本场以 **`reason = defenderWiped`（aAlive=4, dAlive=0, kills=4）** 结束 ⇒ **令真的改变了行为**，不只是改了回读字符串。
+  - 全体编队（不给 `formation`）：守方 `Infantry#0 Stop→Charge (units=12)`，pend=1。
+  - 目标编队上没有组（`Ranged`）：`Stop→Charge (units=0)`，**pend=0**，`note` 说明可能被 team 战术改回、隔几秒再读一次来判定。
+  - `detachAI=false` 对照：`Stop→Advance`，8 秒后复读 **before 仍是 `Advance`**（pend=1 的同步与 detachAI 无关）。
+  - 错误路径：mission 外 `no_mission`；`movement=jump` → `bad_movement`；`formation=Infantryy` → `bad_formation`；`arrangement=shieldwall` → `unsupported_param`；`side=nobody` → `bad_side`。
+- **顺带修掉"两个错误互相遮蔽"的次序问题**：原先 `formation` 的语法校验排在 mission 门之后 ⇒ 没战斗时 `formation=Infantryy` 被报成 `no_mission`。v0.8.24 把纯语法校验提到 mission 门之前（真机确认：mission 外也报 `bad_formation`）。
+- **断言**：`GuardTest` 覆盖 `OrderSpec`（名字表 / 下标 / 大小写 / 别名不收 / 越界 / 空串 + 与 `SquadSpec` **同集合**）；`bl_selftest` 覆盖 `bl_order` 往返（参数透传 + 回读带回 + 缺参在本地就拒）。离线单测 69 → **115** 项，Python 自测 257 → **281** 项断言，MCP 工具 30 → **31** 个。
+- **当前现场**：游戏在跑 0.8.24（`buildcheck` 四段一致）；无战斗进行中（smoke 那场已 abort）。
+
+**10.8 v0.8.25/0.8.26：`control_agent` —— 接管士兵（最小版）。能换主角色，但无真人场次里 `Controller` 回读仍是 AI（如实报 `controller_not_verified`，不假装成功）**
+
+- 新增 `src/ControlAgent.cs` + `CommandPump` 的 `control_agent` + MCP `bl_control_agent` + CLI `bl_cmd.py control-agent`。
+  做法出处：RTSCamera `ControlTroopLogic.SetToMainAgent` / `ForceControlAgent` + MissionLibrary `Utility.PlayerControlAgent` / `AIControlMainAgent`（MIT，只抄做法）。
+- **五步**（缺一步就出问题，逐条有出处）：
+  1) **老主角色交回 AI**：`Controller = AI` + `CommonAIComponent/HumanAIComponent.Initialize()` + `Formation.OnUnitAddedOrRemoved()`
+     （RTSCamera 注释写明：同一编队里两个 `Controller == Player` 的 agent 会让**编队逻辑栈溢出**）；
+  2) `Mission.MainAgent = 目标`；
+  3) 目标 `Controller = Player` + `AIStateFlags = None` + 解除 agent/坐骑速度上限 + 摘 `VictoryComponent`；
+  4) 复位 `MissionScreen._isPlayerAgentAdded`（反射，RTSCamera 同款做法；失败只降级 `screenReset=false`）；
+  5) **当场回读**（`MainAgent` + `Controller`）。
+- **选择器**：`agentIndex` > `troop` > `formation` > 该方第一个存活者；**默认与条件选择器都跳过当前 MainAgent**
+  （v0.8.26 真机教训：自定义战斗里玩家方的 MainAgent 一直都在，第一个存活者往往就是它 ⇒ 默认选择会**稳定**撞
+  `already_main_agent`，功能看上去像坏的）。只允许玩家方，敌方一律 `not_player_team`。
+- **真机结果（AI 对 AI 自定义战斗，无真人；0.8.26 dll sha `BBA830CE5D43A7A4`）**：
+  `Mission.MainAgent` 确实被换成目标（22 → 20 → 22，回读确认；游戏不崩、战斗继续 `12 v 12 running`），
+  但 `Controller` **当场回读仍是 `AI`** ⇒ `ok=false` / `code=controller_not_verified`（**不再假装成功**）。
+  引擎侧能对上的两处依据：
+    * `Agent.Controller` 的 setter 会顺带 `Mission.MainAgent = this`（`Agent.cs:1199` 起）；
+    * `MissionMainAgentController.Mission_OnMainAgentChanged` 在任何主角色变更时把 `_isPlayerAgentAdded` 置 **true**（`MissionMainAgentController.cs:229`）。
+  ⇒ **这个通道在没有真人玩家的场次里做不到"真正接管"**（引擎把玩家方主角色保持 AI 驱动，`MissionScreen` 也没有 re-add 玩家 agent）
+  ⇒ **要真接管必须在真人场次验证**（等用户自己开一场；这类"环境受限"的结论按纪律只能记成待验证，不能记成通过）。
+- **错误路径真机全覆盖**：`no_mission`（主菜单）/ `not_player_team`（敌方目标）/ `no_target`（不存在的 agentIndex）/ `already_main_agent` /
+  `no_original`（没 take 过就 release）/ `already_original` / `unsupported_param`（`mount` 等）/ `bad_mode`。
+- **断言**：`bl_selftest` 新增 `bl_control_agent` 往返（take/release 参数透传 + 回读字段带回 + mode 非法**本地**就拒）；
+  MCP 工具 31 → **32**；Python 断言 281 → **285**。
+- **顺带修掉一个"体检漏检"（一天内两次踩到）**：`check_repo_encoding.py` 原先只查 `git ls-files`，
+  于是**新建文件写盘时的 CRLF 直接漏过**（两次都是 `bl_cmd.py buildcheck` 的 `stale_source` 先抓到）。
+  现在把「**未跟踪但没被 ignore**」的文件也算进来（检查面 76 → **83** 个文件）—— 体检该比 buildcheck 早一步。
+
+**10.8.1 真人场次判定：✅ 接管成立（2026-09-25 23:55，用户自己开的战局）**
+
+- 现场：用户在打**自己的**战局（`missionMode=2` = Battle，约 400 v 400），先按 RTSCamera 的 **E** 接管了"步兵领袖位"的英雄（`commander_1`，index **999**，hero）。
+- **判据链（一次 take，全程只有这一次写操作）**：
+  1. `status` → **`mainAgentIsPlayerController=true`**、`mainAgent={999, 阿科耳, controller=Player}`、`candidates=362`
+     ⇒ 环境里**有真人在控制**（这一步同时否掉"`Controller` 读数是坏的 / 我们读错了"这个可能：同一读法在这里给的是 `Player`）；
+  2. `take`（默认选择器，跳过当前 MainAgent）→ **`ok=true` / `mainAgentChanged=true` / `controllerAfter=Player` /
+     `oldHandedToAI=true` / `screenReset=true`**，目标 `695 帝国资深步兵` 从 AI 变 Player；
+  3. **+8 秒复查**：`plc=true`、`mainIndex=695`、`controller=Player` ⇒ **留得住**
+     （对比 AI 场次里同一操作回读仍是 `AI`）；
+  4. 用 `take --agent-index 999` 换回英雄 → `ok=true`、`controllerAfter=Player`（用户回到自己的角色，屏幕上无缝）。
+- ⇒ **结论定稿**：AI 对 AI 场次里的 `controller_not_verified` **是环境导致**（该场没有真人 ⇒ 引擎不认 Player 控制器），
+  本通道在**真人场次里成立**。判据始终是**回读**，不是"我们调了 setter"。
+- ⚠️ 现场还证实了一个自家 bug（**已改、待部署**）：`release` 的"原始主角色"没按场次隔离
+  —— 旧实现里 `_originalMainAgentIndex` 会**保留上一场的 22**，`release` 会把主角色交给一个无关的人。
+  这一局因为用 `take --agent-index 999` 换回，**没有踩到**；但这也是"下标跨场重号"必须按场次隔离的直接证据。
+- **待办**：① 用户打完这一局后部署 **0.8.27**（含跨场隔离修复；当前 `buildcheck` 会显示 `stale_source`，是如实状态）；
+  ② 部署后用**真正的 `release`** 再验一次（这局用的是 take 换回）；③ 镜头跟随仍是"复位 `_isPlayerAgentAdded`"这一档
+  —— RTSCamera 那套平滑推镜（`Utility.BeforeSetMainAgent`/`SmoothMoveToAgent`）没做。
+
+**10.8.2 0.8.27 已部署 + 跨场隔离修复真机验证通过（2026-09-25 23:58 起，AI 场次即可验）**
+
+- 版本 **0.8.27**，dll sha `700830769C6C577E`；`buildcheck` 四段一致；离线全绿（编码 83 文件 / selftest 285 项 0 NG / metrics / jsontest）。
+- 判据链（一场全新 AI 战斗，12v12 双方 stop）：
+  1. `status` → **`originalIndex = -1`** ⇒ **不再残留上一场的 22**（bug 消失，这是本次修复的核心断言）；
+  2. 第一次 `take` → `originalIndex = **23**`（**本场**原始主角色）、`mainAgentChanged=true`；
+  3. 再 `take` 另一个目标 → `originalIndex` **仍是 23**（不被改写）、`mainAgentAfter=20`；
+  4. **真正的 `release`** → `restored = **23**`、`mainAgentAfter = 23` ⇒ **换回的是本场原始主角色，不是 22** ✓
+     （`ok=false / controller_not_verified` 依旧 —— AI 场次没有真人，引擎不认 Player 控制器，如实报）。
+- ⇒ "agent 下标跨场重号"这条坑闭环：**已修、已验**。真人场次下的 `release` 仍等用户下一局顺手验一次（预期同 ②③④ 的形态，只是 `ok=true`）。
+
+**10.8.3 真人场次完整验证：`take` + **真正的 `release`** 双双通过（2026-09-26 00:13:51–00:14:00）**
+
+- 手段：后台看守脚本（`live_release_test.log`），**只在 `plc==true`（引擎认为有玩家在控制）时才动手**，否则只读轮询。
+- 判据链：
+  - `00:13:21` `plc` 由 false → **true**：`mainAgent={999, 阿科耳, commander_1, hero, controller=Player}`、`candidates=400` ⇒ 环境确认；
+  - ① `take`：**`ok=true`**、`controllerAfter=Player`、`oldHandedToAI=true`、`originalIndex=**999**`；
+    `before=999(阿科耳)` → **`after=617(帝国资深步兵)`**，两者 controller 都是 `Player`；
+  - ② **+8 秒**：`plc=true`、`mainAgent` 仍是 617、`controller=Player` ⇒ **留得住**；
+  - ③ **`release`：`ok=true`、`mainAgentChanged=true`、`controllerAfter=Player`、
+    `restored={999, 阿科耳, commander_1, controller=Player}`** ⇒ **换回的是原来那个英雄**（不是别的 index）
+    —— 这正是 0.8.27"原始主角色按场次隔离"在真人场次的效果；
+  - ④ 收尾：`plc` 随用户切窗口在 true/false 之间摆动（**失焦即暂停 ⇒ 引擎改报 AI**），与"暂停假说"一致。
+- 附注：`00:18:43` 出现 `mainAgent=909 帝国重装骑兵 (Player)` —— 那是**用户自己按 E** 接管的（RTSCamera 的 ControlTroop），不是我们的脚本。
+- ⇒ `bl_control_agent`（最小版）**闭环完成**：take / 8 秒留存 / release 三项真人验证全过；`release` 的响应里没有 `originalIndex` 字段（脚本读成 None），
+  不是缺陷但值得下次顺手补上（便于与 `status` 对齐）。
+
+**10.10 v0.8.28/0.8.29：`order` 扩到**编队阵列**与**射击纪律**（并抓出一个"静默失效"的自家 bug）**
+
+- 引擎侧依据（读码确认，不是猜的）：
+  * `Formation.SetArrangementOrder(ArrangementOrder)`（`Formation.cs:730`）/ `Formation.SetFiringOrder(FiringOrder)`（`:784`）；
+  * 阵列共 **8** 档（`ArrangementOrder.cs` 的静态字段：Line / ShieldWall / Circle / Square / Skein / Column / Loose / Scatter）；
+  * 射击纪律**只有 2 档**（`FiringOrder.cs` 的 `RangedWeaponUsageOrderEnum`：FireAtWill / HoldYourFire）——旧版那个"近距离才开火"已不存在；
+  * 回读：`Formation.ArrangementOrder.OrderEnum` / `Formation.FiringOrder.OrderEnum`（两者都是 `public get; private set;`）。
+- 接口变化：`movement` **不再是必填**，但 `movement` / `arrangement` / `firing` **至少要给一个**（都不给 ⇒ `bad_request`）；
+  新增 `bad_arrangement` / `bad_firing`；`unsupported_param` 清单改为 `position` / `target` / `riding`。
+  校验依旧全部走**只依赖 BCL 的 `OrderSpec`**，在碰那三个 struct（`MovementOrder` / `ArrangementOrder` / `FiringOrder`，静态字段会在 mission 之外把类型永久弄坏）之前完成。
+- **⚠️ 抓到一个"静默失效"的 bug（靠回读才暴露）**：`MapFiring` 里写成 `firing == "holdFire"`，而入参在校验阶段已被 `ToLowerInvariant()`
+  ⇒ 永远不成立 ⇒ **`holdFire` 被静默当成 `fireAtWill`**。真机表现：`firingBefore/After` 都是 `FireAtWill`（看起来"命令发了"其实没生效）。
+  修法：改成 `string.Equals(..., StringComparison.OrdinalIgnoreCase)`。**这条正好证明"回读判据"的价值** —— 只看"我们调了 API"会把它算成成功。
+- **真机验证（0.8.29，AI 场次，12v12 双方 stop）**：
+  ① `arrangement=shieldwall + firing=holdFire`（不给 movement）：`arr: Line→ShieldWall`、`fire: FireAtWill→**HoldYourFire**`、`movement` 保持 Stop（没被碰）；
+  ② +8 秒再问：**`firingBefore = HoldYourFire`**（留得住，不在组路径重申范围）；
+  ③ 切回：`arr: ShieldWall→Line`、`fire: HoldYourFire→FireAtWill`；
+  ④ 错误路径：`bad_arrangement`（wedge）/ `bad_firing`（holdFireUntilClose）/ `bad_request`（三者都不给）/ `unsupported_param`（position）。
+- 数字：jsontest 115 → **121**；Python 断言 285 → **287**；`buildcheck` 四段一致（**0.8.29**，dll sha `D0DE79F9FAE34F7A`）。
+
+**10.9 A/B：临时排除 RTSCamera 跑一遍（2026-09-26 00:05-00:08，用户要求"我们做的是不是 RTS 自带的"）**
+
+- 手段：`tools/bl_launch.ps1 -ExcludeModules RTSCamera,RTSCamera.CommandSystem`（这条 v0.8.16 就留好了，正是为这种 "同一次启动、只差一个模块" 的对照）。
+- 结果（同一台机、同一套 BlBridge 0.8.27，只差那两个模块）：
+
+| 观测 | **无 RTSCamera** | **有 RTSCamera** |
+|---|---|---|
+| `camera_speed status` 的 `rtsCamera` 腿 | **available=false**，`why=没找到类型 MissionLibrary.Controller.Camera.ACameraControllerManager（本机应该没装 RTSCamera，或它的共享库没加载）` | **available=true** |
+| `engineShift` / `engineBase` 腿 | true / true | true / true |
+| `ghost_camera`（引擎自带 `IsCheatGhostMode`，C 方案） | ✅ `on/off` 都成功 | ✅ |
+| `order` 中途改令 + 回读 | ✅ `Stop→Charge`，`pendingSpecsUpdated=1` | ✅（同） |
+| `camera_speed shift 20` | ✅ `readBack=20`（引擎控制台函数，不依赖 RTS） | ✅ |
+| AI 场次里的 `Mission.MainAgent` | **null**（本场根本没有主角色） | **index 23**（!!!） |
+
+- **两条结论**：
+  1. **我们的腿不依赖 RTSCamera**：Shift/基础倍率走引擎、幽灵相机走引擎自带开关、改令走 `Formation.SetMovementOrder`；
+     而且 RTSCamera 不在时 `rts` 那条腿**如实报 `leg_unavailable` 并点名原因**（不静默、不假装成功）。
+  2. **⚠️ 新发现**：AI 对 AI 场次里的 `Mission.MainAgent` **是 RTSCamera 给的**（无它时为 null）。
+     ⇒ 之前那几轮 "AI 场次里 take 把 MainAgent 22→20→22" 操作的其实是 **RTSCamera 提供的那个主角色**；
+     这条要写进后续任何 AI 场次结论里（换机器/关 RTS 时行为会不同）。
+- 收尾：已恢复**正常启动（带 RTSCamera）**，游戏停在自定义战斗界面，`rtsCamera.available` 复查为 true。
+
+**10.11 v0.8.30：`order` 加**指定点移动**（`position`）+ `release` 补 `originalIndex`（2026-09-26 17:0x–17:2x）**
+
+- 起因：交接待办 ① 「`order --position`（指定点移动）—— 这才是点地面移动」与 ③（`release` 响应补 `originalIndex`，一行）。
+- 引擎侧依据（读反编译确认，不是猜的）：
+  * `MovementOrder.MovementOrderMove(WorldPosition)`（`MovementOrder.cs` 里 `new MovementOrder(MovementOrderEnum.Move, position)`）；
+    `Move` 的 `OnApply` 会 `formation.SetPositioning(CreateNewOrderWorldPositionMT(...))`；
+  * `WorldPosition` 必须带当前 `Scene`（`new WorldPosition(scene, vec3)`，`TaleWorlds.Engine.WorldPosition`），
+    否则 `IsValid=false`、落点没意义；Z 有效性初始为 `Invalid`，`GetPosition` 内部会按地面/导航网格补 ⇒ **z 可以省略**；
+  * 回读：`MovementOrder.GetPosition(Formation)`（引擎按导航网格算出的落点）+ `Formation.GetAveragePositionOfUnits(bool,bool)`（编队重心）。
+- 安全边界照旧（这是本项目的硬规矩）：坐标解析写在**只依赖 BCL** 的 `OrderSpec.TryParsePosition`
+  （`"x,y"` / `"x,y,z"`，各分量 `|值| ≤ 10000`，非数字 / NaN / Infinity / 分量数不是 2~3 / 越界 **一律拒**），
+  在碰 `MovementOrder` / `WorldPosition` **之前**跑完。`movement` 与 `position` **互斥**（一个编队只能有一个 movement order）
+  ⇒ `bad_request`；新增错误码 `bad_position`。
+- **本轮唯一需要动引擎路径的地方（也是真机才会暴露的那个坑）**：组路径那 0.5 秒一次的重申**只认 movement 名字**，
+  指定点移动没有名字可重申 ⇒ 不给它让路就会在**半秒内被我们自己**重申回 `Stop`/`Charge`（而 `Formation` 上当场看是 `Move`
+  —— 只看"我调了 API"会把它算成功）。做法：
+  * `SquadSpec` 增 `ManualMove + MoveX/MoveY/MoveZ`（仍 **BCL-only**，要能进离线单测）；
+  * `ScenarioProbe.OverridePendingMoveToPosition` 打标；`ReapplySideOrders` 见到标记就**照原样重申那个点**；
+  * `OverridePendingMovement`（movement 通道）**清掉**该标记 —— 否则改回 movement 后旧目标点会被反复重申。
+- 新增两个回读字段：`moveTarget`（落点）与 `formationCenter`（编队重心，米）。后者是**为行为判据**加的：
+  `orderAfter=Move` 只证明"令写进了那个 order 对象"，**不证明"兵在走"**；本项目 §3 要求行为证据 ⇒
+  隔几秒再调一次，用两次重心差 + 与目标点距离就能判"在不在往那儿走"。
+- **真机验证（2026-09-26，AI 场次 12v12，攻方按组 8 步兵 stop + 4 弓 stop，10 倍速）**：
+
+| 判据 | 实测 |
+|---|---|
+| 下发 + 当场回读 | `order --position "60,60" --side attacker --formation Infantry`：`orderBefore=Stop → orderAfter=Move`、`moveTarget=(60.0,60.0)`（引擎原样收下请求的点）、`pendingSpecsUpdated=1` |
+| 持久性（A/B 判据） | 隔 **12 秒**复读：`orderBefore` 仍是 `Move`（组路径 0.5 s 重申没把它改回 `Stop`）|
+| **行为证据** | `--position "120,0"`：t0 重心 `(575.6,645.8)`，+20 秒 `(493.1,392.1)` ⇒ 与目标点距离 **790.3 m → 541.2 m**（近了 **249 m**）|
+| 清标记 | 之后 `order stop --side attacker --formation Infantry`：+12 秒复读 `orderBefore=Stop`（旧的 `Move` 目标点**没有**被重申回来 ⇒ 标记确实清了）|
+| 错误分支（**走原始通道**，绕过 Python 侧本地拦截）| `movement`+`position` → `bad_request`；`"a,b"`/`"1"`/`"1e9,0"` → `bad_position`；都不给 → `bad_request`；`target` → `unsupported_param` |
+- **顺手修的一处文案缺陷（真机原始通道抓到的）**：`unsupported_param` 的消息还写着"本通道目前能做
+  movement / arrangement / firing"（**不含 position**）⇒ 已改成 movement / position / arrangement / firing。
+  MCP 侧 `bl_order` 的 `unsupported_param` hint 同样过期（写着"arrangement / firing / target / position 还没实现"）⇒ 一并改。
+- 接口变化：`movement` 仍可省；`movement` / `position` / `arrangement` / `firing` **四者至少一个**；
+  CLI 侧 `order` 的 movement 变成可选位置参数，新增 `--position "x,y[,z]"`（互斥与"都不给"在 Python 侧就拒，退出码 2）。
+  `bl_control_agent` 的 `release` 补 `"originalIndex"` 结构化字段（此前只在 `note` 文案里，调用方做断言只能抠字符串）。
+- 数字：jsontest **121 → 131**（新增 10 条 position 解析断言）；Python 断言 **287 → 290**；
+  编码体检 **83 文件** ✅；`buildcheck` **四段一致**（**0.8.30**，最终 dll sha `EEA244BF86789195`）。
+- 部署链（诚实记录，同一版本号部署过 3 次）：`A9BF4DEF`（position 三项回读）→ `BB4718B7`（加 `formationCenter`）
+  → **`EEA244BF`（最终：文案修复 + 全套冒烟）**。
+- 收尾：游戏停在**自定义战斗界面**（v0.8.30 进程内），计划任务 `BlBridgeDevLaunch` 已注销，临时探针脚本已删。
+
+**10.12 v0.8.31：`order` 加**指定目标**（`target`：冲锋到敌方某编队）+ 空编队信号（2026-09-26 17:2x–17:4x）**
+
+- 起因：交接待办 ②「`order --target`（指定目标）」。**口径**（本轮唯一需要拍板的地方，写明留给下一个会话）：
+  **只做"编队目标"，不做 agent/实体目标**。依据：`MovementOrderChargeToTarget(Formation)` 绑的是编队对象，
+  回读有硬判据（`MovementOrder.TargetFormation`，`OnApply` 里会 `SetTargetFormation`）；而
+  `AttackEntity` / `Follow` 绑具体 agent，一死目标就失效，还得另定"怎么挑敌方单位"的口径
+  ⇒ 先做能验的，agent 目标继续报 `unsupported_param`（不交半成品）。
+- 接口：`target` = **敌方编队**名或下标 0~4（敌方 = 与 `side` 相对的那一方）。
+  `movement` / `position` / `target` **三者互斥**（都往同一个 `Formation.SetMovementOrder` 写）。
+  互斥检查做成"数一遍 + 列出冲突项"，**不是三条两两判断** —— v0.8.30 就是两两判，加 target 时才发现会漏配组合。
+  新增错误码：`bad_target` / `no_enemy_team` / `no_target_formation` / `target_formation_empty`。
+- 组路径"手动令优先"从**单标记**升级为**三态**（`SquadSpec.ManualKind`：0 按名字 / 1 指定点 / 2 指定目标）：
+  一个编队只能有一个 movement order，用两个 bool 就可能同时为真 ⇒ 单值枚举式更诚实；
+  `ManualNone` 必须是 **0**（= 字段默认值 ⇒ 开战 DSL 那条老路径行为不变，离线单测锁这条）。
+  目标编队被打空后重申**跳过**并 `AppendOrderError`，**不**退回 `s.Movement`（那等于偷偷把"冲这个编队"换成"冲锋"）。
+- **真机自己踩到的那个坑，顺手补成显式信号**：我把守方的 `formation=Infantry` 当成"那 12 个芬恩勇士"，
+  其实**芬恩勇士是弓手**、在 `Ranged`，`Infantry` 是**空**的 ⇒ 令照样写进去、`ok=true`、**但没人执行**
+  （只有 `count=0` 和 `formationCenter=(invalid)` 两个弱信号）。这正是本项目最忌讳的"看着成功其实没生效"⇒
+  新增 `emptyFormations`（>0 时 applied 里对应条目带 `emptyFormation:true`）+ note 里点名
+  "编队按**兵种**自动分：弓手在 Ranged、近战步兵在 Infantry、骑兵在 Cavalry…先核对 formation"。
+- **真机验证（2026-09-26 17:3x–17:4x，AI 场次 12v12：攻方 8 军团兵 Infantry + 4 弓手 Ranged，守方 12 芬恩勇士 Ranged；10 倍速）**：
+
+| 判据 | 实测 |
+|---|---|
+| 下发 + 回读 | `order --target Infantry --side defender --formation Ranged`：`orderBefore=Stop → orderAfter=ChargeToTarget`、`targetAfter=Infantry`、`target`/`targetSide=attacker`、`pendingSpecsUpdated=1` |
+| 持久性 | 隔 **15 秒**复读 `orderBefore` 仍 `ChargeToTarget`（手动令优先生效）|
+| **行为证据** | `targetDistance` **214.9 m → 114.5 m**（同一场 18 秒那轮是 212.7 → 102.5 m）|
+| 清标记 | 之后 `order stop --side defender --formation Ranged`：`ChargeToTarget → Stop`，+16 秒复读仍是 `Stop`（旧目标没被重申回来）|
+| 空编队信号 | `order stop --side defender --formation Infantry`（守方没步兵）⇒ `ok=true` + `count=0` + `emptyFormation=true` + `emptyFormations=1` + note 点名 |
+| 错误分支（**原始通道**，绕开 Python 侧本地拦截）| 三者同给 → `bad_request`（列出三项）；`bogus` → `bad_target`；攻方目标指向守方**空**的 Infantry → `target_formation_empty`（点名"已经打光了"且不静默换冲锋）；`riding` → `unsupported_param` |
+| position 回归 | 活编队上 `--position "400,400"`：`Stop → Move`，`moveTarget=(455.8,427.5)` —— **首次观测到引擎把落点夹到导航网格内**（请求值 ≠ 回读值是引擎修正，不是没写进去）|
+- 数字：jsontest **131 → 134**（三态常量 + 默认值断言）；Python 断言 **290 → 295**；编码体检 **83 文件** ✅；
+  `buildcheck` **四段一致**（**0.8.31**，最终 dll sha `AB936AE7D8DAD449`）。
+- 部署链（诚实记录，同一版本号部署过 2 次）：`5D330F15`（target + 三态）→ **`AB936AE7`（最终：+ 空编队信号 + 全套冒烟）**。
+- 收尾：游戏停在**自定义战斗界面**（v0.8.31 进程内），计划任务已注销，临时探针脚本已删。
 

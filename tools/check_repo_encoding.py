@@ -5,7 +5,7 @@
 为什么要有这个脚本：编码规则只写在文档里，迟早会被改回去（2026-09-25 就走过两条弯路：
 "只改 errors 不改 encoding" 的 safe_streams、"把中文译成英文来绕开乱码"）。规则必须**可执行**。
 
-检查项（对 git 跟踪的全部文本文件）：
+检查项（对 git 跟踪的 + 尚未跟踪但没被 ignore 的全部文本文件；后者是 2026-09-25 两次漏检的根因）：
   1. 必须是**有效 UTF-8**（非 UTF-8 的源文件一律报错）
   2. **不得带 BOM**（UTF-8 BOM 会让 `.gitignore` 首行、严格 `utf-8` 的 JSON 解析器等出错）
   3. 行尾必须是 **LF**（CRLF 会让 git 的 diff 隐身：工作区 CRLF / 索引 LF 时 `git status` 不报，
@@ -40,13 +40,29 @@ def is_text(path):
 
 
 def tracked_files():
-    """git 跟踪的文件列表（相对仓库根的 POSIX 路径）。"""
+    """git 跟踪的 **+ 尚未跟踪但没被 ignore 的** 文件列表（相对仓库根的 POSIX 路径）。
+
+    为什么把"还没 add 的新文件"也算进来（2026-09-25 一天内两次踩到）：
+      新文件刚写盘时最容易违反编码规则（编辑器/生成工具默认 CRLF），而它还没进 git
+      ⇒ 只查 `git ls-files` 会**直接漏检**，直到 `git add` 之后体检才报出来。
+      这两次都是 `bl_cmd.py buildcheck` 的 `stale_source` 先抓到的 —— 体检自己该早一步。
+    """
     p = subprocess.run(["git", "-C", REPO, "ls-files"], capture_output=True)
     if p.returncode != 0:
         print("错误：这不是一个 git 仓库（git ls-files 失败）", file=sys.stderr)
         return None
     out = p.stdout.decode("utf-8", "replace")
-    return [f for f in out.split("\n") if f.strip()]
+    files = [f for f in out.split("\n") if f.strip()]
+    seen = set(files)
+    q = subprocess.run(["git", "-C", REPO, "ls-files", "--others", "--exclude-standard"],
+                       capture_output=True)
+    if q.returncode == 0:
+        for f in q.stdout.decode("utf-8", "replace").split("\n"):
+            f = f.strip()
+            if f and f not in seen:
+                files.append(f)
+                seen.add(f)
+    return files
 
 
 def main(argv):

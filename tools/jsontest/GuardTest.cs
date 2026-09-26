@@ -196,6 +196,122 @@ internal static class GuardTest
         Check(holdThrew && holdMsg.IndexOf("已移除", StringComparison.Ordinal) >= 0,
               "hold 已移除：必须抛 ArgumentException 且提示改用 stop", holdMsg);
 
+        // ── 手动令优先标记（v0.8.30/0.8.31，SquadSpec.ManualKind）─────────────────
+        // 为什么值得有断言：组路径每 0.5s 重申movement，而这个三态决定了"重申什么"。
+        // 最要命的一条是 **ManualNone == 0**：字段默认值就是它 ⇒ 开战 DSL 那条老路径
+        // （按名字重申）行为**必须**不变（GC2）；万一有人把常量顺序改了，默认值就会变成
+        // "重申某个点 (0,0,0)"，所有按组开的战都会莫名其妙往原点走。
+        Check(SquadSpec.ManualNone == 0,
+              "ManualNone 必须是 0（= 字段默认值 ⇒ 开战 DSL 那条路行为不变）",
+              SquadSpec.ManualNone.ToString());
+        Check(SquadSpec.ManualPosition != SquadSpec.ManualNone
+              && SquadSpec.ManualChargeTarget != SquadSpec.ManualNone
+              && SquadSpec.ManualPosition != SquadSpec.ManualChargeTarget,
+              "手动令三态两两不等（单值枚举式，不是两个可能同时为真的 bool）");
+        SquadSpec fresh = new SquadSpec();
+        Check(fresh.ManualKind == SquadSpec.ManualNone && fresh.TargetFormationIndex == -1,
+              "新建 spec 默认 = 按名字重申、无目标下标",
+              fresh.ManualKind + "/" + fresh.TargetFormationIndex);
+
+        // ── 改令通道的名字表与校验器（v0.8.23，OrderSpec）──────────────────────
+        // 这些校验必须在**碰 `MovementOrder` 之前**跑完（碰早了会抛 TypeInitializationException
+        // 并把该类型永久标记为不可用），所以它们属于安全边界，必须有对照断言；
+        // 同时与开战 DSL 的名字表（SquadSpec）**同集合**锁住，免得"开战能写、中途改不了"。
+        int fi;
+        Check(OrderSpec.TryFormationIndex("Infantry", out fi) && fi == 0, "formation 名 → 下标：Infantry=0");
+        Check(OrderSpec.TryFormationIndex("skirmisher", out fi) && fi == 4,
+              "formation 名大小写不敏感：skirmisher=4");
+        Check(OrderSpec.TryFormationIndex("2", out fi) && fi == 2, "formation 下标字符串也接受：2 → 2");
+        Check(!OrderSpec.TryFormationIndex("HeavyInfantry", out fi),
+              "别名不收（HeavyInfantry 与 Infantry 同值，收两套名字会漂移）");
+        Check(!OrderSpec.TryFormationIndex("Infantrys", out fi), "拼错必须拒，不回落默认编队");
+        Check(!OrderSpec.TryFormationIndex("-1", out fi), "越界下标（-1）必须拒");
+        Check(!OrderSpec.TryFormationIndex("5", out fi), "越界下标（5）必须拒");
+        Check(!OrderSpec.TryFormationIndex("", out fi), "空串必须拒");
+
+        Check(OrderSpec.IsMovement("stop") && OrderSpec.IsMovement("Charge"),
+              "movement 白名单：大小写不敏感");
+        Check(!OrderSpec.IsMovement("hold"), "movement 白名单：hold 已移除（必须拒）");
+        Check(!OrderSpec.IsMovement("jump") && !OrderSpec.IsMovement(""), "movement 白名单：怪值/空串必须拒");
+
+        Check(OrderSpec.MovementNames.Length == SquadSpec.Movements.Length,
+              "改令与开战 DSL 的 movement 集合长度一致", OrderSpec.MovementNames.Length.ToString());
+        for (int qi = 0; qi < OrderSpec.MovementNames.Length; qi++)
+        {
+            Check(OrderSpec.MovementNames[qi] == SquadSpec.Movements[qi],
+                  "movement 名字表同集合（OrderSpec 与 SquadSpec）: " + OrderSpec.MovementNames[qi]);
+        }
+        for (int qi = 0; qi < OrderSpec.FormationNames.Length; qi++)
+        {
+            Check(OrderSpec.FormationNames[qi] == SquadSpec.Formations[qi],
+                  "编队名字表前 5 项一致（OrderSpec 与 SquadSpec）: " + OrderSpec.FormationNames[qi]);
+        }
+        Check(OrderSpec.Join(OrderSpec.MovementNames).IndexOf("stop", StringComparison.Ordinal) > 0,
+              "错误消息会带上可用值（OrderSpec.Join 生效）", OrderSpec.Join(OrderSpec.MovementNames));
+
+        // v0.8.28：阵列 / 射击纪律的名字表（同样必须在碰 `ArrangementOrder` / `FiringOrder` 之前校验完）
+        Check(OrderSpec.IsArrangement("shieldwall") && OrderSpec.IsArrangement("ShieldWall"),
+              "阵列名白名单：大小写不敏感");
+        Check(!OrderSpec.IsArrangement("wedge") && !OrderSpec.IsArrangement("") && !OrderSpec.IsArrangement(null),
+              "阵列名白名单：怪值 / 空串 / null 必须拒");
+        Check(OrderSpec.ArrangementNames.Length == 8,
+              "阵列名共 8 个（引擎 ArrangementOrderEnum：Line/ShieldWall/Circle/Square/Skein/Column/Loose/Scatter）",
+              OrderSpec.ArrangementNames.Length.ToString());
+        Check(OrderSpec.IsFiring("holdFire") && OrderSpec.IsFiring("FireAtWill"),
+              "射击纪律白名单：大小写不敏感");
+        Check(!OrderSpec.IsFiring("holdFireUntilClose") && !OrderSpec.IsFiring("") && !OrderSpec.IsFiring(null),
+              "射击纪律：引擎只有两档（FireAtWill / HoldYourFire），其余必须拒");
+        Check(OrderSpec.FiringNames.Length == 2, "射击纪律共 2 档",
+              OrderSpec.FiringNames.Length.ToString());
+
+        // v0.8.30：指定点移动的坐标解析（同样必须在碰 `WorldPosition` / `MovementOrder` 之前跑完，
+        // 所以它也得只依赖 BCL、也得有对照断言）。
+        float cx, cy, cz;
+        Check(OrderSpec.TryParsePosition("100,200", out cx, out cy, out cz)
+              && cx == 100f && cy == 200f && cz == 0f,
+              "position：\"x,y\" 两分量可解析，z 省略 = 0（由引擎按地面补 Z）",
+              cx + "/" + cy + "/" + cz);
+        Check(OrderSpec.TryParsePosition(" 12.5 , -3.25 , 8 ", out cx, out cy, out cz)
+              && cx == 12.5f && cy == -3.25f && cz == 8f,
+              "position：三分量 + 空格 + 负数 + 小数都可解析",
+              cx + "/" + cy + "/" + cz);
+        Check(!OrderSpec.TryParsePosition("100", out cx, out cy, out cz),
+              "position：只有一个分量必须拒（不是\"x 给了 y z 当 0\"）");
+        Check(!OrderSpec.TryParsePosition("1,2,3,4", out cx, out cy, out cz),
+              "position：四个分量必须拒");
+        Check(!OrderSpec.TryParsePosition("a,b", out cx, out cy, out cz),
+              "position：非数字必须拒（绝不静默回落 0,0）");
+        Check(!OrderSpec.TryParsePosition("1,", out cx, out cy, out cz),
+              "position：空的 y 分量必须拒");
+        Check(!OrderSpec.TryParsePosition("NaN,0", out cx, out cy, out cz)
+              && !OrderSpec.TryParsePosition("Infinity,0", out cx, out cy, out cz),
+              "position：NaN / Infinity 必须拒（否则会污染引擎的落点计算）");
+        Check(!OrderSpec.TryParsePosition("1e9,0", out cx, out cy, out cz)
+              && !OrderSpec.TryParsePosition("0,-99999", out cx, out cy, out cz),
+              "position：超出 ±" + OrderSpec.PositionLimit.ToString("0") + " m 必须拒（多半是单位/小数点打错）",
+              "limit=" + OrderSpec.PositionLimit);
+        Check(OrderSpec.TryParsePosition("10000,-10000,0", out cx, out cy, out cz),
+              "position：上界本身允许（边界值不误杀）");
+        Check(!OrderSpec.TryParsePosition("", out cx, out cy, out cz)
+              && !OrderSpec.TryParsePosition(null, out cx, out cy, out cz)
+              && !OrderSpec.TryParsePosition("1;2", out cx, out cy, out cz),
+              "position：空串 / null / 用分号当分隔符 必须拒");
+
+        // ── 主菜单层面状态名（v0.8.22）────────────────────────────────────────
+        // 与 Python 侧镜像 `bl_mcp._MAIN_MENU_ACTIVE_STATES` 必须同集合。
+        // 存在理由（真机血证）：把"取状态机"改成静态优先后，主菜单的名字从空串变成 InitialState，
+        // 而 open_ui 闸门当时写的是"空串 = 主菜单" ⇒ 真主菜单被判成"已加载"、open_ui 一律被拒
+        // （真机 2026-09-25 23:05：requested=None / wrong_state_for_ui）。
+        Check(MainMenuStates.Name == "InitialState", "主菜单状态名常量 = InitialState（真机实测值）");
+        Check(MainMenuStates.IsMenuLevel(""), "主菜单层面：空串（取不到名字的启动期/过渡期）");
+        Check(MainMenuStates.IsMenuLevel(null), "主菜单层面：null 也算（空 = 主菜单层面）");
+        Check(MainMenuStates.IsMenuLevel("InitialState"), "主菜单层面：InitialState（主菜单本体）");
+        foreach (string notMenu in new string[] { "VideoPlaybackState", "CustomBattleState",
+                                                  "MapState", "CampaignState", "MissionState" })
+        {
+            Check(!MainMenuStates.IsMenuLevel(notMenu), "不在主菜单层面（必须拒）: " + notMenu);
+        }
+
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "结果: 全部通过" : "结果: 失败 " + _fail + " 项");
         return _fail == 0 ? 0 : 1;

@@ -771,6 +771,148 @@ TOOLS = [
             "additionalProperties": False},
     },
     {
+        "name": "bl_ghost_camera",
+        "description": ("开关**引擎自带**的自由观察相机（'幽灵模式'，v0.8.16）。"
+                        "运行时生效、**对任何一场战斗都有效**（包含你自己打的），不像 spectate 只对 AI 场次。"
+                        "原理：设 `MissionScreen.IsCheatGhostMode`（官方自己就是这么开的）——"
+                        "相机模式变 Free、且命令 UI 开着也保持自由（能观战 + 能下令）；"
+                        "镜头的移动/缩放输入由引擎自己处理。"
+                        "⚠️ 要能自己用 WASD 飞还需 engine_config.txt 的 cheat_mode=1（只读项，我们不改）。"
+                        "装了 RTSCamera 的机器优先用它的配置（bl_apply_rts_config）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["status", "on", "off", "toggle"],
+                     "description": "默认 status（只查）；on/off/toggle 切换"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_camera_speed",
+        "description": ("相机移动速度（v0.8.17）。速度是两套互不相干的公式，所以分三条腿，用 mode 指名："
+                        "`shift` = 引擎自由相机的 Shift 倍率（走官方控制台函数 `mission.set_shift_camera_speed`，"
+                        "**不需要作弊模式**，改完按住 Shift 飞就生效）；"
+                        "`base` = 引擎自由相机的基础倍率（反射；⚠️ 引擎把速度分量 clamp 在 ±20，"
+                        "调到某个量之后可能不再变快）；"
+                        "`rts` = RTSCamera 的相机速度系数（反射 `ICameraController.MovementSpeedFactor`，"
+                        "**最有效**：它的速度上限随基础速度一起放大，没有那个天花板）；"
+                        "`boost` = 把三条可用腿一次设成同一个值；`status` = 只读现状（默认）。"
+                        "每条腿都**写完回读**，失败会点名是哪条腿、为什么 —— 不静默。"
+                        "装了 RTSCamera 时优先用 rts（你现在看到的自由相机就是它那台）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["status", "shift", "base", "rts", "boost", "probe"],
+                     "description": "默认 status（只查）；shift/base/rts/boost 需要 value；probe = 测速探针"},
+            "value": {"type": "number",
+                      "description": "倍率：shift 需 ≥1 的整数；base / rts / boost 为 0.1~1000"},
+            "action": {"type": "string", "enum": ["end"],
+                       "description": "仅 mode=probe 用：不带 = 记起点，带 end = 记终点并算速度（位移/墙钟秒数）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_control_agent",
+        "description": ("接管士兵（v0.8.25，**最小版**）：把 `Mission.MainAgent` 换成友方某个 agent，"
+                        "并把它交给玩家控制器（`Controller = Player`）。"
+                        "官方那条路（`Mission.CanTakeControlOfAgent`）**只在主角阵亡后**才允许、且**不改 MainAgent**；"
+                        "本工具补上「随时接管」，做法照 RTSCamera / MissionLibrary 的源码（MIT），"
+                        "包含四步：老主角色交回 AI（否则同编队两个 Controller=Player 会让编队逻辑栈溢出）→ "
+                        "改 MainAgent → 目标 Controller=Player + 清 AIStateFlags + 摘 VictoryComponent → "
+                        "复位 MissionScreen._isPlayerAgentAdded（反射，失败只降级并回传 screenReset=false）。"
+                        "选目标：`agentIndex` > `troop` > `formation` > 该方第一个存活者；只允许玩家方（拒绝敌人）。"
+                        "`mode=release` 换回接管前记录的那个主角色；`mode=status` 只看现状（不改任何东西）。"
+                        "⚠️ 与 RTSCamera 并存时它的 `ControlTroop` 键也会改 MainAgent，两边会互相覆盖。"
+                        "未实现、传了就报 unsupported_param：agentId / slot / mount / weapon。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["take", "release", "status"],
+                     "description": "默认 take（接管）；release = 换回原始主角色；status = 只读现状"},
+            "agentIndex": {"type": "integer",
+                           "description": "引擎的 agent.Index（遥测/事件里的 agent 字段就是它）；优先级最高，"
+                                          "但换一场就变"},
+            "troop": {"type": "string", "description": "兵种 id（Character.StringId），取该方第一个存活的"},
+            "formation": {"type": "string",
+                          "description": "编队：Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或 0~4"},
+            "side": {"type": "string", "enum": ["player", "attacker", "defender"],
+                     "description": "从哪一方里挑目标，默认 player（但只接受玩家方的 agent）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_order",
+        "description": ("战斗中途改令：对**正在进行**的战斗里某一方的编队改 movement / 移动到指定点 / "
+                        "冲锋到指定敌方编队 / 阵列 / 射击纪律。与开战 DSL 走同一条下发路径"
+                        "（Formation.SetMovementOrder + 同一个映射器），区别只是可随时调用。"
+                        "⚠️ 只在战斗内有意义：mission 之外碰 MovementOrder 会抛 TypeInitializationException"
+                        "并把该类型永久标记为不可用，所以没战斗时直接拒（no_mission），不做\"先试试看\"。"
+                        "默认 detachAI=true：连带 SetControlledByAI(false,false)；否则该方 team 级战术会周期性把令"
+                        "覆盖回去（开战路径实测：守方 stop 组被覆盖 59/115 次、位移 154 m）。"
+                        "判据是**当场回读**：三种 movement order（movement/position/target）都回传 "
+                        "orderBefore/orderAfter（引擎 MovementOrder.OrderEnum）；position 另回传 moveTarget"
+                        "（引擎按导航网格算出的落点，与请求值有偏差属引擎修正）+ formationCenter；"
+                        "target 另回传 targetAfter（回读到的目标编队）+ targetDistance（双方编队重心距离）。"
+                        "后两者是**行为**判据：隔几秒再调一次，重心应朝目标点挪 / 距离应缩小。"
+                        "要确认不被覆盖，隔几秒再调一次看 orderBefore / moveTarget / targetAfter 是否仍是上次的值。"
+                        "movement / position / target **三者互斥**（一个编队只能有一个 movement order）。"
+                        "⚠️ 回传的 `emptyFormations`（>0 时 applied 里对应条目带 `emptyFormation:true`、"
+                        "`count:0`）= **令写进去了但那个编队一个人都没有** ⇒ 没人会执行"
+                        "（编队按兵种自动分：弓手在 Ranged、近战步兵在 Infantry，先核对 formation 选对没）。"
+                        "尚未实现、传了就报 unsupported_param（不静默忽略）：riding（上下马）、"
+                        "以及把 **agent/实体**当目标（本轮只做编队目标，理由：agent 会死、目标会失效，"
+                        "口径还没定）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "side": {"type": "string", "enum": ["player", "attacker", "defender"],
+                     "description": "哪一方，默认 player（mission 里玩家侧仍是攻/守之一）"},
+            "formation": {"type": "string",
+                          "description": "编队：Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或下标 0~4；"
+                                         "不传 = 该方所有有兵的编队"},
+            "movement": {"type": "string", "enum": ["charge", "advance", "fallback", "stop", "retreat"],
+                         "description": "改 movement（hold 已移除：引擎层本就等同 stop）。"
+                                        "与开战 DSL 同一套拼写；会被组路径 0.5s 重申覆盖，"
+                                        "所以本工具会同步改“待重申的值”（回传 pendingSpecsUpdated）。"
+                                        "与 position / target 互斥"},
+            "position": {"type": "string",
+                         "description": "移动到指定点（v0.8.30）：\"x,y\" 或 \"x,y,z\"（英文逗号，单位米，"
+                                        "各分量 |值| ≤ 10000；z 省略 = 0，引擎按地面/导航网格补 Z）。"
+                                        "与 movement / target 互斥。组路径那 0.5s 重申只认 movement 名 ⇒ "
+                                        "本工具会把它标成“手动令优先”（回传 pendingSpecsUpdated），"
+                                        "重申时照原样重申同一个点，不会退回 charge"},
+            "target": {"type": "string",
+                       "description": "冲锋到指定**敌方编队**（v0.8.31）：Infantry/Ranged/Cavalry/"
+                                      "HorseArcher/Skirmisher 或下标 0~4（敌方 = 与 side 相对的那一方）。"
+                                      "引擎侧是 MovementOrderChargeToTarget(Formation)。"
+                                      "与 movement / position 互斥。目标编队为空/不存在时直接拒"
+                                      "（target_formation_empty / no_target_formation），"
+                                      "不静默换成普通冲锋。另回传 targetAfter / targetDistance"},
+            "arrangement": {"type": "string",
+                            "enum": ["line", "shieldwall", "circle", "square", "skein", "column",
+                                     "loose", "scatter"],
+                            "description": "改编队阵列（`ArrangementOrder`）"
+                                           "：**不在**组路径重申范围内（重申只管 movement）"},
+            "firing": {"type": "string", "enum": ["fireAtWill", "holdFire"],
+                       "description": "改射击纪律（`FiringOrder`）：引擎只有这两档"},
+            "detachAI": {"type": "boolean",
+                         "description": "是否连带 SetControlledByAI(false,false)，默认 true（建议保持 true；"
+                                        "设 false 只用于\"看它会不会被战术覆盖\"的对照）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_skip_video",
+        "description": ("跳过开场动画（v0.8.20）。做法学自 BUTR/Bannerlord.GABS 的 `core/skip_video`："
+                        "**不模拟 ESC**，而是先问「当前活动状态是不是 `VideoPlaybackState`」，"
+                        "是就直接调它的 `OnVideoFinished()`（引擎自己的视频屏也是这么收敛的）。"
+                        "判据硬、无副作用；不是视频时如实报 `not_video` 并回传当前状态名。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_cheat_mode",
+        "description": ("开关**作弊模式**（v0.8.20，带回读）。做法学自 BUTR/Bannerlord.GABS 的 `core/set_cheat_mode`："
+                        "写 `TaleWorlds.Engine.NativeConfig.CheatMode`（属性私有 setter → 后备字段两条路都试），"
+                        "再回读验证。"
+                        "**为什么需要它**：引擎自由相机的倍率热键（Ctrl+↑ ×1.5 / Ctrl+↓ ×2÷3 / Ctrl+中键重置）"
+                        "与观察者 HUD 的「摄像机移动速度」读数都被 `Game.Current.CheatMode` 门控 ⇒ "
+                        "这是「相机太慢」的另一条正解，且不改我们的相机代码。"
+                        "⚠️ 开了它 = 打开开发者/作弊通道（F2/F3/F4 杀敌杀友、Ctrl+K 幽灵相机、Ctrl+F5 换控制权等一并生效）；"
+                        "本工具**不做任何自动开启**，只按显式请求执行。只作用于本次进程，重启回到 engine_config.txt 的设置。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["status", "on", "off", "toggle"],
+                     "description": "默认 status（只查）"}},
+            "additionalProperties": False},
+    },
+    {
         "name": "bl_battle_status",
         "description": "查询游戏内推演状态机（idle/loading/running/ended/error）、进度（双方存活数）与最近一次结果",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -979,18 +1121,36 @@ TOOLS = [
     },
     {
         "name": "bl_launch_game",
-        "description": ("无人值守启动 Bannerlord（走 BLSE）：带完整模块列表，并自动应答两个模态弹窗"
-                        "（Safe Mode -> 否；Mod change detected -> 确定）。"
-                        "不带模块列表启动会以「no mods 模式」起来、BlBridge 不会加载；"
-                        "两个弹窗没人答则 launcher 自己退出、游戏永远起不来 —— 这两点都踩过。"
-                        "成功判据是游戏窗口出现（不需要看屏幕）。约 20~60 秒。"
-                        "落地实现 = tools/bl_launch.ps1，本工具只是它的可调用入口。"),
+        "description": ("无人值守启动 Bannerlord（走 BLSE）并**进到自定义战斗界面** —— 分两步（v0.8.18）："
+                        "① `tools/bl_launch.ps1` 起游戏、自动应答两个模态弹窗（Safe Mode -> 否；"
+                        "Mod change detected -> 确定），成功判据是**游戏窗口出现**；"
+                        "② 本工具接着自己做：轮询到**主菜单真的就绪**（控制通道应答 + moduleLoaded "
+                        "+ activeState 为空 + CustomBattle 入口未被禁用）→ 期间按 ESC 跳过场动画（有上限）"
+                        "→ `open_ui` → **每 5 秒**确认一次 activeState 是否变成 CustomBattleState。"
+                        "⚠️ 为什么必须分两步：窗口出现时游戏还在加载/启动动画里，那时 open_ui 只会拿到 "
+                        "`wrong_state`，旧行为就是「等上一次失败」才轮到主菜单。"
+                        "返回里的 `enterCustomBattle.timeline` 是逐步时间线（可复现、不猜）。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "timeoutSec": {"type": "integer", "description": "等待游戏窗口的上限秒数，默认 150"},
+                "enterCustomBattle": {"type": "boolean",
+                                      "description": "第二步：等主菜单 + ESC 跳过场 + 进自定义战斗（默认 true）。false = 只启动，自己再调 bl_open_ui"},
+                "autoOpen": {"type": "boolean",
+                             "description": ("第二步里是否**自动**执行 open_ui（默认 false）。"
+                                             "⚠️ 启动期 fire open_ui 会崩游戏（2026-09-25 真机：cleanExit=false + "
+                                             "rgl_log 崩溃栈），所以默认只截图并返回 await_confirm，由调用方看完再调 bl_open_ui")},
+                "uiId": {"type": "string", "description": "第二步要进的入口 id，默认 CustomBattle"},
+                "menuTimeoutSec": {"type": "integer", "description": "等主菜单就绪的上限秒数，默认 120"},
+                "entryTimeoutSec": {"type": "integer", "description": "open_ui 后等 CustomBattleState 的上限秒数，默认 60"},
                 "skipModuleList": {"type": "boolean",
                                    "description": "调试用：不带 _MODULES_ 列表启动（结果是 no-mods 模式）"},
+                "excludeModules": {"type": "array", "items": {"type": "string"},
+                                   "description": ("启动时**排除**的模块名（v0.8.16），用于 A/B 对照："
+                                                   "同一次启动只差一个模块。名字必须与列表里完全一致，"
+                                                   "拼错会直接启动失败（不会静默忽略）。"
+                                                   "例：[\"RTSCamera\",\"RTSCamera.CommandSystem\"] "
+                                                   "= 关掉 RTSCamera，好让我们的兜底相机（spectate）露出来")},
             },
             "additionalProperties": False,
         },
@@ -1159,6 +1319,205 @@ def _gridhand_json(sub_args, timeout=90.0):
     return rc, data, clean, err
 
 
+# ── 启动的第二步：等主菜单就绪 → 跳启动动画 → 进自定义战斗（v0.8.18）──────────
+# 存在理由（2026-09-25 用户实测反馈）：
+#   `bl_launch.ps1` 的 "LAUNCH OK" 只代表**游戏窗口出现** —— 那时还在加载/启动动画里，
+#   紧接着调 open_ui 只会拿到 wrong_state，于是每次都要"等上一次失败"才轮到真正的主菜单。
+#   这里把启动拆两步：① 起 BLSE（仍由 bl_launch.ps1 做）；② 轮询主菜单就绪、按 ESC 跳动画、
+#   进自定义战斗，然后**每 5 秒**确认一次到底进去了没有。
+# 判据（不猜、不静默）：
+#   "主菜单就绪" = 控制通道能应答 且 `moduleLoaded=true` 且 `activeState` ∈ {"", "InitialState"}
+#   且 `topScreen` 非空、不含 "Loading" 且 options 里有 `CustomBattle` 且 `disabled=false`
+#   （加载/安装期间这些入口是禁用的）。
+#
+# ⚠️ v0.8.22：**两处必须同改**（C# 的 `ScenarioRunner.ActiveGameStateName()` 与本处）。
+#   真机实测（2026-09-25 23:00，v0.8.21）：主菜单的活动状态名就是 **`InitialState`**；
+#   而 C# 侧原先只看 `Game.Current.GameStateManager`，主菜单 `Game.Current` 是 null ⇒ 恒返回空串。
+#   把 C# 换成"静态优先"后，主菜单会**开始返回 `InitialState`** —— 若这里仍把"非空"一律当"不在主菜单"，
+#   就会把**真主菜单判成未就绪**，整个启动流程反被打死。所以两个名字都接受：
+#     ""             = 拿不到状态名（启动初期/过渡期；这一档还叠着 `topScreen` 那道硬门）
+#     "InitialState" = 主菜单（真机实测值）
+_MAIN_MENU_ACTIVE_STATES = ("", "InitialState")
+_INTRO_ESC_BUDGET_SEC = 40.0
+
+
+def _send_key(keys, window_id=None):
+    sub = ["key", "press", str(keys)]
+    if window_id:
+        sub += ["--window-id", str(int(window_id))]
+    rc, data, clean, err = _gridhand_json(sub, timeout=30.0)
+    return rc, clean
+
+
+def _game_window_id():
+    rc, data, clean, err = _gridhand_json(["windows", "list"], timeout=30.0)
+    if rc != 0 or not data:
+        return None
+    wins = data.get("windows") or []
+    for w in wins:
+        if w.get("isGame"):
+            return w.get("id")
+    # ⚠️ gridhand 的 `windows list` **不给** isGame（那是 bl_desktop_windows 自己算的），
+    # 所以这里按标题兜底认（真机 2026-09-25 踩过：只认 isGame ⇒ 恒返回 None）。
+    for w in wins:
+        t = w.get("title") or ""
+        if "Mount and Blade II Bannerlord" in t or "Bannerlord - Singleplayer" in t:
+            return w.get("id")
+    return None
+
+
+def _menu_state(ui):
+    """→ (ready, why)：只看控制通道当场给的东西。"""
+    if not ui.get("moduleLoaded"):
+        return False, "BlBridge 模块还没挂上（moduleLoaded=false）"
+    # ⭐ 关键硬判据（v0.8.20，学自 BUTR/Bannerlord.GABS 的 `wait_for_state` 注释）：
+    # 「状态串匹配」不够 —— 那个注释的原话是 `Campaign.Current` 会在 GameLoadingScreen 过渡
+    # **完成之前**就变成非 null，只看状态会**过早返回、后续操作踩空**；所以他们额外检查
+    # `ScreenManager.TopScreen` 的类名里**不含 "Loading"**。我们同款：
+    # 启动期 `activeState` 也是空串（就像主菜单），只凭它判断会让 open_ui 在启动动画里执行
+    # 初始状态选项 —— 2026-09-25 真机把游戏打崩过（见 PROGRESS §二十九 9.6）。
+    top_screen = ui.get("topScreen") or ""
+    if "Loading" in top_screen:
+        return False, "还在加载屏（topScreen=%s）" % top_screen
+    # 真机实测（2026-09-25 22:51，v0.8.20）：启动后 ~2 s 时 `topScreen` 是**空串**，
+    # 而那时 options 已经有 9 项、activeState 也是空串 ⇒ 光看那两项会误判"主菜单就绪"
+    # （正是把游戏打崩的那次的条件）。真正的菜单有屏幕名：`GauntletInitialScreen`。
+    if not top_screen:
+        return False, "顶层还没有屏幕（topScreen 为空 = 启动初期，屏幕栈还没压上来）"
+    st = ui.get("activeState") or ""
+    if st not in _MAIN_MENU_ACTIVE_STATES:
+        return False, ("不在主菜单（activeState=%s；本判据只接受 %s）"
+                       % (st, " / ".join(repr(x) for x in _MAIN_MENU_ACTIVE_STATES)))
+    cbs = [o for o in (ui.get("options") or []) if o.get("id") == "CustomBattle"]
+    if not cbs:
+        return False, "主菜单里还没有 CustomBattle 入口"
+    if cbs[0].get("disabled"):
+        return False, "CustomBattle 入口仍被禁用（%s）" % (cbs[0].get("disabledReason") or "无原因")
+    return True, "主菜单就绪（topScreen=%s）" % top_screen
+
+
+def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout=60.0,
+                         poll=5.0, skip_intro=True, auto_open=False, min_startup_sec=45.0):
+    """启动第二步：等主菜单 → （必要时发 ESC 跳过场）→ open_ui → 每 poll 秒确认一次。"""
+    import time as _time
+    timeline = []
+    t0 = _time.time()
+    wid = _game_window_id()
+    can_key = bool(gridhand_path())
+    if skip_intro and not can_key:
+        timeline.append("没装 gridhand ⇒ 这一轮不发 ESC（启动动画只能自己等人跳）")
+
+    ready = False
+    why = "超时"
+    esc = 0
+    video_skips = 0
+    first_seen = None
+    while _time.time() - t0 < menu_timeout:
+        # sceneLimit=1：轮询只要状态位，不需要 314 行场景表（省掉每轮 ~35 KB）
+        resp, err = send_command("list_ui", {"sceneLimit": 1}, timeout=15)
+        if err or not resp:
+            why = "控制通道还没应答：%s" % (err or "空响应")
+        else:
+            ui = resp.get("result") or {}
+            if first_seen is None:
+                first_seen = ("t=%.1fs list_ui: moduleLoaded=%s activeState=%r topScreen=%r options=%d"
+                              % (_time.time() - t0, ui.get("moduleLoaded"),
+                                 ui.get("activeState") or "", ui.get("topScreen") or "",
+                                 len(ui.get("options") or [])))
+                timeline.append(first_seen)
+            ready, why = _menu_state(ui)
+        if ready:
+            timeline.append("t=%.1fs 主菜单就绪（skip_video %d 次 / ESC %d 次）"
+                            % (_time.time() - t0, video_skips, esc))
+            break
+        # 没就绪：**优先**问"现在是不是开场动画"，是就直接结束它（判据硬、无副作用）；
+        # 不是视频时才退回模拟 ESC。两者都只在启动后的时间窗内做。
+        if skip_intro and (_time.time() - t0) < _INTRO_ESC_BUDGET_SEC:
+            r, e = send_command("skip_video", {}, timeout=10)
+            body = ((r or {}).get("result") or {}) if not e else {}
+            if body.get("ok"):
+                video_skips += 1
+                timeline.append("t=%.1fs skip_video 成功（状态=%s）"
+                                % (_time.time() - t0, body.get("activeState")))
+            elif can_key:
+                _send_key("esc", wid)
+                esc += 1
+        _time.sleep(2.0)
+
+    if not ready:
+        return {"ok": False, "phase": "wait_menu", "reason": why, "escSent": esc,
+                "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+
+    # ── 安全门（真机血的教训，别删）──────────────────────────────────────
+    # 2026-09-25 22:39:53：`open_ui` 在**启动动画期间**被接受并执行了
+    # `ExecuteInitialStateOptionWithId(CustomBattle)`，21 秒后游戏崩溃
+    # （`rgl_log_91600.txt` 22:40:14 有崩溃栈；`bridge_status.json` → `cleanExit:false`）。
+    # ⇒ 只靠"activeState 为空"判主菜单**不够**（启动期同样是空串）。
+    #   默认**不自动 fire**：先截图、把路径带回去，由调用方看一眼再决定；
+    #   无人值守要显式传 autoOpen=True，且仍受 min_startup_sec 下限保护。
+    waited = _time.time() - t0
+    if waited < min_startup_sec:
+        _time.sleep(min_startup_sec - waited)
+        timeline.append("t=%.1fs 已等足启动下限 %.0fs" % (_time.time() - t0, min_startup_sec))
+    if not auto_open:
+        wid2 = wid or _game_window_id()
+        shot_path = None
+        if can_key and wid2:
+            r = call_tool("bl_desktop_screenshot",
+                          {"windowId": wid2, "grid": False,
+                           "out": os.path.join(log_dir(), "ui", "enter_battle_confirm.png")})
+            shot_path = r.get("path")
+        return {"ok": False, "phase": "await_confirm", "uiId": ui_id,
+                "reason": ("主菜单信号已就绪，但默认**不自动**执行 open_ui（启动期 fire 会崩游戏，"
+                           "2026-09-25 真机证据见 PROGRESS §二十九 9.6）。看一眼截图确认是主菜单后，"
+                           "再调 bl_open_ui；要无人值守就传 autoOpen=true。"),
+                "screenshot": shot_path, "escSent": esc,
+                "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+
+    t1 = _time.time()
+    resp, err = send_command("open_ui", {"uiId": ui_id}, timeout=20)
+    if err:
+        return {"ok": False, "phase": "open_ui", "reason": err, "escSent": esc,
+                "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+    body = resp.get("result") or {}
+    # 不静默：open_ui 失败时把 code/error 原样带出来（真机踩过：requested=None 时不知道原因）
+    timeline.append("t=%.1fs open_ui(%s) → requested=%s%s"
+                    % (_time.time() - t0, ui_id, body.get("requested"),
+                       "" if body.get("requested") else " code=%s error=%s"
+                       % (body.get("code"), body.get("error"))))
+    if not body.get("requested"):
+        menu_back = None
+        r0, e0 = send_command("list_ui", {}, timeout=15)
+        if not e0 and r0:
+            menu_back = (r0.get("result") or {}).get("activeState")
+        return {"ok": False, "phase": "open_ui", "uiId": ui_id, "state": menu_back,
+                "reason": "open_ui 没有被接受：code=%s error=%s（activeState=%r）"
+                          % (body.get("code"), body.get("error"), menu_back),
+                "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+
+    state = None
+    poll_errors = 0
+    while _time.time() - t1 < entry_timeout:
+        _time.sleep(poll)
+        r2, e2 = send_command("list_ui", {"sceneLimit": 1}, timeout=15)
+        if e2 or not r2:
+            poll_errors += 1
+            # 不静默：轮询失败也要记账（否则最后只看到 state=None，无从判断）
+            if poll_errors <= 3 or poll_errors % 4 == 0:
+                timeline.append("t=+%.1fs list_ui 失败×%d：%s"
+                                % (_time.time() - t1, poll_errors, e2 or "空响应"))
+            continue
+        state = (r2.get("result") or {}).get("activeState") or ""
+        timeline.append("t=+%.1fs activeState=%r" % (_time.time() - t1, state))
+        if state == "CustomBattleState":
+            return {"ok": True, "phase": "in_custom_battle", "uiId": ui_id, "state": state,
+                    "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+    return {"ok": False, "phase": "wait_custom_battle", "uiId": ui_id, "state": state,
+            "pollErrors": poll_errors,
+            "reason": "等了 %.0f 秒还没看到 CustomBattleState（轮询清单见 timeline）" % entry_timeout,
+            "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+
+
 def call_tool(name, args):
     args = args or {}
     if name == "bl_status":
@@ -1257,6 +1616,205 @@ def call_tool(name, args):
 
     if name == "bl_build_check":
         return {"ok": True, "buildCheck": build_check()}
+
+    if name == "bl_ghost_camera":
+        mode = args.get("mode") or "status"
+        params = {} if mode == "status" else {"mode": mode}
+        resp, err = send_command("ghost_camera", params, timeout=10)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        hint = None
+        if not body.get("ok") and body.get("code") == "not_in_mission":
+            hint = "先开一场战斗再切幽灵相机（主菜单/界面里没有 MissionScreen 可改）"
+        return {"ok": bool(body.get("ok")), "mode": mode,
+                "ghostCamera": body.get("ghostCamera"), "inMission": body.get("inMission"),
+                "error": body.get("error"), "note": body.get("note"), "hint": hint,
+                "response": resp}
+
+    if name == "bl_control_agent":
+        mode = args.get("mode") or "take"
+        if mode not in ("take", "release", "status"):
+            return {"ok": False,
+                    "error": "mode 只接受 take / release / status，收到 %r" % (mode,)}
+        params = {"mode": mode}
+        if args.get("side"):
+            params["side"] = args["side"]
+        if args.get("formation") not in (None, ""):
+            params["formation"] = str(args["formation"])
+        if args.get("troop"):
+            params["troop"] = args["troop"]
+        if args.get("agentIndex") is not None:
+            params["agentIndex"] = int(args["agentIndex"])
+        resp, err = send_command("control_agent", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        out = {"ok": bool(body.get("ok")), "mode": body.get("mode"), "how": body.get("how"),
+               "target": body.get("target"), "mainAgentBefore": body.get("mainAgentBefore"),
+               "mainAgentAfter": body.get("mainAgentAfter"), "restored": body.get("restored"),
+               "oldHandedToAI": body.get("oldHandedToAI"),
+               "previousHandedToAI": body.get("previousHandedToAI"),
+               "screenReset": body.get("screenReset"),
+               "playerControlError": body.get("playerControlError"),
+               "originalIndex": body.get("originalIndex"),
+               "playerTeam": body.get("playerTeam"),
+               "aliveCandidatesOnPlayerTeam": body.get("aliveCandidatesOnPlayerTeam"),
+               "code": body.get("code"), "error": body.get("error"), "note": body.get("note"),
+               "response": resp}
+        if not body.get("ok"):
+            code = body.get("code")
+            if code == "no_mission":
+                out["hint"] = "先开一场战斗再接管（bl_start_battle / 游戏内自定义战斗界面）"
+            elif code == "no_player_team":
+                out["hint"] = "这一场没有玩家方（纯 AI 场次里用 playerSide 指定一方为玩家侧再开）"
+            elif code == "not_player_team":
+                out["hint"] = "只能接管玩家方的兵（RTSCamera 同样拒绝敌人）：换 side / 换目标"
+            elif code == "no_target":
+                out["hint"] = ("没找到存活目标：等士兵进场后再试，或用 mode=status 看"
+                               " aliveCandidatesOnPlayerTeam 与 mainAgent")
+            elif code in ("target_inactive", "original_inactive"):
+                out["hint"] = "目标已阵亡，换一个（死亡瞬间的 agent 还在列表里但 IsActive()=false）"
+            elif code == "already_main_agent":
+                out["hint"] = "目标已经是主角色了，换个目标"
+            elif code == "no_original":
+                out["hint"] = "本次进程内还没 take 过，没有可换回的原始主角色；直接 take 别的即可"
+            elif code == "unsupported_param":
+                out["hint"] = "agentId / slot / mount / weapon 还没实现，别当成已生效"
+        return out
+
+    if name == "bl_order":
+        # 三者互斥（都往同一个 Formation.SetMovementOrder 写）；做成"列全冲突项"而不是两两判断。
+        given = [k for k in ("movement", "position", "target") if args.get(k)]
+        if len(given) > 1:
+            return {"ok": False,
+                    "error": "movement / position / target 互斥（一个编队只能有一个 movement order）"
+                             "：%s" % " / ".join(str(args.get(k)) for k in given)}
+        if not (given or args.get("arrangement") or args.get("firing")):
+            return {"ok": False,
+                    "error": "movement / position / target / arrangement / firing 至少要给一个"}
+        params = {}
+        if args.get("movement"):
+            params["movement"] = args["movement"]
+        if args.get("position"):
+            params["position"] = args["position"]
+        if args.get("target"):
+            params["target"] = args["target"]
+        if args.get("arrangement"):
+            params["arrangement"] = args["arrangement"]
+        if args.get("firing"):
+            params["firing"] = args["firing"]
+        if args.get("side"):
+            params["side"] = args["side"]
+        if args.get("formation") not in (None, ""):
+            params["formation"] = str(args["formation"])
+        if args.get("detachAI") is not None:
+            params["detachAI"] = bool(args["detachAI"])
+        resp, err = send_command("order", params, timeout=10)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        out = {"ok": bool(body.get("ok")), "movement": body.get("movement"),
+               "position": body.get("position"), "target": body.get("target"),
+               "targetSide": body.get("targetSide"), "side": body.get("side"),
+               "team": body.get("team"), "detachAI": body.get("detachAI"),
+               "arrangement": body.get("arrangement"), "firing": body.get("firing"),
+               "appliedCount": body.get("appliedCount"), "totalUnits": body.get("totalUnits"),
+               "emptyFormations": body.get("emptyFormations"),
+               "pendingSpecsUpdated": body.get("pendingSpecsUpdated"),
+               "applied": body.get("applied"), "code": body.get("code"),
+               "error": body.get("error"), "note": body.get("note"), "response": resp}
+        if not body.get("ok"):
+            code = body.get("code")
+            if code == "no_mission":
+                out["hint"] = ("先开一场战斗再改令（bl_start_battle / 游戏内自定义战斗界面）；"
+                               "mission 之外碰 MovementOrder 会永久污染该类型，所以这里直接拒。")
+            elif code == "bad_movement":
+                out["hint"] = "movement 只接受 charge/advance/fallback/stop/retreat（hold 已移除，改用 stop）"
+            elif code == "bad_position":
+                out["hint"] = ('position 写成 "x,y" 或 "x,y,z"（英文逗号、单位米、各分量 |值| ≤ 10000；'
+                               "z 省略 = 0，引擎按地面补 Z）")
+            elif code == "bad_formation":
+                out["hint"] = ("formation 只接受 Infantry/Ranged/Cavalry/HorseArcher/Skirmisher"
+                               " 或下标 0~4")
+            elif code in ("bad_target", "no_target_formation", "target_formation_empty", "no_enemy_team"):
+                out["hint"] = ("target 是**敌方编队**（与 side 相对的那一方）：名字或下标 0~4；"
+                               "该编队不存在或已空就拒（不静默换成普通冲锋）")
+            elif code == "unsupported_param":
+                out["hint"] = "riding 还没实现（agent/实体当目标也没做，本轮只有编队目标），别当成已生效"
+            elif code == "no_target":
+                out["hint"] = "这一方当前没有有兵的编队（等士兵进场后再发）"
+        return out
+
+    if name == "bl_camera_speed":
+        mode = args.get("mode") or "status"
+        if mode not in ("status", "shift", "base", "rts", "boost", "probe"):
+            return {"ok": False, "error": "mode 只接受 status/shift/base/rts/boost/probe，收到 %r" % (mode,)}
+        if mode in ("shift", "base", "rts", "boost") and args.get("value") is None:
+            return {"ok": False, "error": "mode=%s 需要 value（shift 为 ≥1 的整数，其余 0.1~1000）" % mode}
+        if mode == "status":
+            params = {}
+        elif mode == "probe":
+            params = {"mode": "probe"}
+            if args.get("action"):
+                params["action"] = args["action"]
+        else:
+            params = {"mode": mode, "value": args.get("value")}
+        resp, err = send_command("camera_speed", params, timeout=10)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        out = {"ok": bool(body.get("ok")), "mode": mode, "response": resp}
+        for k in ("legs", "leg", "value", "requested", "readBack", "changed", "note",
+                  "code", "error", "succeeded", "inMission",
+                  "phase", "seconds", "distance", "speed", "startPos", "endPos"):
+            if k in body:
+                out[k] = body[k]
+        if not body.get("ok"):
+            if body.get("code") == "not_in_mission":
+                out["hint"] = "先开一场战斗（或停在部署界面）再改相机速度"
+            elif body.get("code") == "leg_unavailable":
+                out["hint"] = ("mode=rts 需要本机装了 RTSCamera，且正处在战斗里"
+                               "（它只在 mission 内把相机控制器登记进 ACameraControllerManager）")
+            elif body.get("code") == "bad_value":
+                out["hint"] = "shift 只接受 ≥1 的整数；base/rts 接受 0.1~1000"
+            elif body.get("code") == "no_probe_start":
+                out["hint"] = "先调一次 mode=probe（不带 action）记起点，飞一段后再带 action=end"
+        return out
+
+    if name == "bl_skip_video":
+        resp, err = send_command("skip_video", {}, timeout=10)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        out = {"ok": bool(body.get("ok")), "response": resp}
+        for k in ("activeState", "via", "error", "code", "note"):
+            if k in body:
+                out[k] = body[k]
+        if not body.get("ok"):
+            out["hint"] = ("只有当活动状态是 VideoPlaybackState（开场动画）时才能跳；"
+                           "其余时刻会明确报 not_video（附当前状态名 + via=状态机是从哪拿到的）；"
+                           "拿不到状态机时报 no_state_manager")
+        return out
+
+    if name == "bl_cheat_mode":
+        mode = args.get("mode") or "status"
+        if mode not in ("status", "on", "off", "toggle"):
+            return {"ok": False, "error": "mode 只接受 status/on/off/toggle，收到 %r" % (mode,)}
+        params = {} if mode == "status" else {"mode": mode}
+        resp, err = send_command("cheat_mode", params, timeout=10)
+        if err:
+            return {"ok": False, "error": err}
+        body = resp.get("result") or {}
+        out = {"ok": bool(body.get("ok")), "mode": mode, "response": resp}
+        for k in ("cheatMode", "nativeConfig", "gameCurrent", "requested", "changed",
+                  "note", "code", "error"):
+            if k in body:
+                out[k] = body[k]
+        if not body.get("ok"):
+            out["hint"] = ("写失败要点名：报 write_failed 说明游戏版本改了 "
+                           "NativeConfig.CheatMode 的形态（setter 与后备字段都试过）")
+        return out
 
     if name == "bl_battle_status":
         resp, err = send_command("status", {}, timeout=float(_cfg("statusTimeoutSec", 10)))
@@ -1557,6 +2115,12 @@ def call_tool(name, args):
         ps_args = ["-TimeoutSec", str(timeout_sec)]
         if args.get("skipModuleList"):
             ps_args.append("-SkipModuleList")
+        excluded = args.get("excludeModules") or []
+        if isinstance(excluded, str):
+            excluded = [x.strip() for x in excluded.split(",") if x.strip()]
+        if excluded:
+            # PowerShell 会把 "A,B" 绑成 [string[]]；逐个 -ExcludeModules 也行但只会留最后一个。
+            ps_args += ["-ExcludeModules", ",".join(excluded)]
         started = _time.time()
         rc, out, err = _run_ps(script, ps_args, timeout=timeout_sec + 90.0)
         res = {"ok": rc == 0, "exitCode": rc, "launchOk": "LAUNCH OK" in (out or ""),
@@ -1568,6 +2132,24 @@ def call_tool(name, args):
                            "③ 模块列表与当前安装不符（改 tools/bl_launch.ps1 里的 $mods）")
         else:
             res["hint"] = "启动成功后 bl_status 会给出新的 pid（state=loaded）"
+        # ── 第二步（v0.8.18，用户建议）：窗口出现 ≠ 主菜单可用 ──
+        # LAUNCH OK 时游戏还在加载/启动动画里，此时 open_ui 必被判 wrong_state。
+        # 所以第二步自己等：主菜单就绪 → 必要时 ESC 跳过场 → open_ui → 每 5s 确认。
+        if res["ok"] and (args.get("enterCustomBattle") is not False):
+            sec = _enter_custom_battle(
+                ui_id=args.get("uiId") or "CustomBattle",
+                menu_timeout=float(args.get("menuTimeoutSec") or 120),
+                entry_timeout=float(args.get("entryTimeoutSec") or 60),
+                auto_open=bool(args.get("autoOpen")))
+            res["enterCustomBattle"] = sec
+            if sec.get("ok"):
+                res["hint"] = "已进自定义战斗界面（activeState=%s）" % sec.get("state")
+            elif sec.get("phase") == "await_confirm":
+                res["hint"] = ("主菜单信号已就绪，但**默认不自动 open_ui**（启动期 fire 崩过游戏）。"
+                               "看 enterCustomBattle.screenshot 确认是主菜单，再调 bl_open_ui；"
+                               "要无人值守就传 autoOpen=true")
+            else:
+                res["hint"] = "启动成功但没进到自定义战斗：%s（见 enterCustomBattle.timeline）" % sec.get("reason")
         return res
 
     if name == "bl_desktop_windows":

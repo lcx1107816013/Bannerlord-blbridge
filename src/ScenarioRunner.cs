@@ -149,7 +149,42 @@ namespace BlBridge
         }
 
         /// <summary>
+        /// 取「当前状态机」：**优先静态** `GameStateManager.Current`，取不到再退回 `Game.Current.GameStateManager`。
+        ///
+        /// 为什么优先静态（真机 2026-09-25 23:00，v0.8.21 实测）：
+        ///   启动初期与主菜单 **`Game.Current` 是 null**，而 `GameStateManager.Current` 那时**可用**
+        ///   （实测其 `ActiveState.GetType().Name == "InitialState"`）
+        ///   ⇒ 旧写法（只看 `Game.Current`）在这两个阶段恒返回"没有状态"，等于问不到。
+        /// `TaleWorlds.Core.GameStateManager.Current` 是 **public static** 属性（`GameStateManager.cs:53`），
+        /// 与 BUTR/Bannerlord.GABS 的 `core/skip_video` / `wait_for_state` 走同一条路。
+        ///
+        /// **只此一处实现**：`skip_video`、`activeState`、`close_ui` 全走这里，免得"两处各自算状态"漂移
+        /// （v0.8.10 的 B3/B5 就是这类"判定器自己没对照"的坑）。已兜异常，取不到返回 null。
+        /// </summary>
+        internal static GameStateManager ActiveStateManager()
+        {
+            try
+            {
+                GameStateManager mgr = GameStateManager.Current;
+                if (mgr != null) return mgr;
+            }
+            catch
+            {
+            }
+            try
+            {
+                Game game = Game.Current;
+                if (game != null) return game.GameStateManager;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>
         /// 当前激活的 GameState 类型名（取不到返回空串）。只读、已兜异常。
+        /// 主菜单实测是 **`InitialState`**（真机 2026-09-25 23:00）—— `Game.Current` 为 null 的时期也取得到。
         /// `UiEntry` 的 list_ui/open_ui/close_ui 与这里的开战守卫**共用这一个判据**，
         /// 免得"两处各自算状态名"漂移（v0.8.10 的 B3/B5 就是这类"判定器自己没对照"的坑）。
         /// </summary>
@@ -157,11 +192,9 @@ namespace BlBridge
         {
             try
             {
-                if (Game.Current != null && Game.Current.GameStateManager != null &&
-                    Game.Current.GameStateManager.ActiveState != null)
-                {
-                    return Game.Current.GameStateManager.ActiveState.GetType().Name;
-                }
+                GameStateManager mgr = ActiveStateManager();
+                GameState st = mgr == null ? null : mgr.ActiveState;
+                if (st != null) return st.GetType().Name;
             }
             catch
             {
@@ -1574,6 +1607,189 @@ namespace BlBridge
             }
 
             /// <summary>
+            /// 把某一方 pending 组里**落在指定编队**上的 spec 的 `Movement` 改掉，返回改了几个。
+            ///
+            /// 为什么必须有它（v0.8.23 真机实测，`order` 通道的坑）：
+            /// 组路径每 `OrderRefreshSeconds`(0.5s) 重申一次各组的 movement（`ReapplyGroupOrders`），
+            /// 所以"只用 `order` 通道手改一次 `Formation.SetMovementOrder`"会在**半秒内被我们自己**
+            /// 重申回原值 —— 真机表现：t1 设 stop 回读 `Charge→Stop` ✅，t2（12 秒后）复读
+            /// `orderBefore` 又是 `Charge`。⇒ 必须把"待重申的那个值"一起改掉（改 `spec.Movement`），
+            /// 否则本通道在 BlBridge 自己开的场次里等于失效。
+            ///
+            /// 返回 0 的两种含义（调用方要如实报告，别当成成功）：
+            ///   * 该方没走组路径（旧单值路径）⇒ 另行由 `ApplyCharge`/`TacticCharge` 管；
+            ///   * 目标编队上没有组（刷新不会碰它，但也可能被 team 战术改）。
+            /// 绝不抛。
+            /// </summary>
+            internal static int OverridePendingMovement(Team team, int formationIndex, string movement)
+            {
+                try
+                {
+                    Mission m = Mission.Current;
+                    if (m == null || team == null) return 0;
+                    List<SquadSpec> specs;
+                    if (ReferenceEquals(team, m.AttackerTeam)) specs = _pendingAttackerGroups;
+                    else if (ReferenceEquals(team, m.DefenderTeam)) specs = _pendingDefenderGroups;
+                    else specs = null;
+                    if (specs == null || specs.Count == 0) return 0;
+
+                    int changed = 0;
+                    for (int i = 0; i < specs.Count; i++)
+                    {
+                        SquadSpec s = specs[i];
+                        if (s == null) continue;
+                        BasicCharacterObject troop = Resolve(s.Troop);
+                        if (troop == null) continue;
+                        if ((int)troop.GetFormationClass() != formationIndex) continue;
+                        s.Movement = movement;
+                        // v0.8.30：改回"按名字重申" ⇒ 手动令标记必须一并清掉（三态归零），
+                        // 否则 `ReapplySideOrders` 会继续重申那个旧的点/旧的目标，movement 通道等于失效。
+                        s.ManualKind = SquadSpec.ManualNone;
+                        s.TargetFormationIndex = -1;
+                        changed++;
+                    }
+                    return changed;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+
+            /// <summary>
+            /// v0.8.30：`OverridePendingMovement` 的**指定点**版本 —— 把某一方 pending 组里落在
+            /// 指定编队上的 spec 标记为"手动指定点移动"，并记下目标点；返回改了几个。
+            ///
+            /// 为什么必须有它（与 v0.8.23 那条 movement 同步是同一个坑，只是分量多了）：
+            /// 组路径每 0.5 s 重申一次的只有 `s.Movement`（名字），指定点移动没有名字可重申
+            /// ⇒ 不改"待重申的值"的话，半秒内就会被我们自己重申回 charge，
+            /// 而 `Formation` 上当下看起来是 `Move` ⇒ 只看"我调了 API"会把它算成功。
+            ///
+            /// 返回 0 的含义与 `OverridePendingMovement` 相同（该方没走组路径 / 该编队上没有组）。
+            /// 绝不抛。
+            /// </summary>
+            internal static int OverridePendingMoveToPosition(Team team, int formationIndex,
+                                                            float x, float y, float z)
+            {
+                try
+                {
+                    Mission m = Mission.Current;
+                    if (m == null || team == null) return 0;
+                    List<SquadSpec> specs;
+                    if (ReferenceEquals(team, m.AttackerTeam)) specs = _pendingAttackerGroups;
+                    else if (ReferenceEquals(team, m.DefenderTeam)) specs = _pendingDefenderGroups;
+                    else specs = null;
+                    if (specs == null || specs.Count == 0) return 0;
+
+                    int changed = 0;
+                    for (int i = 0; i < specs.Count; i++)
+                    {
+                        SquadSpec s = specs[i];
+                        if (s == null) continue;
+                        BasicCharacterObject troop = Resolve(s.Troop);
+                        if (troop == null) continue;
+                        if ((int)troop.GetFormationClass() != formationIndex) continue;
+                        s.ManualKind = SquadSpec.ManualPosition;
+                        s.TargetFormationIndex = -1;
+                        s.MoveX = x; s.MoveY = y; s.MoveZ = z;
+                        changed++;
+                    }
+                    return changed;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+
+            /// <summary>
+            /// v0.8.31：`OverridePendingMovement` 的**指定目标编队**版本 —— 把某一方 pending 组里落在
+            /// 指定编队上的 spec 标记为"手动冲锋到敌方某编队"，并记下那个**敌方编队下标**；返回改了几个。
+            ///
+            /// 与指定点那条同理：`ChargeToTarget` 也**不是**按名字重申的东西（它绑的是 `Formation` 对象），
+            /// 不mark 的话半秒内会被组路径重申回 `s.Movement`（而 `Formation` 上当场看是 `ChargeToTarget`）。
+            /// 返回 0 的含义同其它两个 Override。绝不抛。
+            /// </summary>
+            internal static int OverridePendingChargeTarget(Team team, int formationIndex,
+                                                           int targetFormationIndex)
+            {
+                try
+                {
+                    Mission m = Mission.Current;
+                    if (m == null || team == null) return 0;
+                    List<SquadSpec> specs;
+                    if (ReferenceEquals(team, m.AttackerTeam)) specs = _pendingAttackerGroups;
+                    else if (ReferenceEquals(team, m.DefenderTeam)) specs = _pendingDefenderGroups;
+                    else specs = null;
+                    if (specs == null || specs.Count == 0) return 0;
+
+                    int changed = 0;
+                    for (int i = 0; i < specs.Count; i++)
+                    {
+                        SquadSpec s = specs[i];
+                        if (s == null) continue;
+                        BasicCharacterObject troop = Resolve(s.Troop);
+                        if (troop == null) continue;
+                        if ((int)troop.GetFormationClass() != formationIndex) continue;
+                        s.ManualKind = SquadSpec.ManualChargeTarget;
+                        s.TargetFormationIndex = targetFormationIndex;
+                        changed++;
+                    }
+                    return changed;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+
+            /// <summary>
+            /// `team` 的**敌方** Team（mission 只有攻/守两方）。拿不到（单方场次/不是攻守任一方）⇒ null。
+            /// 绝不抛。
+            /// </summary>
+            private static Team EnemyTeamOf(Team team)
+            {
+                try
+                {
+                    Mission m = Mission.Current;
+                    if (m == null || team == null) return null;
+                    Team enemy;
+                    if (ReferenceEquals(team, m.AttackerTeam)) enemy = m.DefenderTeam;
+                    else if (ReferenceEquals(team, m.DefenderTeam)) enemy = m.AttackerTeam;
+                    else return null;
+                    if (enemy == null || ReferenceEquals(enemy, team)) return null;
+                    return enemy;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
+            /// 敌方某个编队（按 `FormationClass` 下标）；编队不存在 / 已经**空**了 ⇒ null。
+            /// 空编队不算"可用目标"（`ChargeToTarget` 指向空编队没有意义，而且那多半是它已经被打光了）。
+            /// 绝不抛。
+            /// </summary>
+            private static Formation EnemyFormation(Team team, int formationIndex)
+            {
+                try
+                {
+                    if (formationIndex < 0) return null;
+                    Team enemy = EnemyTeamOf(team);
+                    if (enemy == null) return null;
+                    Formation f = enemy.GetFormation((FormationClass)formationIndex);
+                    if (f == null) return null;
+                    if (f.CountOfUnits == 0) return null;
+                    return f;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
             /// 重申某一方（有 groups 的方）每个 spec 的编队 movement order。
             /// 解析/取编队失败 ⇒ `AppendOrderError`（幂等），绝不抛。
             /// </summary>
@@ -1596,8 +1812,43 @@ namespace BlBridge
                         AppendOrderError("编队不可用 " + troop.GetFormationClass() + "（组 " + s.Troop + "）");
                         continue;
                     }
-                    string mv = s.Movement == null ? "charge" : s.Movement;
-                    f.SetMovementOrder(MapMovement(mv));
+                    if (s.ManualKind == SquadSpec.ManualPosition)
+                    {
+                        // v0.8.30：这个编队被 `order --position` 手动指定过目标点 ⇒ 重申时
+                        // 照原样重申**那个点**，绝不退回 `s.Movement`（那会把它改回 charge）。
+                        // ⚠️ 这里**不能** `using TaleWorlds.Engine;`：它带进来的 `Path` 会与
+                        // `System.IO.Path` 撞名（本文件两个都在用，实测 CS0104）⇒ 用全名。
+                        Mission cur = Mission.Current;
+                        TaleWorlds.Engine.Scene scene = cur == null ? null : cur.Scene;
+                        if (scene != null)
+                        {
+                            f.SetMovementOrder(MovementOrder.MovementOrderMove(
+                                new TaleWorlds.Engine.WorldPosition(
+                                    scene, new Vec3(s.MoveX, s.MoveY, s.MoveZ))));
+                        }
+                    }
+                    else if (s.ManualKind == SquadSpec.ManualChargeTarget)
+                    {
+                        // v0.8.31：`order --target` 手动指定过"冲锋到某个敌方编队" ⇒ 重申同一件事。
+                        // 目标编队可能已经**空了/没了**（被打光、合并）⇒ 那种情况下**跳过重申**
+                        // 并记一条错误（AppendOrderError 幂等），**不**退回 `s.Movement`
+                        // —— 退回等于偷偷把一个"冲这个编队"的令换成"冲锋"，是静默改令。
+                        Formation enemy = EnemyFormation(team, s.TargetFormationIndex);
+                        if (enemy == null)
+                        {
+                            AppendOrderError("指定目标的编队已不可用（组 " + s.Troop
+                                + " / 目标下标 " + s.TargetFormationIndex + "）⇒ 跳过重申，不改令");
+                        }
+                        else
+                        {
+                            f.SetMovementOrder(MovementOrder.MovementOrderChargeToTarget(enemy));
+                        }
+                    }
+                    else
+                    {
+                        string mv = s.Movement == null ? "charge" : s.Movement;
+                        f.SetMovementOrder(MapMovement(mv));
+                    }
                     // 重申时也钉一次（短路成本≈0），防引擎或其它逻辑中途把控制权还回去。
                     f.SetControlledByAI(false, false);
                 }

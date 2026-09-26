@@ -64,7 +64,13 @@
 param(
     [string]$GameDir = 'G:\Program Files (x86)\Steam\steamapps\common\Mount & Blade II Bannerlord',
     [int]$TimeoutSec = 180,
-    [switch]$SkipModuleList
+    [switch]$SkipModuleList,
+    # Module names to leave OUT of the _MODULES_ list (v0.8.16). Why this exists: an A/B control
+    # has to be "same launch, one module different", and unchecking boxes in the BLSE launcher
+    # is neither reproducible nor available at all in unattended launches. Usage:
+    #   .\bl_launch.ps1 -ExcludeModules RTSCamera,RTSCamera.CommandSystem
+    # Names must match the list below exactly (a typo aborts instead of silently doing nothing).
+    [string[]]$ExcludeModules = @()
 )
 
 $ErrorActionPreference = 'Continue'
@@ -156,6 +162,26 @@ if (-not (Test-Path $exe)) { Write-Host "LAUNCH FAILED: not found: $exe"; exit 1
 # a known-good run; update it the same way if the module set changes.
 $mods = '_MODULES_*Bannerlord.Harmony*Bannerlord.ButterLib*Bannerlord.UIExtenderEx*Bannerlord.MBOptionScreen*Native*SandBoxCore*Sandbox*CustomBattle*StoryMode*BirthAndDeath*FastMode*NavalDLC*WarlordsBattlefieldWarSailsEdition*BannerFix*Bloodlust*Warbandlord*WarbandlordBloodlustFix*PerfectFireArrows*RaiseYourTorch*RaiseYourBanner*MutliLittleFixes*T7TroopUnlocker*CharacterReload*BetterBanditsPlus*StrategicCampaignAI*Byzantium1071*HarvestAndProduction*BellumCivile*customloot*WanderersInParties*Bannerlord.EquipBestItem*GovernorsGonnaGovern*HeroesEvolve*BannerWand*RTSCamera*RTSCamera.CommandSystem*RealisticWeather*MBGA_AchievementEnabler*MBGA_ModernHealthBar*WB_CN*SiegeAIFix*BannerlordSage*BlBridge*_MODULES_'
 
+if ($ExcludeModules.Count -gt 0) {
+    # Accept BOTH "-ExcludeModules A,B" and '-ExcludeModules "A,B"'. The quoted form binds the
+    # WHOLE "A,B" as a single [string[]] element (observed: the guard aborted with
+    # "not present in the module list: RTSCamera,RTSCamera.CommandSystem"), so split each element
+    # on commas here instead of relying on the caller's shell quoting.
+    $ExcludeModules = @($ExcludeModules | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+    $marker = '_MODULES_'
+    $inner = $mods.Substring($marker.Length, $mods.Length - 2 * $marker.Length)
+    $all = @($inner.Split('*') | Where-Object { $_ -ne '' })
+    $missing = @($ExcludeModules | Where-Object { $all -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        Write-Host ("EXCLUDE FAILED: not present in the module list: " + ($missing -join ', '))
+        Write-Host ("known modules: " + ($all -join ', '))
+        exit 1
+    }
+    $kept = @($all | Where-Object { $ExcludeModules -notcontains $_ })
+    $mods = $marker + '*' + ($kept -join '*') + '*' + $marker
+    Write-Host ("excluding module(s): " + ($ExcludeModules -join ', ') + "  (kept " + $kept.Count + " of " + $all.Count + ")")
+}
+
 $argList = @('/singleplayer')
 if (-not $SkipModuleList) { $argList += $mods }
 $argList += 'no_watchdog'
@@ -241,10 +267,20 @@ while ((Get-Date) -lt $deadline) {
         [void][int]::TryParse($parts[1], [ref]$owner)
         $isOurs = ($owner -eq $p.Id)
         $cls = [BlLaunch]::ClassOf([IntPtr][int64]$h)
+
+        # The GAME window must be recognised BEFORE the generic dialog branch.
+        # Bug (2026-09-25, real machine): the game window belongs to the process tree we launched,
+        # so `$isOurs` was true, the dialog test matched it, and this loop kept posting VK_RETURN
+        # at the game window every 5 s while never recording $window -- the run then ended with a
+        # bogus "LAUNCH FAILED (no game window within timeout)" even though pid 66752 was already
+        # sitting at its main menu.  The game window's title carries "PID: <n>"; that is the only
+        # reliable marker (most of the title is the BLSE install path).
+        $looksLikeGame = ($title -match 'Mount and Blade II Bannerlord') -and ($title -match 'PID:')
+
         # '#32770' is the standard Win32 dialog class: this is how we recognise a modal dialog even
         # when its title does not match either of the two known ones.
-        $isDialog = ($title -match 'Safe Mode') -or ($title -match 'Mod change') -or ($cls -eq '#32770') -or $isOurs
-        if (-not $isDialog -and ($title -notmatch 'Mount and Blade II Bannerlord')) { continue }
+        $isDialog = ($title -match 'Safe Mode') -or ($title -match 'Mod change') -or ($cls -eq '#32770') -or ($isOurs -and -not $looksLikeGame)
+        if (-not $isDialog -and -not $looksLikeGame) { continue }
 
         if (-not $logged.ContainsKey($h)) {
             $logged[$h] = $true
@@ -263,21 +299,22 @@ while ((Get-Date) -lt $deadline) {
             continue
         }
 
+        # Game window first (see the comment above): record it, never answer it as a dialog.
+        if ($looksLikeGame) {
+            if ($window -eq [IntPtr]::Zero) {
+                Write-Host ("[" + (Get-Date -Format HH:mm:ss) + "] game window is up: " + $title)
+                $window = [IntPtr][int64]$h
+                $windowSeenAt = Get-Date
+            }
+            continue
+        }
+
         if ($isDialog) {
             $sawDialogThisPass = $true
             if (-not $lastTry.ContainsKey($h) -or ((Get-Date) - $lastTry[$h]).TotalSeconds -gt 5) {
                 $lastTry[$h] = Get-Date
                 Write-Host ("[" + (Get-Date -Format HH:mm:ss) + "] dialog -> answering [" + $title + "] (no focus needed)")
                 Resolve-Dialog ([IntPtr][int64]$h)
-            }
-            continue
-        }
-
-        if ($title -match 'Mount and Blade II Bannerlord') {
-            if ($window -eq [IntPtr]::Zero) {
-                Write-Host ("[" + (Get-Date -Format HH:mm:ss) + "] game window is up: " + $title)
-                $window = [IntPtr][int64]$h
-                $windowSeenAt = Get-Date
             }
             continue
         }
@@ -313,6 +350,23 @@ while ((Get-Date) -lt $deadline) {
     }
 }
 
-if ($window -eq [IntPtr]::Zero) { Write-Host 'LAUNCH FAILED (no game window within timeout)'; exit 1 }
+if ($window -eq [IntPtr]::Zero) {
+    # Last-resort check (defence in depth): the loop above can still miss the window.  Ask the
+    # processes instead of declaring failure, and SAY which path recognised it -- a false
+    # "LAUNCH FAILED" costs a whole relaunch (real machine, 2026-09-25: pid 66752 was already at
+    # the main menu while this script exited 1).
+    $proc = @(Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProcessName -match 'Bannerlord' -and $_.MainWindowTitle -ne '' } |
+        Select-Object -First 1)
+    if ($proc.Count -gt 0) {
+        $pTitle = $proc[0].MainWindowTitle
+        Write-Host ("[" + (Get-Date -Format HH:mm:ss) + "] game window recognised via process fallback: pid=" +
+            $proc[0].Id + " title=[" + $pTitle + "]")
+        Write-Host 'LAUNCH OK (window recognised via process fallback)'
+        exit 0
+    }
+    Write-Host 'LAUNCH FAILED (no game window within timeout)'
+    exit 1
+}
 Write-Host 'LAUNCH OK'
 exit 0

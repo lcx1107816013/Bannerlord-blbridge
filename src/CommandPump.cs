@@ -207,6 +207,49 @@ namespace BlBridge
             {
                 return UiEntry.HandleCloseUi(id, raw);
             }
+            // ── 幽灵/自由相机（v0.8.16，C 方案）──────────────────────────────
+            // 用引擎自带的 IsCheatGhostMode（开发者自由镜头），运行时即可开关，
+            // **对玩家自己打的战斗同样有效**（与 spectate 那条"只对 AI 场次"不同）。
+            if (method == "ghost_camera")
+            {
+                return Protocol.Success(id, GhostCamera.HandleCommand(raw));
+            }
+            // ── 相机移动速度（v0.8.17）───────────────────────────────────────
+            // 用户反馈"原版相机移动速度太慢了"。三条腿：官方控制台函数（Shift 倍率）/
+            // 引擎基础倍率（反射）/ RTSCamera 的 MovementSpeedFactor（反射，最有效）。
+            // 每条腿都**写完回读**，并且失败要点名 —— 见 CameraSpeed.cs 的类注释。
+            if (method == "camera_speed")
+            {
+                return Protocol.Success(id, CameraSpeed.HandleCommand(raw));
+            }
+            // ── 启动/流程控制（v0.8.20）─────────────────────────────────────
+            // 两者都是从 BUTR/Bannerlord.GABS 的做法学来的（见 src/GameFlow.cs 的类注释）：
+            //   skip_video  = 判 VideoPlaybackState → OnVideoFinished()，替掉"盲按 ESC"
+            //   cheat_mode  = 写 NativeConfig.CheatMode（私有 setter/后备字段）+ 回读，
+            //                 解开引擎相机的倍率热键与速度读数
+            if (method == "skip_video")
+            {
+                return Protocol.Success(id, GameFlow.HandleSkipVideo(raw));
+            }
+            if (method == "cheat_mode")
+            {
+                return Protocol.Success(id, GameFlow.HandleCheatMode(raw));
+            }
+            // ── 战斗中途改令（v0.8.23）───────────────────────────────────────
+            // 与开战 DSL 同一条下发路径（Formation.SetMovementOrder + MapMovement），
+            // 但**必须在 mission 内**：mission 之外碰 MovementOrder 会永久污染该类型。
+            // 两条硬约束与判据见 src/BattleOrders.cs 的类注释。
+            if (method == "order")
+            {
+                return Protocol.Success(id, BattleOrders.HandleCommand(raw));
+            }
+            // ── 接管士兵（v0.8.25，最小版：改 Mission.MainAgent + Controller = Player）──
+            // 官方那条路（Mission.CanTakeControlOfAgent）只在主角阵亡后才允许、且**不改 MainAgent**；
+            // 五步做法与逐条出处见 src/ControlAgent.cs 的类注释。
+            if (method == "control_agent")
+            {
+                return Protocol.Success(id, ControlAgent.HandleCommand(raw));
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 

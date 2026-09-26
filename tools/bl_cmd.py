@@ -45,6 +45,16 @@ def main(argv):
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("ping", help="连通性/版本")
+    sub.add_parser("skip-video", help="跳过开场动画（判 VideoPlaybackState → OnVideoFinished，不模拟 ESC）")
+    cm = sub.add_parser("cheat", help="开关作弊模式（写 NativeConfig.CheatMode + 回读）")
+    cm.add_argument("mode", nargs="?", default="status", choices=("status", "on", "off", "toggle"),
+                    help="默认 status（只查）；开了它，引擎相机的 Ctrl+↑/↓ 倍率热键与速度读数才可用")
+    eb = sub.add_parser("enter-battle", help="启动第二步：等主菜单就绪 → ESC 跳过场 → 进自定义战斗（每 5s 确认）")
+    eb.add_argument("--ui-id", "--id", dest="ui_id", default="CustomBattle",
+                    help="要进的入口 id，默认 CustomBattle")
+    eb.add_argument("--menu-timeout", type=float, default=120.0, help="等主菜单就绪的上限秒数")
+    eb.add_argument("--entry-timeout", type=float, default=60.0, help="open_ui 后等状态落地的上限秒数")
+    eb.add_argument("--no-esc", action="store_true", help="不按 ESC 跳过场动画")
     sub.add_parser("status", help="推演状态机")
     sub.add_parser("abort", help="中止当前推演")
 
@@ -74,6 +84,64 @@ def main(argv):
     ra.add_argument("--set", action="append", dest="sets", default=None,
                     help="逐键写入：--set ElevatedHeightInSiege=10（可重复）")
     ra.add_argument("--dry-run", action="store_true", help="只预览不写入")
+
+    # ── 幽灵/自由相机（v0.8.16，C 方案：引擎自带的开发者自由镜头）──
+    gc = sub.add_parser("ghost", help="开关引擎自带的自由观察相机（幽灵模式）")
+    gc.add_argument("mode", nargs="?", default="status",
+                    choices=("status", "on", "off", "toggle"),
+                    help="默认 status（只查）；任何一场战斗里都能切，包括你自己打的")
+
+    # ── 相机移动速度（v0.8.17：三条腿，见 src/CameraSpeed.cs 的类注释）──
+    cs = sub.add_parser("camera-speed", help="相机移动速度（shift / base / rts / boost / probe）")
+    cs.add_argument("mode", nargs="?", default="status",
+                    choices=("status", "shift", "base", "rts", "boost", "probe"),
+                    help="shift=引擎自由相机的 Shift 倍率（官方控制台函数，**不用作弊模式**）；"
+                         "base=引擎基础倍率（反射，⚠️ 引擎把速度分量 clamp 在 ±20）；"
+                         "rts=RTSCamera 的 MovementSpeedFactor（最有效，上限随速度一起放大）；"
+                         "boost=三条可用腿一次设成同一个值；"
+                         "probe=测速探针（不带 --end 记起点，带 --end 记终点并算速度）；默认 status（只查）")
+    cs.add_argument("value", nargs="?", type=float, default=None,
+                    help="倍率：shift 需 ≥1 的整数，其余 0.1~1000")
+    cs.add_argument("--end", action="store_true", dest="probe_end",
+                    help="仅 mode=probe 用：结束测量并返回 位移/秒数/平均速度")
+
+    # ── 接管士兵（v0.8.25：最小版 = 改 Mission.MainAgent + Controller=Player）──
+    ca = sub.add_parser("control-agent", help="接管某个友方士兵（take / release / status）")
+    ca.add_argument("mode", nargs="?", default="take", choices=("take", "release", "status"),
+                    help="默认 take（接管）；release = 换回接管前记录的原始主角色；status = 只读现状")
+    ca.add_argument("--agent-index", dest="agent_index", type=int, default=None,
+                    help="引擎的 agent.Index（遥测/事件里的 agent 字段）；优先级最高")
+    ca.add_argument("--troop", default=None, help="兵种 id（Character.StringId）：取该方第一个存活的")
+    ca.add_argument("--formation", default=None,
+                    help="Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或下标 0~4")
+    ca.add_argument("--side", choices=("player", "attacker", "defender"), default="player",
+                    help="从哪一方里挑目标，默认 player（但只接受玩家方的 agent）")
+
+    # ── 战斗中途改令（v0.8.23：mission 内 SetMovementOrder + 当场回读）──
+    od = sub.add_parser("order", help="战斗中途改令（movement / 指定点 / 指定目标 / 阵列 / 射击纪律，均当场回读）")
+    od.add_argument("movement", nargs="?", choices=("charge", "advance", "fallback", "stop", "retreat"),
+                    help="要下发的 movement（hold 已移除：引擎层本就等同 stop）；"
+                         "与 --position / --target 互斥、三者至少给一个"
+                         "（只给 --arrangement / --firing 也行）")
+    od.add_argument("--position", default=None,
+                    help='指定点移动（v0.8.30）："x,y" 或 "x,y,z"（英文逗号，单位米；z 省略 = 0，'
+                         "由引擎按地面补 Z）。与位置参数 movement / --target 互斥")
+    od.add_argument("--target", default=None,
+                    help="冲锋到指定**敌方编队**（v0.8.31）：Infantry/Ranged/Cavalry/HorseArcher/"
+                         "Skirmisher 或下标 0~4（敌方 = 与 --side 相对的那一方）。"
+                         "回读 targetAfter / targetDistance（后者是双方编队重心距离，行为判据）。"
+                         "与位置参数 movement / --position 互斥")
+    od.add_argument("--side", choices=("player", "attacker", "defender"), default="player",
+                    help="哪一方，默认 player（mission 里玩家侧仍是攻/守之一）")
+    od.add_argument("--formation", default=None,
+                    help="Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或下标 0~4；不传 = 该方所有有兵编队")
+    od.add_argument("--arrangement", default=None,
+                    choices=("line", "shieldwall", "circle", "square", "skein", "column", "loose", "scatter"),
+                    help="编队阵列（`ArrangementOrder`）；不传 = 不改")
+    od.add_argument("--firing", default=None, choices=("fireAtWill", "holdFire"),
+                    help="射击纪律（`FiringOrder`，引擎只有两档）；不传 = 不改")
+    od.add_argument("--no-detach-ai", action="store_true",
+                    help="不连带 SetControlledByAI(false,false)——用于对照实验（大概率被该方战术覆盖）")
 
     p = sub.add_parser("start", help="开一场 AI 对 AI 战斗")
     p.add_argument("--attacker", required=True)
@@ -166,11 +234,73 @@ def main(argv):
     if args.cmd == "ping":
         return _print(*bl_mcp.send_command("ping", {}, timeout=10))
 
+    if args.cmd == "skip-video":
+        return _print(*bl_mcp.send_command("skip_video", {}, timeout=10))
+
+    if args.cmd == "cheat":
+        params = {} if args.mode == "status" else {"mode": args.mode}
+        return _print(*bl_mcp.send_command("cheat_mode", params, timeout=10))
+
+    if args.cmd == "enter-battle":
+        out = bl_mcp._enter_custom_battle(ui_id=args.ui_id, menu_timeout=args.menu_timeout,
+                                          entry_timeout=args.entry_timeout,
+                                          skip_intro=not args.no_esc)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0 if out.get("ok") else 1
+
+    if args.cmd == "control-agent":
+        params = {"mode": args.mode, "side": args.side}
+        if args.agent_index is not None:
+            params["agentIndex"] = args.agent_index
+        if args.troop:
+            params["troop"] = args.troop
+        if args.formation:
+            params["formation"] = args.formation
+        return _print(*bl_mcp.send_command("control_agent", params, timeout=15))
+
+    if args.cmd == "order":
+        given = [k for k, v in (("movement", args.movement), ("--position", args.position),
+                                ("--target", args.target)) if v]
+        if len(given) > 1:
+            print("错误: %s 互斥 —— 一个编队只能有一个 movement order" % " / ".join(given))
+            return 2
+        if not (given or args.arrangement or args.firing):
+            print("错误: movement / --position / --target / --arrangement / --firing 至少要给一个")
+            return 2
+        params = {"side": args.side}
+        if args.movement:
+            params["movement"] = args.movement
+        if args.position:
+            params["position"] = args.position
+        if args.target:
+            params["target"] = args.target
+        if args.formation:
+            params["formation"] = args.formation
+        if args.arrangement:
+            params["arrangement"] = args.arrangement
+        if args.firing:
+            params["firing"] = args.firing
+        if args.no_detach_ai:
+            params["detachAI"] = False
+        return _print(*bl_mcp.send_command("order", params, timeout=10))
+
     if args.cmd == "status":
         return _print(*bl_mcp.send_command("status", {}, timeout=10))
 
     if args.cmd == "abort":
         return _print(*bl_mcp.send_command("abort", {}, timeout=20))
+
+    if args.cmd == "ghost":
+        params = {} if args.mode == "status" else {"mode": args.mode}
+        return _print(*bl_mcp.send_command("ghost_camera", params, timeout=10))
+
+    if args.cmd == "camera-speed":
+        params = {} if args.mode == "status" else {"mode": args.mode}
+        if args.value is not None:
+            params["value"] = args.value
+        if getattr(args, "probe_end", False):
+            params["action"] = "end"
+        return _print(*bl_mcp.send_command("camera_speed", params, timeout=10))
 
     if args.cmd == "rts-config":
         try:

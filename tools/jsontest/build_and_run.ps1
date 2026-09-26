@@ -14,7 +14,9 @@ $src = @(
     (Join-Path $Root 'src\ProbePolicy.cs'),
     (Join-Path $Root 'src\BuildInfo.cs'),
     (Join-Path $Root 'src\BridgeConfigFile.cs'),
-    (Join-Path $Root 'src\SquadSpec.cs')       # T4：纯 BCL（不碰 TaleWorlds），故可离线单测
+    (Join-Path $Root 'src\SquadSpec.cs'),      # T4：纯 BCL（不碰 TaleWorlds），故可离线单测
+    (Join-Path $Root 'src\MainMenuStates.cs'), # v0.8.22：主菜单层面状态名（与 bl_mcp.py 的集合同源）
+    (Join-Path $Root 'src\OrderSpec.cs')       # v0.8.23：改令名字表/校验器（安全边界，碰 TaleWorlds 之前）
 )
 Write-Output ("[1/2] compile offline unit tests -> " + $out)
 & $csc /nologo /target:exe /out:$out @src

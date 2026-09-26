@@ -100,6 +100,20 @@ namespace BlBridge
                 StringBuilder sb = new StringBuilder();
                 sb.Append("{\"moduleLoaded\":").Append(Jw.B(Module.CurrentModule != null));
                 sb.Append(",\"activeState\":").Append(Protocol.Q(ScenarioRunner.ActiveGameStateName()));
+                // v0.8.19：顶层屏幕名。存在理由（真机崩过，2026-09-25）：启动/过场期间 activeState 同样是空串，
+                // 拿它单独当「主菜单就绪」的判据，会让 open_ui 在**启动动画期间**执行初始状态选项 ——
+                // 22:39:53 fire → 22:40:14 崩溃（bridge_status.json: cleanExit=false，rgl_log 里有崩溃栈）。
+                // 屏幕名是更硬的判据（官方 GABS 的 `ui/get_screen` 也是这个思路）。
+                string topScreenName = "";
+                try
+                {
+                    var ts = TaleWorlds.ScreenSystem.ScreenManager.TopScreen;
+                    if (ts != null) topScreenName = ts.GetType().Name;
+                }
+                catch
+                {
+                }
+                sb.Append(",\"topScreen\":").Append(Protocol.Q(topScreenName));
                 sb.Append(",\"options\":").Append(OptionsJson());
                 sb.Append(",\"scenes\":").Append(BattleScenesJson());
                 sb.Append(",\"sceneTable\":").Append(SceneTableJson(modeFilter, limit));
@@ -149,10 +163,13 @@ namespace BlBridge
                 // **在已经加载了 Game 的状态下执行它，状态机会卡在 `GameLoadingState` 不再推进**
                 // （2026-09-25 真机：从 CustomBattleState 调 open_ui，90 秒 + 多次轮询仍是
                 //  GameLoadingState、日志无异常、进程仍在响应 ⇒ 只能重启游戏收场）。
-                // ⇒ 判据取"主菜单 = 没有激活的 Game 状态"（实测：主菜单与 PopState 回主菜单后
-                //    `Game.Current.GameStateManager.ActiveState` 都取不到，名字为空串）。
-                // Fail Fast：状态栈非空时一律拒绝，并告诉调用方怎么回到主菜单。
-                if (stateBefore.Length != 0)
+                // ⇒ 判据取"主菜单层面"：`MainMenuStates.IsMenuLevel()`（空串或 `InitialState`）。
+                //    ⚠️ v0.8.22 更正：旧实现写的是 `stateBefore.Length != 0`（当时实测"主菜单取不到名字 = 空串"），
+                //    而把"取状态机"改成静态优先后，主菜单的名字变成 **`InitialState`**
+                //    ⇒ 那条判据会把**真主菜单**判成"已加载 Game"，`open_ui` 一律被拒
+                //    （真机实测 2026-09-25 23:05：`requested=None` / `state=InitialState`；修完即通过）。
+                // Fail Fast：集合外的状态一律拒绝，并告诉调用方怎么回到主菜单。
+                if (!MainMenuStates.IsMenuLevel(stateBefore))
                 {
                     return Protocol.Failure(id, "wrong_state_for_ui",
                         "初始状态选项只在**主菜单**可用（当前状态: " + stateBefore + "）。" +
@@ -263,12 +280,15 @@ namespace BlBridge
                     message = "任务仍在进行（Mission.Current 非 null）：先等它结束或调用 abort，再返回主菜单";
                     return false;
                 }
-                if (Game.Current == null || Game.Current.GameStateManager == null)
+                // v0.8.22：与 `ActiveGameStateName()` 共用同一个"取状态机"实现（静态优先）——
+                // 否则会出现"判据说在 CustomBattleState、真要 Pop 时却说 Game.Current 不可用"的自相矛盾。
+                GameStateManager closeMgr = ScenarioRunner.ActiveStateManager();
+                if (closeMgr == null)
                 {
-                    message = "Game.Current / GameStateManager 不可用";
+                    message = "GameStateManager 不可用（静态 GameStateManager.Current 与 Game.Current 都取不到）";
                     return false;
                 }
-                Game.Current.GameStateManager.PopState(0);
+                closeMgr.PopState(0);
                 Log("close_ui: PopState(0) 已请求（state=" + wantState + "，官方 CustomBattleVM.ExecuteBack 同路径）");
                 return true;
             }
