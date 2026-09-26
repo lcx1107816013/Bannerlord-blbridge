@@ -2930,3 +2930,65 @@ t=+36.0s activeState='CustomBattleState'   ⇒ ok:true / in_custom_battle
 - 部署链（诚实记录，同一版本号部署过 2 次）：`5D330F15`（target + 三态）→ **`AB936AE7`（最终：+ 空编队信号 + 全套冒烟）**。
 - 收尾：游戏停在**自定义战斗界面**（v0.8.31 进程内），计划任务已注销，临时探针脚本已删。
 
+**10.13 v0.8.32：`order` 补齐 `riding`（上下马）与 `targetAgent`（攻击指定敌方单位）＋ 开战 DSL `formation` 死字段的显式信号 ＋ RTSCamera 平滑推镜（2026-09-26 18:3x–19:5x）**
+
+- 起因：交接待办四项一次做完 —— ①`order --riding` ②开战 DSL `formation` 死字段 ③`target` 的 agent/实体目标 ④RTSCamera 平滑推镜。
+- 引擎侧依据（反编译 + 上游真源码，不猜）：
+  * `Formation.SetRidingOrder(RidingOrder)`（`Formation.cs:771`，内部有 `if (RidingOrder != order)` 守卫 ⇒ 值本来就相同时
+    **什么都不做**，回读仍相等）；档位只有 **3** 个（`RidingOrder.cs:5-10`）：`Free` / `Mount` / `Dismount`；
+    回读 `Formation.RidingOrder`（public get）。`RidingOrder` 与 `MovementOrder` 同类 —— 静态字段在类型初始化时构造。
+  * `MovementOrder.MovementOrderAttackEntity(GameEntity, bool surroundEntity)`（`MovementOrder.cs:417`）；
+    回读判据 = `MovementOrderEnum.AttackEntity` + `MovementOrder.TargetEntity`（`:83` 是 public 字段）；
+    `Agent → GameEntity` 走 `Agent.AgentVisuals.GetEntity()`（`MBAgentVisuals.cs:46`）。
+    原版同款用法：`OrderController.cs:1033`（`OrderType.AttackEntity`，`surround = !(missionObject is CastleGate)`）。
+  * `FormationClassExtensions.FallbackClass()`（`FormationClass.cs:96-107`）是"实际编队家族"的折叠口径：
+    `Ranged/Skirmisher→Ranged`、`Cavalry/HeavyCavalry→Cavalry`、`HorseArcher/LightCavalry→HorseArcher`、其余→`Infantry`。
+  * RTSCamera 的平滑推镜三方法在 **`MissionSharedLibrary.Utilities.Utility`**（RTSCamera 附带的 `MissionLibrary.dll`，
+    本机反编译核对）：`BeforeSetMainAgent(Agent):bool` / `AfterSetMainAgent(bool, MissionScreen, bool)`；
+    且 `AfterSetMainAgent(should=false, …)` 那一支**正是**我们原本手写的 `_isPlayerAgentAdded = false`
+    ⇒ v0.8.31 之前只做了"半条腿"（`should=true` 那一支的 `SmoothMoveToAgent` 没调）。
+- 口径（本轮拍板，写给下一个会话）：
+  * `targetAgent` 用 **agent 下标**（`Agent.Index`）指定，调用方从遥测 / `bl_control_agent status` 取 ——
+    **不自己"挑最像的敌人"**（挑选口径一旦藏进工具里，实验就不可复现）；
+  * `movement / position / target / targetAgent` **四者互斥**（都写同一个 `Formation.SetMovementOrder`）；
+    `riding` 与它们**正交**（管"骑不骑"、不管"去哪"），**不参与**那条互斥；
+  * 开战 DSL 的 `formation` 取「**保留字段 + 运行时比对 + 显式告警**」这一档（不删、也不改成硬拒 —— 后者属动开战通道、
+    回归面更大，**留给用户再次拍板**）。
+- **真机抓到的缺陷（本轮唯一一个，已修 + 已复验）**：`formationWarnings` **跨场残留** —— 清空语句原先写在
+  `if (attackerGrouped || defenderGrouped)` 块内 ⇒ **不带 groups 的 start 不会重置**。
+  受控实验：A 场（带 groups、场景名故意写错 ⇒ start 失败）→ B 场（不带 groups）⇒ **B 场响应里出现了 A 场的告警**。
+  修法：清空移到 `Start()` 开头（Busy 短路之后，正在跑的那一场不该被一个被拒的请求清掉）；复验 B 场 ⇒ `formationWarnings: []`。
+- 真机验证（0.8.32，AI 场次；未注明处均已通过）：
+
+| 判据 | 实测 |
+|---|---|
+| `riding` 下发 + 回读 | `order --riding dismount --side defender --formation Infantry`：`ridingBefore=Free → ridingAfter=Dismount` |
+| `riding` 持久性 | 隔 **12 秒**复读：`ridingBefore=Dismount`（既不在组路径重申范围，也没弹回 Free）|
+| `riding` 往返 | `mount` ⇒ `Dismount→Mount`；`free` ⇒ `Mount→Free` |
+| `riding` 错误分支（**原始通道**）| `ride` ⇒ `bad_riding`（消息点名三档）|
+| `formationWarnings` 正向 | 弓手写 `Infantry` / 步兵写 `Ranged` ⇒ **2 条**，逐条点名"组号 + 兵种 + 实际编队" |
+| `formationWarnings` 修复 | 不带 groups 的 start ⇒ **`[]`**（修复前会带出上一场的告警）|
+| `targetAgent` 下发 + 回读 | `order --targetAgent 3 --side attacker --formation Infantry`：`orderBefore=Stop → orderAfter=AttackEntity`、`targetAgentTroop=battanian_fian_champion#3`、`targetEntitySet=true`、`targetAgentAlive=true` |
+| `targetAgent` 持久性 | 隔 **10 秒**复读：`orderBefore=Charge`（组路径重申照常）但 **`orderAfter` 仍是 `AttackEntity`** ⇒ 手动令优先成立 |
+| `targetAgent` **行为证据** | `targetDistance` **154.3 m → 11.9 m**（10 秒内）；同批 `count` 40 → 21（确实在打）|
+| `targetAgent` 清标记 | `order stop` ⇒ `AttackEntity→Stop`；+12 秒复读仍是 `Stop`（旧目标没有被重申回来）|
+| 四者互斥（原始通道）| `movement+targetAgent` / `position+targetAgent` / `target+targetAgent` ⇒ 都 `bad_request` 并列出冲突项 |
+| `targetAgent` 负向 | 自己人 ⇒ `target_agent_not_enemy`；不存在下标 ⇒ `no_target_agent` |
+| 空编队信号（回归）| `targetAgent` 打到空编队 ⇒ `emptyFormation:true` + `count=0`（老信号在新参数上照常生效）|
+| `cameraFollow`（RTSCamera）| `applied=true`、`shouldSmooth=true`、`why=""`（上游两个方法**真的调到了**）；⚠️ `lastFollowed=(none)` —— AI 场次没有真人控制器 ⇒ 跟随目标没写进去，**真人场次才能验到** |
+
+- 接口变化：`order` 新增 `riding`（`free/mount/dismount`）与 `targetAgent`（整数下标）；`UnsupportedParams` **清空**
+  （已无"先占位、后实现"的参数，空表结构保留）；`bl_start_battle` 返回值新增 `formationWarnings`；
+  `bl_control_agent` 返回值新增 `cameraFollow`（`applied` / `shouldSmooth` / `lastFollowed` / `shouldSmoothFlagNext` / `why`），
+  并新增 `src/CameraFollow.cs`（反射调 RTSCamera，找不到就如实报 `why`，**不静默**、不改旧行为）。
+  `targetAgent` 走 `SquadSpec.ManualKind` 第四态（`ManualAttackAgent = 3`，且 `ManualNone` 必须 = 0 的老断言仍锁着）；
+  目标**会死** ⇒ 阵亡后重申**跳过**并记 order error，**不**退回 `s.Movement`。
+- 数字：jsontest **134 → 146**；Python 断言 **295 → 306**；编码体检 **84 文件** ✅；
+  `buildcheck` **四段一致**（**0.8.32**，最终 dll sha `30730ABA6761BAA9`）。
+- 部署链（诚实记录，同一版本号部署过 2 次）：`3F279C73A4E557BE`（首版）→ **`30730ABA6761BAA9`（最终：formationWarnings 残留修复）**。
+- 未核实 / 未处置：① `riding` 的**行为**变化（真下马 / 真上马）未逐步观测 —— 本轮只验"值写进去且留得住"，
+  步兵编队给 `mount` 也不报错（引擎是否让他们去找马未记）；② `cameraFollow` 的 `lastFollowed` 在真人场次没验；
+  ③ 开战 DSL 的 `formation` 仍是**仅回显**（只是不再静默），"硬拒 / 删字段"两档**留给用户拍板**；
+  ④ 收尾：游戏留在**自定义战斗界面**（v0.8.32 进程内），计划任务 `BlBridgeDevLaunch` 已注销，临时探针脚本已删。
+
+

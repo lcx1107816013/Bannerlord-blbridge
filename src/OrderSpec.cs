@@ -53,6 +53,25 @@ namespace BlBridge
             "fireAtWill", "holdFire"
         };
 
+        /// <summary>
+        /// v0.8.32：可下发的**骑乘令**（`Formation.SetRidingOrder`，引擎 `RidingOrder.RidingOrderEnum`）。
+        /// 引擎**只有三档**（`RidingOrder.cs:5-10`）：`Free` / `Mount` / `Dismount`
+        /// （`Free` = 不干预，由 AI/兵种自己决定上下马）。
+        ///
+        /// 与 movement order（`MovementOrder`）**正交**：那条管"去哪"，这条管"骑不骑"，
+        /// 所以它**不参与** movement / position / target 的三者互斥。
+        /// </summary>
+        internal static readonly string[] RidingNames = new string[] {
+            "free", "mount", "dismount"
+        };
+
+        /// <summary>
+        /// v0.8.32：`targetAgent`（把某个**敌方 agent** 当目标）的下标上限 —— 纯防御性上界。
+        /// 一场战斗的 agent 数远小于它（400v400 也只有约 800 个），给 100 万是为了"明显是手滑"的值
+        /// （如把内存地址/时间戳填进来）能被拒，而不是静默去海里捞。
+        /// </summary>
+        internal const int AgentIndexLimit = 1000000;
+
         /// <summary>`FormationClass` 名或下标 → 0~4。大小写不敏感；非法返回 false（**不回落默认值**）。</summary>
         internal static bool TryFormationIndex(string raw, out int index)
         {
@@ -107,6 +126,16 @@ namespace BlBridge
             string s = raw.Trim();
             for (int i = 0; i < FiringNames.Length; i++)
                 if (string.Equals(FiringNames[i], s, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>大小写不敏感地判断骑乘令是否在白名单内（**碰 `RidingOrder` 之前**用）。</summary>
+        internal static bool IsRiding(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return false;
+            string s = raw.Trim();
+            for (int i = 0; i < RidingNames.Length; i++)
+                if (string.Equals(RidingNames[i], s, StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         }
 

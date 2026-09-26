@@ -118,11 +118,11 @@ def main(argv):
                     help="从哪一方里挑目标，默认 player（但只接受玩家方的 agent）")
 
     # ── 战斗中途改令（v0.8.23：mission 内 SetMovementOrder + 当场回读）──
-    od = sub.add_parser("order", help="战斗中途改令（movement / 指定点 / 指定目标 / 阵列 / 射击纪律，均当场回读）")
+    od = sub.add_parser("order", help="战斗中途改令（movement / 指定点 / 指定目标 / 指定单位 / 阵列 / 射击纪律 / 上下马，均当场回读）")
     od.add_argument("movement", nargs="?", choices=("charge", "advance", "fallback", "stop", "retreat"),
                     help="要下发的 movement（hold 已移除：引擎层本就等同 stop）；"
-                         "与 --position / --target 互斥、三者至少给一个"
-                         "（只给 --arrangement / --firing 也行）")
+                         "与 --position / --target / --target-agent 四者互斥、至少给一个"
+                         "（只给 --arrangement / --firing / --riding 也行）")
     od.add_argument("--position", default=None,
                     help='指定点移动（v0.8.30）："x,y" 或 "x,y,z"（英文逗号，单位米；z 省略 = 0，'
                          "由引擎按地面补 Z）。与位置参数 movement / --target 互斥")
@@ -140,6 +140,17 @@ def main(argv):
                     help="编队阵列（`ArrangementOrder`）；不传 = 不改")
     od.add_argument("--firing", default=None, choices=("fireAtWill", "holdFire"),
                     help="射击纪律（`FiringOrder`，引擎只有两档）；不传 = 不改")
+    od.add_argument("--target-agent", dest="target_agent", type=int, default=None,
+                    help="攻击指定**敌方单位**（v0.8.32）：agent 下标（`Agent.Index`，从遥测或 "
+                         "control-agent status 的 candidates 取）。引擎侧是 "
+                         "MovementOrderAttackEntity（surround=true）。回读 targetEntitySet / "
+                         "targetAgentAlive / targetDistance（后者是编队重心到该单位的距离，行为判据）。"
+                         "与 movement / --position / --target 四者互斥。⚠️ 目标会死：阵亡后重申会跳过并记 "
+                         "order error，不静默改成冲锋")
+    od.add_argument("--riding", default=None, choices=("free", "mount", "dismount"),
+                    help="骑乘令（v0.8.32，`Formation.SetRidingOrder`，引擎三档：free 不干预 / "
+                         "mount 上马 / dismount 下马）；与 movement order 正交（只管骑不骑、不管去哪），"
+                         "所以**不参与** movement / --position / --target 的三者互斥；不传 = 不改")
     od.add_argument("--no-detach-ai", action="store_true",
                     help="不连带 SetControlledByAI(false,false)——用于对照实验（大概率被该方战术覆盖）")
 
@@ -180,7 +191,9 @@ def main(argv):
                    help="攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔，"
                         '如 "imperial_legionary:10:Infantry:stop|khuzait_khans_guard:5:HorseArcher:charge"'
                         "（给了它则组内兵力取代 --attacker/--a，但 --attacker/--defender 仍须照常提供"
-                        "—— 它们此时只用于回显；非法直接报错，不静默跳过）")
+                        "—— 它们此时只用于回显；非法直接报错，不静默跳过。"
+                        "⚠️ 第 3 字段 formation **不决定编队**（编队由兵种自身决定，该字段只回显）："
+                        "写了不同族的名字会在 start 返回的 formationWarnings 里被点名，但不阻断开战）")
     p.add_argument("--defender-groups", dest="defender_groups", default=None,
                    help="守方多兵种/战术组，语法同 --attacker-groups（组内兵力取代 --defender/--d，"
                         "但 --attacker/--defender 仍须照常提供 —— 它们此时只用于回显）")
@@ -259,13 +272,17 @@ def main(argv):
         return _print(*bl_mcp.send_command("control_agent", params, timeout=15))
 
     if args.cmd == "order":
+        # ⚠️ 用 `not in (None, "")` 而不是 `if v`：agent 下标可以是 **0**，`0` 是假值，
+        # 用 `if v` 会把 `--target-agent 0` 静默当成"没给"（这类静默正是本项目最忌讳的）。
         given = [k for k, v in (("movement", args.movement), ("--position", args.position),
-                                ("--target", args.target)) if v]
+                                ("--target", args.target),
+                                ("--target-agent", args.target_agent)) if v not in (None, "")]
         if len(given) > 1:
             print("错误: %s 互斥 —— 一个编队只能有一个 movement order" % " / ".join(given))
             return 2
-        if not (given or args.arrangement or args.firing):
-            print("错误: movement / --position / --target / --arrangement / --firing 至少要给一个")
+        if not (given or args.arrangement or args.firing or args.riding):
+            print("错误: movement / --position / --target / --target-agent / --arrangement / "
+                  "--firing / --riding 至少要给一个")
             return 2
         params = {"side": args.side}
         if args.movement:
@@ -274,12 +291,16 @@ def main(argv):
             params["position"] = args.position
         if args.target:
             params["target"] = args.target
+        if args.target_agent is not None:
+            params["targetAgent"] = args.target_agent
         if args.formation:
             params["formation"] = args.formation
         if args.arrangement:
             params["arrangement"] = args.arrangement
         if args.firing:
             params["firing"] = args.firing
+        if args.riding:
+            params["riding"] = args.riding
         if args.no_detach_ai:
             params["detachAI"] = False
         return _print(*bl_mcp.send_command("order", params, timeout=10))

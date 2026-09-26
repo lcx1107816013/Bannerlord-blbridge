@@ -814,6 +814,10 @@ TOOLS = [
                         "包含四步：老主角色交回 AI（否则同编队两个 Controller=Player 会让编队逻辑栈溢出）→ "
                         "改 MainAgent → 目标 Controller=Player + 清 AIStateFlags + 摘 VictoryComponent → "
                         "复位 MissionScreen._isPlayerAgentAdded（反射，失败只降级并回传 screenReset=false）。"
+                        "v0.8.32：装了 RTSCamera 时还会走它自己的**平滑推镜**"
+                        "（反射 `Utility.BeforeSetMainAgent` → 赋值 → `AfterSetMainAgent`），"
+                        "结果在 `cameraFollow`（applied / shouldSmooth / lastFollowed / why）；"
+                        "没装则退回只复位 screen（行为同旧版）。"
                         "选目标：`agentIndex` > `troop` > `formation` > 该方第一个存活者；只允许玩家方（拒绝敌人）。"
                         "`mode=release` 换回接管前记录的那个主角色；`mode=status` 只看现状（不改任何东西）。"
                         "⚠️ 与 RTSCamera 并存时它的 `ControlTroop` 键也会改 MainAgent，两边会互相覆盖。"
@@ -834,7 +838,8 @@ TOOLS = [
     {
         "name": "bl_order",
         "description": ("战斗中途改令：对**正在进行**的战斗里某一方的编队改 movement / 移动到指定点 / "
-                        "冲锋到指定敌方编队 / 阵列 / 射击纪律。与开战 DSL 走同一条下发路径"
+                        "冲锋到指定敌方编队 / 攻击指定敌方单位 / 阵列 / 射击纪律 / 骑乘令。"
+                        "与开战 DSL 走同一条下发路径"
                         "（Formation.SetMovementOrder + 同一个映射器），区别只是可随时调用。"
                         "⚠️ 只在战斗内有意义：mission 之外碰 MovementOrder 会抛 TypeInitializationException"
                         "并把该类型永久标记为不可用，所以没战斗时直接拒（no_mission），不做\"先试试看\"。"
@@ -846,13 +851,16 @@ TOOLS = [
                         "target 另回传 targetAfter（回读到的目标编队）+ targetDistance（双方编队重心距离）。"
                         "后两者是**行为**判据：隔几秒再调一次，重心应朝目标点挪 / 距离应缩小。"
                         "要确认不被覆盖，隔几秒再调一次看 orderBefore / moveTarget / targetAfter 是否仍是上次的值。"
-                        "movement / position / target **三者互斥**（一个编队只能有一个 movement order）。"
+                        "movement / position / target / targetAgent **四者互斥**"
+                        "（一个编队只能有一个 movement order）。"
                         "⚠️ 回传的 `emptyFormations`（>0 时 applied 里对应条目带 `emptyFormation:true`、"
                         "`count:0`）= **令写进去了但那个编队一个人都没有** ⇒ 没人会执行"
                         "（编队按兵种自动分：弓手在 Ranged、近战步兵在 Infantry，先核对 formation 选对没）。"
-                        "尚未实现、传了就报 unsupported_param（不静默忽略）：riding（上下马）、"
-                        "以及把 **agent/实体**当目标（本轮只做编队目标，理由：agent 会死、目标会失效，"
-                        "口径还没定）。"),
+                        "riding（上下马，v0.8.32）走 `Formation.SetRidingOrder`，回传 ridingBefore/ridingAfter，"
+                        "与 movement order **正交**（管骑不骑、不管去哪）⇒ 不参与四者互斥。"
+                        "targetAgent（攻击指定敌方**单位**，v0.8.32）走 `MovementOrderAttackEntity`，"
+                        "回传 targetEntitySet / targetAgentAlive / targetDistance；"
+                        "⚠️ 目标会死：阵亡后重申会跳过并记 order error（不静默改成冲锋）。"),
         "inputSchema": {"type": "object", "properties": {
             "side": {"type": "string", "enum": ["player", "attacker", "defender"],
                      "description": "哪一方，默认 player（mission 里玩家侧仍是攻/守之一）"},
@@ -884,6 +892,20 @@ TOOLS = [
                                            "：**不在**组路径重申范围内（重申只管 movement）"},
             "firing": {"type": "string", "enum": ["fireAtWill", "holdFire"],
                        "description": "改射击纪律（`FiringOrder`）：引擎只有这两档"},
+            "targetAgent": {"type": "integer",
+                            "description": "攻击指定**敌方单位**（v0.8.32）：agent 下标（`Agent.Index`，"
+                                           "可从遥测或 bl_control_agent status 的 candidates 取）。"
+                                           "引擎侧是 MovementOrderAttackEntity（surround=true）。"
+                                           "与 movement / position / target 四者互斥。"
+                                           "回传 targetEntitySet / targetAgentAlive / targetDistance"
+                                           "（后者是编队重心↔该单位的距离，行为判据）。"
+                                           "⚠️ 目标会死：阵亡后重申会跳过并记 order error，不静默改成冲锋"},
+            "riding": {"type": "string", "enum": ["free", "mount", "dismount"],
+                       "description": "改骑乘令（v0.8.32，`Formation.SetRidingOrder`）：引擎三档 —— "
+                                      "free 不干预 / mount 上马 / dismount 下马。与 movement order 正交"
+                                      "（只管骑不骑、不管去哪），所以**不参与** movement/position/target 的互斥。"
+                                      "回传 ridingBefore/ridingAfter（引擎 RidingOrder.RidingOrderEnum）；"
+                                      "只对**有坐骑**的单位有实际效果。**不在**组路径重申范围内"},
             "detachAI": {"type": "boolean",
                          "description": "是否连带 SetControlledByAI(false,false)，默认 true（建议保持 true；"
                                         "设 false 只用于\"看它会不会被战术覆盖\"的对照）"}},
@@ -979,7 +1001,11 @@ TOOLS = [
                                            "同种子不保证逐值复现")},
             "attackerGroups": {"type": "string",
                                "description": ("攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔。"
-                                               "给了它则 attackerTroop/attackerCount 被忽略；与 orders 互斥")},
+                                               "给了它则 attackerTroop/attackerCount 被忽略；与 orders 互斥。"
+                                               "⚠️ 第 3 字段 `formation` **不决定编队**（v0.8.32 明确）："
+                                               "编队由兵种自身决定（troop.GetFormationClass()），该字段只回显；"
+                                               "写了不同族的名字会在返回的 `formationWarnings` 里被点名"
+                                               "（不阻断开战）")},
             "defenderGroups": {"type": "string", "description": "守方多兵种/战术组，语法同上"}},
             "required": ["attackerTroop", "defenderTroop"], "additionalProperties": False},
     },
@@ -1656,6 +1682,7 @@ def call_tool(name, args):
                "oldHandedToAI": body.get("oldHandedToAI"),
                "previousHandedToAI": body.get("previousHandedToAI"),
                "screenReset": body.get("screenReset"),
+               "cameraFollow": body.get("cameraFollow"),
                "playerControlError": body.get("playerControlError"),
                "originalIndex": body.get("originalIndex"),
                "playerTeam": body.get("playerTeam"),
@@ -1684,15 +1711,20 @@ def call_tool(name, args):
         return out
 
     if name == "bl_order":
-        # 三者互斥（都往同一个 Formation.SetMovementOrder 写）；做成"列全冲突项"而不是两两判断。
-        given = [k for k in ("movement", "position", "target") if args.get(k)]
+        # 四者互斥（都往同一个 Formation.SetMovementOrder 写）；做成"列全冲突项"而不是两两判断。
+        # ⚠️ agent 下标可以是 **0** ⇒ 用 `not in (None, "")` 而不是真值判断（`0` 是假值，
+        # 用真值判断会把 `targetAgent=0` 静默当成"没给"，正是本项目最忌讳的静默）。
+        given = [k for k in ("movement", "position", "target", "targetAgent")
+                 if args.get(k) not in (None, "")]
         if len(given) > 1:
             return {"ok": False,
-                    "error": "movement / position / target 互斥（一个编队只能有一个 movement order）"
-                             "：%s" % " / ".join(str(args.get(k)) for k in given)}
-        if not (given or args.get("arrangement") or args.get("firing")):
+                    "error": "movement / position / target / targetAgent 互斥"
+                             "（一个编队只能有一个 movement order）：%s"
+                             % " / ".join(str(args.get(k)) for k in given)}
+        if not (given or args.get("arrangement") or args.get("firing") or args.get("riding")):
             return {"ok": False,
-                    "error": "movement / position / target / arrangement / firing 至少要给一个"}
+                    "error": "movement / position / target / targetAgent / arrangement / firing / riding "
+                             "至少要给一个"}
         params = {}
         if args.get("movement"):
             params["movement"] = args["movement"]
@@ -1700,10 +1732,15 @@ def call_tool(name, args):
             params["position"] = args["position"]
         if args.get("target"):
             params["target"] = args["target"]
+        if args.get("targetAgent") is not None and args.get("targetAgent") != "":
+            # 发**裸数字**（C# 侧 Jmini.Int 读它；字符串形式会被判非法）
+            params["targetAgent"] = int(args["targetAgent"])
         if args.get("arrangement"):
             params["arrangement"] = args["arrangement"]
         if args.get("firing"):
             params["firing"] = args["firing"]
+        if args.get("riding"):
+            params["riding"] = args["riding"]
         if args.get("side"):
             params["side"] = args["side"]
         if args.get("formation") not in (None, ""):
@@ -1716,9 +1753,12 @@ def call_tool(name, args):
         body = resp.get("result") or {}
         out = {"ok": bool(body.get("ok")), "movement": body.get("movement"),
                "position": body.get("position"), "target": body.get("target"),
+               "targetAgent": body.get("targetAgent"),
+               "targetAgentTroop": body.get("targetAgentTroop"),
                "targetSide": body.get("targetSide"), "side": body.get("side"),
                "team": body.get("team"), "detachAI": body.get("detachAI"),
                "arrangement": body.get("arrangement"), "firing": body.get("firing"),
+               "riding": body.get("riding"),
                "appliedCount": body.get("appliedCount"), "totalUnits": body.get("totalUnits"),
                "emptyFormations": body.get("emptyFormations"),
                "pendingSpecsUpdated": body.get("pendingSpecsUpdated"),
@@ -1737,11 +1777,21 @@ def call_tool(name, args):
             elif code == "bad_formation":
                 out["hint"] = ("formation 只接受 Infantry/Ranged/Cavalry/HorseArcher/Skirmisher"
                                " 或下标 0~4")
+            elif code == "bad_riding":
+                out["hint"] = "riding 只接受 free/mount/dismount（引擎 RidingOrder 只有这三档）"
             elif code in ("bad_target", "no_target_formation", "target_formation_empty", "no_enemy_team"):
                 out["hint"] = ("target 是**敌方编队**（与 side 相对的那一方）：名字或下标 0~4；"
                                "该编队不存在或已空就拒（不静默换成普通冲锋）")
+            elif code == "bad_target_agent":
+                out["hint"] = "targetAgent 要传**敌方单位的 agent 下标**（非负整数；从遥测或 control-agent 取）"
+            elif code in ("no_target_agent", "target_agent_inactive", "target_agent_not_enemy"):
+                out["hint"] = ("targetAgent 找不到可用目标（下标不存在 / 已阵亡 / 不是敌方）："
+                               "下标按场次重号，换一场要重新取；本通道只接受**敌方存活单位**")
+            elif code == "target_agent_no_entity":
+                out["hint"] = "该单位没有可用 GameEntity（AgentVisuals 为空）⇒ 无法绑定 AttackEntity 目标"
             elif code == "unsupported_param":
-                out["hint"] = "riding 还没实现（agent/实体当目标也没做，本轮只有编队目标），别当成已生效"
+                out["hint"] = ("movement / position / target / targetAgent / arrangement / firing / riding "
+                               "都已实现；本错误说明请求里带了尚未实现的参数，别当成已生效")
             elif code == "no_target":
                 out["hint"] = "这一方当前没有有兵的编队（等士兵进场后再发）"
         return out
@@ -1934,10 +1984,14 @@ def call_tool(name, args):
             return {"ok": False, "error": e.get("message") or "start_battle 被拒绝",
                     "code": e.get("code"), "outcomeUncertain": e.get("outcomeUncertain"),
                     "rtsConfig": rts_result, "response": resp}
+        # v0.8.32：开战 DSL 的 `formation` 是死字段（只回显、不决定编队）⇒ C# 侧开战前已比对
+        # "请求值 vs 兵种实际编队"，不一致放进 formationWarnings（不阻断开战）。带上来，
+        # 让调用方一眼看到"我写的 formation 没生效"，而不是等到发现兵不动才回头查。
         return {"ok": True, "state": body.get("state"), "accepted": body.get("accepted"),
                 "buildCheck": bc,
                 "troopCheck": troop_check,
                 "rtsConfig": rts_result,
+                "formationWarnings": body.get("formationWarnings") or [],
                 "buildWarning": (bc.get("detail") if bc.get("code") == "stale_source" else None),
                 "hint": "用 bl_wait_for_state(state=ended) 等它打完", "response": resp}
 

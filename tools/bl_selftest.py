@@ -148,8 +148,18 @@ def start_fake_game(logdir, token):
                     result = {"protocolVersion": 1, "mod": "BlBridge", "version": "0.1.1"}
                 elif method == "start_battle":
                     # v0.8.14：回显 spectate（God view）—— 断言"参数被透传到端口"
+                    _op = req.get("parameters") or {}
+                    # v0.8.32：`formation` 死字段的一致性告警。**这里只做"能产出一条非空告警"的最小实现**
+                    # —— 真正的判定逻辑在 C# 侧，由 tools/jsontest 的 SquadSpec.CollectFormationMismatches
+                    # 用例锁住；本处要测的是"MCP 层把 C# 回来的 formationWarnings 带回给调用方"。
+                    _fw = []
+                    _dsl = " ".join(str(_op.get(k) or "") for k in ("attackerGroups", "defenderGroups"))
+                    if "battanian_fian_champion" in _dsl and "Infantry" in _dsl:
+                        _fw.append("攻方：第 1 组（battanian_fian_champion）写了 formation=Infantry，"
+                                   "但该兵种的实际编队是 Ranged（fake 端）")
                     result = {"accepted": True, "state": "loading",
-                              "spectate": bool((req.get("parameters") or {}).get("spectate"))}
+                              "spectate": bool(_op.get("spectate")),
+                              "formationWarnings": _fw}
                 elif method == "abort":
                     result = {"aborted": True, "state": "running"}
                 elif method == "control_agent":
@@ -162,6 +172,11 @@ def start_fake_game(logdir, token):
                               "mainAgentBefore": {"index": 3, "controller": "Player"},
                               "mainAgentAfter": {"index": 7, "controller": "Player"},
                               "oldHandedToAI": True, "screenReset": True, "originalIndex": 3,
+                              # v0.8.32：RTSCamera 平滑推镜的结果（fake 端只回一个成功形态；
+                              # 真机的反射调用与回读由真机判据覆盖）
+                              "cameraFollow": {"applied": True, "how": "reflection fake",
+                                               "shouldSmooth": True, "lastFollowed": "imperial_legionary#7",
+                                               "shouldSmoothFlagNext": "true", "why": ""},
                               "note": "fake"}
                 elif method == "order":
                     # v0.8.23/0.8.28：回显改令参数 + 一条假回读（断言"参数确实被透传到端口"与"回读被带回"）
@@ -176,6 +191,38 @@ def start_fake_game(logdir, token):
                     if op.get("firing"):
                         ap["firingBefore"] = "FireAtWill"
                         ap["firingAfter"] = op["firing"].capitalize()
+                    ride = None
+                    ride_bad = False
+                    if op.get("riding"):
+                        # v0.8.32：骑乘令 —— 三档 free / mount / dismount（引擎 `RidingOrder.RidingOrderEnum`）。
+                        # 假端照 C# 的口径判语法；真机的唯一真相在 `OrderSpec.IsRiding`（离线单测锁它）。
+                        r = str(op["riding"]).strip().lower()
+                        if r in ("free", "mount", "dismount"):
+                            ride = r
+                            ap["ridingBefore"] = "Free"
+                            ap["ridingAfter"] = r.capitalize()
+                        else:
+                            ride_bad = True
+                    tag = None
+                    tag_bad = False
+                    if op.get("targetAgent") is not None:
+                        # v0.8.32：指定目标单位 —— 回读 `orderAfter=AttackEntity` + TargetEntity 是否记着
+                        # + 目标存活 + 编队重心到它的距离（行为判据）。假端只判"非负整数"；
+                        # 真机的目标解析/存活/敌我判定在 C# 侧（另由真机判据覆盖）。
+                        try:
+                            ti = int(op["targetAgent"])
+                            if ti < 0:
+                                raise ValueError("负数")
+                            tag = ti
+                            ap["orderAfter"] = "AttackEntity"
+                            ap["targetAgentIndex"] = ti
+                            ap["targetAgentTroop"] = "imperial_legionary#%d" % ti
+                            ap["targetAgentAlive"] = "true"
+                            ap["targetEntitySet"] = "true"
+                            ap["formationCenter"] = "(1.0,2.0)"
+                            ap["targetDistance"] = "88.8 m"
+                        except (TypeError, ValueError):
+                            tag_bad = True
                     pos = None
                     pos_bad = False
                     if op.get("position"):
@@ -211,6 +258,12 @@ def start_fake_game(logdir, token):
                     elif tgt_bad:
                         result = {"ok": False, "code": "bad_target",
                                   "error": "target 只接受敌方编队名或下标 0~4（fake 端判的）"}
+                    elif ride_bad:
+                        result = {"ok": False, "code": "bad_riding",
+                                  "error": "riding 只接受 free / mount / dismount（fake 端判的）"}
+                    elif tag_bad:
+                        result = {"ok": False, "code": "bad_target_agent",
+                                  "error": "targetAgent 需要是非负整数（fake 端判的）"}
                     else:
                         if pos is not None:
                             ap["orderAfter"] = "Move"
@@ -232,6 +285,9 @@ def start_fake_game(logdir, token):
                                   "position": pos, "target": tgt,
                                   "targetSide": "defender" if tgt is not None else None,
                                   "arrangement": op.get("arrangement"), "firing": op.get("firing"),
+                                  "riding": ride, "targetAgent": tag,
+                                  "targetAgentTroop": (("imperial_legionary#%d" % tag)
+                                                       if tag is not None else None),
                                   "appliedCount": 1, "totalUnits": 0 if empty else 7,
                                   "emptyFormations": 1 if empty else 0, "applied": [ap],
                                   "note": "fake"}
@@ -1125,12 +1181,61 @@ def main():
           and ap13.get("emptyFormation") is True and ap13.get("count") == 0,
           "空编队信号（emptyFormations / emptyFormation）能透传：ok=true 但没人执行", ro13)
 
+    # ── v0.8.32：骑乘令 `riding`（透传 + before/after 带回 + 与 movement order 正交）──
+    ro14 = bl_mcp.call_tool("bl_order", {"riding": "dismount", "side": "defender",
+                                         "formation": "Cavalry"})
+    ap14 = (ro14.get("applied") or [{}])[0]
+    check(ro14.get("ok") is True and ro14.get("riding") == "dismount"
+          and ap14.get("ridingBefore") == "Free" and ap14.get("ridingAfter") == "Dismount",
+          "bl_order 的 riding 透传到端口，且带回 ridingBefore→ridingAfter（引擎 RidingOrder 口径）", ro14)
+
+    ro15 = bl_mcp.call_tool("bl_order", {"movement": "stop", "riding": "mount"})
+    check(ro15.get("ok") is True and ro15.get("movement") == "stop" and ro15.get("riding") == "mount",
+          "riding 与 movement **正交**（可同时给：一个管去哪、一个管骑不骑）", ro15)
+
+    ro16 = bl_mcp.call_tool("bl_order", {"riding": "ride"})
+    check(ro16.get("ok") is False and ro16.get("code") == "bad_riding",
+          "riding 非法值（ride 不是引擎口径，引擎只有 free/mount/dismount）⇒ bad_riding", ro16)
+
+    # ── v0.8.32：指定目标单位 `targetAgent`（透传 + 回读 + 四者互斥 + 下标 0 不被吃掉）──
+    ro17 = bl_mcp.call_tool("bl_order", {"targetAgent": 42, "side": "defender",
+                                         "formation": "Infantry"})
+    ap17 = (ro17.get("applied") or [{}])[0]
+    check(ro17.get("ok") is True and ro17.get("targetAgent") == 42
+          and ro17.get("targetAgentTroop") == "imperial_legionary#42"
+          and ap17.get("orderAfter") == "AttackEntity" and ap17.get("targetAgentIndex") == 42
+          and ap17.get("targetEntitySet") == "true" and ap17.get("targetAgentAlive") == "true"
+          and ap17.get("targetDistance") == "88.8 m",
+          "bl_order 的 targetAgent 透传到端口，且带回 AttackEntity + targetEntitySet/"
+          "targetAgentAlive/targetDistance", ro17)
+
+    ro18 = bl_mcp.call_tool("bl_order", {"movement": "stop", "targetAgent": 42})
+    check(ro18.get("ok") is False and "互斥" in (ro18.get("error") or ""),
+          "movement 与 targetAgent 同时给 ⇒ **本地**就拒（四者互斥）", ro18)
+
+    ro19 = bl_mcp.call_tool("bl_order", {"target": "Infantry", "targetAgent": 42})
+    check(ro19.get("ok") is False and "互斥" in (ro19.get("error") or ""),
+          "target 与 targetAgent 同时给 ⇒ **本地**就拒（编队目标与单位目标都是 movement order）", ro19)
+
+    ro20 = bl_mcp.call_tool("bl_order", {"targetAgent": -3})
+    check(ro20.get("ok") is False and ro20.get("code") == "bad_target_agent",
+          "targetAgent 负数/非法 ⇒ 带回 bad_target_agent（真机由 C# 拒，Python 侧只透传）", ro20)
+
+    ro21 = bl_mcp.call_tool("bl_order", {"targetAgent": 0})
+    check(ro21.get("ok") is True and ro21.get("targetAgent") == 0,
+          "targetAgent=0 是**合法下标**（0 是假值 ⇒ 本地判断必须用 is not None，否则会被静默丢掉）",
+          ro21)
+
     # ── v0.8.25：接管士兵 `bl_control_agent`（目标 / before-after 回读 / 降级字段要被带回）──
     rc1 = bl_mcp.call_tool("bl_control_agent", {"agentIndex": 7})
     check(rc1.get("ok") is True and (rc1.get("target") or {}).get("index") == 7
           and (rc1.get("mainAgentAfter") or {}).get("index") == 7
           and rc1.get("oldHandedToAI") is True and rc1.get("screenReset") is True,
           "bl_control_agent take 往返成功（带回 target / mainAgentAfter / oldHandedToAI / screenReset）", rc1)
+    check((rc1.get("cameraFollow") or {}).get("applied") is True
+          and (rc1.get("cameraFollow") or {}).get("lastFollowed") == "imperial_legionary#7",
+          "bl_control_agent 带回 cameraFollow（v0.8.32 平滑推镜：applied + lastFollowed 回读判据）",
+          rc1.get("cameraFollow"))
 
     rc2 = bl_mcp.call_tool("bl_control_agent", {"mode": "release"})
     check(rc2.get("ok") is True and rc2.get("mode") == "release" and rc2.get("how") == "agentIndex=7"
@@ -1178,6 +1283,21 @@ def main():
                                 {"attackerTroop": "a", "defenderTroop": "b", "spectate": True}, timeout=6)
     check(e6 is None and ((r6 or {}).get("result") or {}).get("spectate") is True,
           "start_battle 的 spectate（上帝视角）会被透传", e6 or r6)
+
+    # v0.8.32：开战 DSL `formation` 死字段的告警（判定逻辑在 C#，见 GuardTest 的
+    # SquadSpec.CollectFormationMismatches；这里测"端口层把它带回"）
+    r7, e7 = bl_mcp.send_command("start_battle",
+                                 {"attackerTroop": "a", "defenderTroop": "b",
+                                  "attackerGroups": "battanian_fian_champion:4:Infantry:stop"}, timeout=6)
+    fw7 = ((r7 or {}).get("result") or {}).get("formationWarnings")
+    check(e7 is None and isinstance(fw7, list) and len(fw7) == 1 and "fian" in fw7[0],
+          "start_battle 的 formationWarnings 会被带回（formation 写 Infantry 而实际 Ranged）",
+          e7 or fw7)
+
+    r8, e8 = bl_mcp.send_command("start_battle",
+                                 {"attackerTroop": "a", "defenderTroop": "b"}, timeout=6)
+    check(e8 is None and ((r8 or {}).get("result") or {}).get("formationWarnings") == [],
+          "没有组 / 没有不一致时 formationWarnings 是空数组（不是缺字段）", e8 or r8)
 
     # 会话身份（照 Coop 规范）：状态文件里的 runToken 变了，旧会话的响应必须被拒
     with io.open(os.path.join(logdir, "bridge_status.json"), "w", encoding="utf-8") as fh:

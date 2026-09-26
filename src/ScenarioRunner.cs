@@ -93,6 +93,8 @@ namespace BlBridge
             sb.Append(",\"defenderCount\":").Append(Jw.N(DefenderCount));
             sb.Append(",\"attackerGroups\":").Append(Protocol.Q(AttackerGroupsDsl));
             sb.Append(",\"defenderGroups\":").Append(Protocol.Q(DefenderGroupsDsl));
+            // v0.8.32：`formation` 死字段的一致性告警（每场 start 时重算 ⇒ 天然按场次隔离）
+            sb.Append(",\"formationWarnings\":").Append(FormationWarningsJson());
             sb.Append(",\"durationCapSec\":").Append(Jw.N((int)DurationCapSeconds));
             sb.Append('}');
             sb.Append(",\"progress\":").Append(ProgressJson());
@@ -228,6 +230,14 @@ namespace BlBridge
                 return Protocol.Failure(id, "busy",
                     "已有一场推演在进行中（state=" + State + "），请先 abort 或等它结束", false);
             }
+
+            // v0.8.32 修复（**真机抓到的**）：`formation` 死字段的一致性告警必须**每次 start 无条件清空**。
+            // 原先把它写在 `if (attackerGrouped || defenderGrouped)` 块内 ⇒ **不带 groups 的 start 不会重置**，
+            // 上一场（带 groups）的告警就被原样带进这一场的响应里。真机复现（2026-09-26）：
+            //   A 场：带 groups 但场景名写错 ⇒ start 失败（告警已写入）；
+            //   B 场：不带 groups ⇒ 响应里出现了 A 场那条告警 ⇒ 残留坐实。
+            // 位置：放在 Busy 短路**之后**（正在跑的那一场的告警不该被一个被拒的请求清掉）。
+            _pendingFormationWarnings = new List<string>();
 
             string attacker = Jmini.Str(raw, "attackerTroop", "");
             string defender = Jmini.Str(raw, "defenderTroop", "");
@@ -377,6 +387,13 @@ namespace BlBridge
                         "attackerGroups/defenderGroups 与 orders=" + orders
                         + " 不能混用：groups 走按组命令，orders 走整体命令", false);
                 }
+                // v0.8.32：`formation` 是**死字段**（只回显、不决定编队）⇒ 开战前把"请求值 vs 兵种
+                // 实际编队"的不一致**显式收集**（见 SquadSpec.CollectFormationMismatches）。
+                // 不改变开战结果（名字非法仍由 SquadSpec.Parse 拒），只是不再静默：
+                // 真机踩到过 —— 给弓手写 Infantry 照样开战、无人报，兵却进了 Ranged。
+                // ⚠️ 清空**不在这里**：见 `Start()` 开头（以前写在这一块里 ⇒ 不带 groups 的 start 会残留上一场的告警）。
+                if (attackerGrouped) AppendFormationWarnings("攻方", attackerGroups, attackerGroupChars);
+                if (defenderGrouped) AppendFormationWarnings("守方", defenderGroups, defenderGroupChars);
             }
 
             // 2) 兵种 id 必须能解析。
@@ -507,6 +524,8 @@ namespace BlBridge
                 sb.Append(",\"defenderCount\":").Append(Jw.N(dCount));
                 sb.Append(",\"scene\":").Append(Protocol.Q(scene));
                 sb.Append(",\"spectate\":").Append(Jw.B(spectate));
+                // v0.8.32：开战 DSL `formation` 与实际编队不一致的告警（空数组 = 无；不阻断开战）
+                sb.Append(",\"formationWarnings\":").Append(FormationWarningsJson());
                 sb.Append(",\"note\":\"战斗无玩家参与，10 倍速运行；用 bl_wait_for_state 等 ended\"}");
                 return Protocol.Success(id, sb.ToString());
             }
@@ -1196,6 +1215,57 @@ namespace BlBridge
         }
 
         /// <summary>
+        /// v0.8.32：把某一方 `formation` 字段与**兵种实际编队**的不一致收集进 `_pendingFormationWarnings`
+        /// （加"攻方/守方"前缀），最终出现在 start 响应的 `formationWarnings` 里。
+        ///
+        /// 实际值从校验阶段**已 Resolve 的兵种对象**取（`troop.GetFormationClass()`，
+        /// 与 `ApplyOrders` / `ReapplySideOrders` 同一个来源），再经 `EnumNames.Formation` 换成稳定名
+        /// （`FormationClass` 有同值别名，`ToString()` 会给出边界常量名）。
+        /// 比对本身在**只依赖 BCL** 的 `SquadSpec.CollectFormationMismatches`（离线单测锁它）。
+        /// 绝不抛：这条信号不该把开战流程拖崩。
+        /// </summary>
+        private static void AppendFormationWarnings(string label, List<SquadSpec> specs,
+                                                   List<BasicCharacterObject> resolvedTroops)
+        {
+            try
+            {
+                if (specs == null || resolvedTroops == null) return;
+                string[] actual = new string[resolvedTroops.Count];
+                for (int i = 0; i < resolvedTroops.Count; i++)
+                {
+                    BasicCharacterObject c = resolvedTroops[i];
+                    actual[i] = (c == null) ? null : EnumNames.Formation(c.GetFormationClass());
+                }
+                List<string> ms = SquadSpec.CollectFormationMismatches(specs, actual);
+                for (int i = 0; i < ms.Count; i++) _pendingFormationWarnings.Add(label + "：" + ms[i]);
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>v0.8.32：把 `_pendingFormationWarnings` 渲染成 JSON 数组（无警告 ⇒ `[]`）。绝不抛。</summary>
+        private static string FormationWarningsJson()
+        {
+            try
+            {
+                if (_pendingFormationWarnings == null || _pendingFormationWarnings.Count == 0) return "[]";
+                StringBuilder sb = new StringBuilder("[");
+                for (int i = 0; i < _pendingFormationWarnings.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Protocol.Q(_pendingFormationWarnings[i]));
+                }
+                sb.Append(']');
+                return sb.ToString();
+            }
+            catch
+            {
+                return "[]";
+            }
+        }
+
+        /// <summary>
         /// 逐组校验：兵种 id 可解析（否则 unknown_troop），以及"同一实际编队被多组以不同 movement
         /// **落点**命中"⇒ conflicting_movements（§3 用户裁决 A）。落点编队 = Resolve(troop).GetFormationClass()，
         /// 不是 DSL 里写的 formation 字段。
@@ -1361,6 +1431,10 @@ namespace BlBridge
         // 原样回显 groups DSL（供 StatusJson 排查）。空串 = 该方无 groups。
         internal static string AttackerGroupsDsl = "";
         internal static string DefenderGroupsDsl = "";
+
+        // v0.8.32：开战 DSL `formation` 死字段的一致性告警（已渲染好的 JSON 数组元素，空 = 无不一致）。
+        // 见 `SquadSpec.CollectFormationMismatches` —— 把"写 Infantry 的弓手静默进 Ranged"变成显式信号。
+        private static List<string> _pendingFormationWarnings = new List<string>();
 
         private static IEnumerable<MissionBehavior> CreateBehaviors(Mission mission)
         {
@@ -1646,6 +1720,7 @@ namespace BlBridge
                         // 否则 `ReapplySideOrders` 会继续重申那个旧的点/旧的目标，movement 通道等于失效。
                         s.ManualKind = SquadSpec.ManualNone;
                         s.TargetFormationIndex = -1;
+                        s.TargetAgentIndex = -1;
                         changed++;
                     }
                     return changed;
@@ -1691,6 +1766,7 @@ namespace BlBridge
                         if ((int)troop.GetFormationClass() != formationIndex) continue;
                         s.ManualKind = SquadSpec.ManualPosition;
                         s.TargetFormationIndex = -1;
+                        s.TargetAgentIndex = -1;
                         s.MoveX = x; s.MoveY = y; s.MoveZ = z;
                         changed++;
                     }
@@ -1733,6 +1809,50 @@ namespace BlBridge
                         if ((int)troop.GetFormationClass() != formationIndex) continue;
                         s.ManualKind = SquadSpec.ManualChargeTarget;
                         s.TargetFormationIndex = targetFormationIndex;
+                        s.TargetAgentIndex = -1;
+                        changed++;
+                    }
+                    return changed;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+
+            /// <summary>
+            /// v0.8.32：`OverridePendingMovement` 的**指定目标单位**版本 —— 把某一方 pending 组里落在
+            /// 指定编队上的 spec 标记为"手动攻击某个敌方 agent"，并记下那个**agent 下标**；返回改了几个。
+            ///
+            /// 同理：`AttackEntity` 也不是按名字重申的东西（它绑的是那个 `GameEntity`），
+            /// 不打标记的话半秒内会被组路径重申回 `s.Movement`（而 `Formation` 上当场看是 `AttackEntity`）。
+            /// 存**下标**而不是对象：重申在下一帧，届时对象可能已失效；解不到就跳过重申（见 `ReapplySideOrders`）。
+            /// 返回 0 的含义同其它几个 Override。绝不抛。
+            /// </summary>
+            internal static int OverridePendingAttackAgent(Team team, int formationIndex,
+                                                          int targetAgentIndex)
+            {
+                try
+                {
+                    Mission m = Mission.Current;
+                    if (m == null || team == null) return 0;
+                    List<SquadSpec> specs;
+                    if (ReferenceEquals(team, m.AttackerTeam)) specs = _pendingAttackerGroups;
+                    else if (ReferenceEquals(team, m.DefenderTeam)) specs = _pendingDefenderGroups;
+                    else specs = null;
+                    if (specs == null || specs.Count == 0) return 0;
+
+                    int changed = 0;
+                    for (int i = 0; i < specs.Count; i++)
+                    {
+                        SquadSpec s = specs[i];
+                        if (s == null) continue;
+                        BasicCharacterObject troop = Resolve(s.Troop);
+                        if (troop == null) continue;
+                        if ((int)troop.GetFormationClass() != formationIndex) continue;
+                        s.ManualKind = SquadSpec.ManualAttackAgent;
+                        s.TargetAgentIndex = targetAgentIndex;
+                        s.TargetFormationIndex = -1;
                         changed++;
                     }
                     return changed;
@@ -1782,6 +1902,59 @@ namespace BlBridge
                     if (f == null) return null;
                     if (f.CountOfUnits == 0) return null;
                     return f;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
+            /// v0.8.32：按 `Agent.Index` 在**敌方**（相对 `team` 而言）里找那个 agent，**且要求存活**。
+            /// 找不到 / 不是敌方 / 已阵亡 ⇒ null（调用方据此跳过重申或拒绝改令，绝不换人）。
+            /// 与 `EnemyFormation` 同一套"目标可用性"口径：不可用就是不可用，不静默替换。
+            /// 绝不抛。
+            /// </summary>
+            private static Agent EnemyAgentByIndex(Team team, int agentIndex)
+            {
+                try
+                {
+                    if (agentIndex < 0) return null;
+                    Team enemy = EnemyTeamOf(team);
+                    if (enemy == null) return null;
+                    Mission m = Mission.Current;
+                    if (m == null) return null;
+                    foreach (Agent a in m.Agents)
+                    {
+                        if (a == null) continue;
+                        if (a.Index != agentIndex) continue;
+                        // 找到了同号的下标但不是敌方 ⇒ 当场判不可用（**不**继续找别人）
+                        if (!ReferenceEquals(a.Team, enemy)) return null;
+                        if (!a.IsActive()) return null;
+                        return a;
+                    }
+                    return null;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
+            /// v0.8.32：agent → `GameEntity`（走 `Agent.AgentVisuals.GetEntity()`，
+            /// `MBAgentVisuals.cs:46`；`MovementOrderAttackEntity` 要的是 `GameEntity`）。
+            /// 没渲染体（AgentVisuals == null）⇒ null。⚠️ 这里**不能** `using TaleWorlds.Engine;`
+            /// （它带进来的 `Path` 与 `System.IO.Path` 撞名，本文件两个都在用）⇒ 写全名。绝不抛。
+            /// </summary>
+            private static TaleWorlds.Engine.GameEntity EntityOf(Agent agent)
+            {
+                try
+                {
+                    if (agent == null) return null;
+                    MBAgentVisuals av = agent.AgentVisuals;
+                    if (av == null) return null;
+                    return av.GetEntity();
                 }
                 catch
                 {
@@ -1842,6 +2015,32 @@ namespace BlBridge
                         else
                         {
                             f.SetMovementOrder(MovementOrder.MovementOrderChargeToTarget(enemy));
+                        }
+                    }
+                    else if (s.ManualKind == SquadSpec.ManualAttackAgent)
+                    {
+                        // v0.8.32：`order --target-agent` 手动指定过"攻击某个敌方单位" ⇒ 重申同一件事。
+                        // 目标**会死**（这正是当初"只做编队目标"的理由）⇒ 解不到 / 已阵亡时**跳过重申**
+                        // 并记一条 order error（AppendOrderError 幂等），**不**退回 `s.Movement`
+                        // —— 退回等于偷偷把"打这个兵"换成"冲锋"，是静默改令。
+                        Agent enemyAgent = EnemyAgentByIndex(team, s.TargetAgentIndex);
+                        if (enemyAgent == null)
+                        {
+                            AppendOrderError("指定的目标单位已不可用（组 " + s.Troop
+                                + " / 目标 agent 下标 " + s.TargetAgentIndex + "）⇒ 跳过重申，不改令");
+                        }
+                        else
+                        {
+                            TaleWorlds.Engine.GameEntity ent = EntityOf(enemyAgent);
+                            if (ent == null)
+                            {
+                                AppendOrderError("指定的目标单位拿不到 GameEntity（组 " + s.Troop
+                                    + " / 目标 agent 下标 " + s.TargetAgentIndex + "）⇒ 跳过重申，不改令");
+                            }
+                            else
+                            {
+                                f.SetMovementOrder(MovementOrder.MovementOrderAttackEntity(ent, true));
+                            }
                         }
                     }
                     else

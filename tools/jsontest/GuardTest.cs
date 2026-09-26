@@ -206,12 +206,46 @@ internal static class GuardTest
               SquadSpec.ManualNone.ToString());
         Check(SquadSpec.ManualPosition != SquadSpec.ManualNone
               && SquadSpec.ManualChargeTarget != SquadSpec.ManualNone
-              && SquadSpec.ManualPosition != SquadSpec.ManualChargeTarget,
-              "手动令三态两两不等（单值枚举式，不是两个可能同时为真的 bool）");
+              && SquadSpec.ManualAttackAgent != SquadSpec.ManualNone
+              && SquadSpec.ManualPosition != SquadSpec.ManualChargeTarget
+              && SquadSpec.ManualPosition != SquadSpec.ManualAttackAgent
+              && SquadSpec.ManualChargeTarget != SquadSpec.ManualAttackAgent,
+              "手动令四态两两不等（单值枚举式，不是一个编队能同时有两种手动令）");
         SquadSpec fresh = new SquadSpec();
-        Check(fresh.ManualKind == SquadSpec.ManualNone && fresh.TargetFormationIndex == -1,
-              "新建 spec 默认 = 按名字重申、无目标下标",
-              fresh.ManualKind + "/" + fresh.TargetFormationIndex);
+        Check(fresh.ManualKind == SquadSpec.ManualNone && fresh.TargetFormationIndex == -1
+              && fresh.TargetAgentIndex == -1,
+              "新建 spec 默认 = 按名字重申、无目标编队、无目标单位",
+              fresh.ManualKind + "/" + fresh.TargetFormationIndex + "/" + fresh.TargetAgentIndex);
+
+        // ── v0.8.32：开战 DSL `formation` 死字段的一致性比对（SquadSpec.CollectFormationMismatches）──
+        // 存在的唯一理由：`formation` **不决定编队**（引擎按 troop.GetFormationClass() 分），
+        // 给弓手写 Infantry 会静默进 Ranged。它只依赖 BCL ⇒ 能在这里被锁住。
+        var mmSpecs = SquadSpec.Parse("battanian_fian_champion:10:Infantry:stop");
+        var mm = SquadSpec.CollectFormationMismatches(mmSpecs, new string[] { "Ranged" });
+        Check(mm.Count == 1 && mm[0].Contains("battanian_fian_champion"),
+              "formation 写 Infantry 而实际是 Ranged ⇒ 报 1 条（点名兵种）", mm.Count.ToString());
+        Check(SquadSpec.CollectFormationMismatches(mmSpecs, new string[] { "Infantry" }).Count == 0,
+              "formation 与实际同族 ⇒ 0 条（不打扰）");
+        Check(SquadSpec.FormationFamily("HeavyInfantry") == "Infantry"
+              && SquadSpec.FormationFamily("Skirmisher") == "Ranged"
+              && SquadSpec.FormationFamily("LightCavalry") == "HorseArcher"
+              && SquadSpec.FormationFamily("HeavyCavalry") == "Cavalry",
+              "formation 家族折叠口径同引擎 FallbackClass："
+              + "HeavyInfantry→Infantry / Skirmisher→Ranged / LightCavalry→HorseArcher / HeavyCavalry→Cavalry");
+        Check(SquadSpec.CollectFormationMismatches(
+                  SquadSpec.Parse("a:1:HeavyInfantry"), new string[] { "Infantry" }).Count == 0,
+              "同族（HeavyInfantry vs Infantry）⇒ 不报（别把别名当不一致）");
+        Check(SquadSpec.CollectFormationMismatches(
+                  SquadSpec.Parse("a:1"), new string[] { "Ranged" }).Count == 0,
+              "没写 formation（null）⇒ 不报（无意声明，不该打扰）");
+        Check(SquadSpec.CollectFormationMismatches(mmSpecs, new string[] { null }).Count == 0
+              && SquadSpec.CollectFormationMismatches(mmSpecs, new string[] { "" }).Count == 0,
+              "实际编队取不到（null / 空）⇒ 跳过比对（不猜）");
+        Check(SquadSpec.FormationFamily("Infantrys") == null && SquadSpec.FormationFamily(null) == null,
+              "formation 家族：未知名字 / null 回 null（跳过比对，不猜）");
+        Check(SquadSpec.CollectFormationMismatches(null, new string[] { "Ranged" }).Count == 0
+              && SquadSpec.CollectFormationMismatches(mmSpecs, null).Count == 0,
+              "空入参（null specs / null actual）⇒ 0 条，绝不抛");
 
         // ── 改令通道的名字表与校验器（v0.8.23，OrderSpec）──────────────────────
         // 这些校验必须在**碰 `MovementOrder` 之前**跑完（碰早了会抛 TypeInitializationException
@@ -263,6 +297,20 @@ internal static class GuardTest
               "射击纪律：引擎只有两档（FireAtWill / HoldYourFire），其余必须拒");
         Check(OrderSpec.FiringNames.Length == 2, "射击纪律共 2 档",
               OrderSpec.FiringNames.Length.ToString());
+
+        // v0.8.32：骑乘令的名字表（`RidingOrder` 同样是"静态字段在类型初始化时构造"的 struct，
+        // 所以校验也必须先于触碰它 ⇒ 名字表在这里、映射在 BattleOrders）。
+        Check(OrderSpec.IsRiding("mount") && OrderSpec.IsRiding("Dismount") && OrderSpec.IsRiding("free"),
+              "骑乘令白名单：三档都要认，且大小写不敏感");
+        Check(!OrderSpec.IsRiding("ride") && !OrderSpec.IsRiding("") && !OrderSpec.IsRiding(null),
+              "骑乘令：引擎只有 free / mount / dismount 三档，其余必须拒（ride/on/off 都不是引擎口径）");
+        Check(OrderSpec.RidingNames.Length == 3, "骑乘令共 3 档",
+              OrderSpec.RidingNames.Length.ToString());
+
+        // v0.8.32：`targetAgent` 的下标上界（纯防御性 —— 明显是手滑的值要能被拒，而不是去海里捞）
+        Check(OrderSpec.AgentIndexLimit > 10000 && OrderSpec.AgentIndexLimit <= 10000000,
+              "targetAgent 下标上界在合理量级（覆盖真实战场规模，又挡得住地址/时间戳那类手滑值）",
+              OrderSpec.AgentIndexLimit.ToString());
 
         // v0.8.30：指定点移动的坐标解析（同样必须在碰 `WorldPosition` / `MovementOrder` 之前跑完，
         // 所以它也得只依赖 BCL、也得有对照断言）。

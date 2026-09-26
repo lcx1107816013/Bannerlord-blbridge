@@ -39,9 +39,12 @@ namespace BlBridge
     ///   ⇒ 结论：`ok` **由回读决定**（拿不到 `Controller == Player` 就报 `controller_not_verified`），
     ///   **不假装成功**；要真接管得在**真人场次**（玩家自己打的战斗）里验证。
     ///
-    /// **没做的**（如实列出，不静默）：
-    ///   * RTSCamera 的"平滑推镜"（`Utility.BeforeSetMainAgent` / `SmoothMoveToAgent` 那一套改 `MissionScreen`
-    ///     私有字段的动画）—— 我们只把 `_isPlayerAgentAdded` 复位，让镜头在下一帧自然跟上；
+    /// **已做 / 没做的**（如实列出，不静默）：
+    ///   * ✅ **v0.8.32 起走 RTSCamera 自己的「平滑推镜」**（见 `CameraFollow`）：反射调
+    ///     `Utility.BeforeSetMainAgent` → 写 `Mission.MainAgent` → `Utility.AfterSetMainAgent`，
+    ///     并回读 `MissionScreen.LastFollowedAgent` 作为判据；没装 RTSCamera（或版本漂移）时
+    ///     **退回**"只复位 `_isPlayerAgentAdded`"，行为与 v0.8.31 一致（不静默、也不假装成功）。
+    ///     ⚠️ "平滑"本身是视觉判据：本模块能证明"上游那对方法被真的调到了 + 跟随目标写进去了"；
     ///   * 与 RTSCamera 并存时它自己也在管 `MainAgent`（它的 `ControlTroop` 键会覆盖我们）；
     ///   * 不能接管敌方 agent（RTSCamera 也拒绝：`agent.Team != Mission.PlayerTeam` 直接放弃 —— 敌人交给玩家
     ///     会让该方 AI/阵型失去主控，且引擎多处假设"玩家 agent 在自己队里"）。
@@ -249,6 +252,12 @@ namespace BlBridge
                 RememberOriginal(mission, oldMain);
             }
 
+            // v0.8.32：RTSCamera 的平滑推镜 —— 它在**写 MainAgent 之前**要问一句"这次该不该平滑"
+            // （上游顺序是：`Before` → 赋值 → `After`，不能反）。不可用时 `camBeforeWhy` 给出原因，
+            // 并回退到原有的 `ResetPlayerAgentAdded()`（= 上游 `AfterSetMainAgent(should=false, …)` 的等效动作）。
+            bool camShouldSmooth = false;
+            string camBeforeWhy = CameraFollow.Before(target, out camShouldSmooth);
+
             bool mainSet;
             try
             {
@@ -263,6 +272,15 @@ namespace BlBridge
 
             string playerControl = ApplyPlayerControl(target);
             bool screenReset = ResetPlayerAgentAdded();
+            // v0.8.32：平滑推镜的第二步（After）。只有 Before 成功才调，结果照实回传：
+            //   camAfterWhy == null ⇒ 已调用（lastFollowed 是回读判据）；
+            //   非 null ⇒ 不可用 / 失败的原因（此时上面那条老路已做了最小动作，行为不退化）。
+            string camLastFollowed = "(n/a)";
+            string camAfterWhy = null;
+            if (camBeforeWhy == null)
+            {
+                camAfterWhy = CameraFollow.After(camShouldSmooth, out camLastFollowed);
+            }
 
             // ── 诚信判定（v0.8.26 真机教训）────────────────────────────────────
             // 真机（AI 对 AI 自定义战斗，无真人）实测：`Mission.MainAgent` 确实换成了目标，
@@ -296,6 +314,8 @@ namespace BlBridge
                     + ",\"oldHandedToAI\":" + Jw.B(oldHandedToAI)
                     + ",\"playerControlError\":" + (playerControl == null ? "null" : Protocol.Q(playerControl))
                     + ",\"screenReset\":" + Jw.B(screenReset)
+                    + ",\"cameraFollow\":" + CameraFollowJson(camBeforeWhy, camShouldSmooth,
+                                                             camAfterWhy, camLastFollowed)
                     + ",\"originalIndex\":" + Jw.N(_originalMainAgentIndex)
                     + ",\"note\":" + Protocol.Q(note)
                     + ",\"error\":" + Protocol.Q(
@@ -312,10 +332,14 @@ namespace BlBridge
                    + ",\"oldHandedToAI\":" + Jw.B(oldHandedToAI)
                    + ",\"playerControlError\":null"
                    + ",\"screenReset\":" + Jw.B(screenReset)
+                   + ",\"cameraFollow\":" + CameraFollowJson(camBeforeWhy, camShouldSmooth,
+                                                            camAfterWhy, camLastFollowed)
                    + ",\"originalIndex\":" + Jw.N(_originalMainAgentIndex)
                    + ",\"note\":" + Protocol.Q(note
-                       + " 镜头：我们只把 MissionScreen._isPlayerAgentAdded 复位"
-                       + "（RTSCamera 同款做法；它那套平滑推镜没做）。mode=release 可换回原始主角色。") + "}";
+                       + " 镜头：装了 RTSCamera 时走它自己的平滑推镜"
+                       + "（`Utility.BeforeSetMainAgent` → 赋值 → `AfterSetMainAgent`，见 cameraFollow 的 "
+                       + "applied/lastFollowed）；没装时退回原位（把 MissionScreen._isPlayerAgentAdded 复位）。"
+                       + "mode=release 可换回原始主角色。") + "}";
         }
 
         // ── release ─────────────────────────────────────────────────────────
@@ -343,6 +367,10 @@ namespace BlBridge
 
             bool currentHandedToAI = false;
             if (current != null) currentHandedToAI = HandToAI(mission, current);
+            // v0.8.32：与 take 同一条腿 —— 换回原来那个角色时也走 RTSCamera 的平滑推镜
+            // （Before → 赋值 → After）。
+            bool camShouldSmooth = false;
+            string camBeforeWhy = CameraFollow.Before(original, out camShouldSmooth);
             bool mainSet;
             try
             {
@@ -356,6 +384,12 @@ namespace BlBridge
             }
             string playerControl = ApplyPlayerControl(original);
             bool screenReset = ResetPlayerAgentAdded();
+            string camLastFollowed = "(n/a)";
+            string camAfterWhy = null;
+            if (camBeforeWhy == null)
+            {
+                camAfterWhy = CameraFollow.After(camShouldSmooth, out camLastFollowed);
+            }
 
             // 与 take 同一口径：ok 由回读决定（主角色是否真的换回 + 控制器回读）
             Agent afterMain = SafeMainAgent(mission);
@@ -374,6 +408,8 @@ namespace BlBridge
                 + ",\"previousHandedToAI\":" + Jw.B(currentHandedToAI)
                 + ",\"playerControlError\":" + (playerControl == null ? "null" : Protocol.Q(playerControl))
                 + ",\"screenReset\":" + Jw.B(screenReset)
+                + ",\"cameraFollow\":" + CameraFollowJson(camBeforeWhy, camShouldSmooth,
+                                                         camAfterWhy, camLastFollowed)
                 // v0.8.30：与 status / take 对齐，把"接管前那个 agent 的下标"也**结构化成字段**
                 // 回传（旧实现只在 note 文案里出现 ⇒ 调用方要拿它做断言只能去抠字符串）。
                 + ",\"originalIndex\":" + Jw.N(_originalMainAgentIndex)
@@ -525,8 +561,32 @@ namespace BlBridge
         }
 
         /// <summary>
+        /// v0.8.32：把相机跟随的结果拼成 JSON 片段（`cameraFollow:{...}`）。**绝不抛**。
+        ///
+        /// 字段口径：`applied` = 上游那对方法**真的调到了**（两步都没报 why）；`shouldSmooth` = 上游
+        /// `BeforeSetMainAgent` 的返回值（true = 它接下来会做平滑推镜）；`lastFollowed` = 调用后回读的
+        /// `MissionScreen.LastFollowedAgent`（**这才是判据**，不是"我们调了方法"）；
+        /// `why` = 不可用/失败的原因（没装 RTSCamera / 版本漂移 / 抛异常，各说各的）。
+        /// </summary>
+        private static string CameraFollowJson(string beforeWhy, bool shouldSmooth, string afterWhy,
+                                              string lastFollowed)
+        {
+            bool applied = beforeWhy == null && afterWhy == null;
+            return "{\"applied\":" + Jw.B(applied)
+                + ",\"how\":" + Protocol.Q("reflection MissionSharedLibrary.Utilities.Utility"
+                    + ".BeforeSetMainAgent / AfterSetMainAgent")
+                + ",\"shouldSmooth\":" + Jw.B(shouldSmooth)
+                + ",\"lastFollowed\":" + Protocol.Q(lastFollowed)
+                + ",\"shouldSmoothFlagNext\":" + Protocol.Q(CameraFollow.ShouldSmoothText())
+                + ",\"why\":" + Protocol.Q(beforeWhy == null ? (afterWhy == null ? "" : afterWhy) : beforeWhy)
+                + "}";
+        }
+
+        /// <summary>
         /// 让 `MissionScreen` 重新认一次玩家 agent：把私有字段 `_isPlayerAgentAdded` 置 false。
         /// 这一步失败只降级（返回 false ⇒ 回传 `screenReset:false`），**不假装成功**。
+        /// v0.8.32：装了 RTSCamera 时，它等价于上游 `AfterSetMainAgent(should=false, …)` 的 else 分支 ——
+        /// 我们仍然保留它作为**兜底**（`CameraFollow` 不可用时行为与 v0.8.31 完全一致）。
         /// </summary>
         private static bool ResetPlayerAgentAdded()
         {
