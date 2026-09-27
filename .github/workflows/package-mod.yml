@@ -1,0 +1,26 @@
+name: Package MOD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package lua_mod into MOD zip
+        run: |
+          MOD_NAME=BannerlordBlbridge
+          rm -rf build && mkdir -p "build/$MOD_NAME"
+          cp -r lua_mod/* "build/$MOD_NAME/"
+          cd build && zip -r "../$MOD_NAME.zip" "$MOD_NAME"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BannerlordBlbridge
+          path: BannerlordLuaMcpRemote.zip
