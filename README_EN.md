@@ -1,11 +1,14 @@
-# Bannerlord blbridge
+# BlBridge · Text Channel (Bannerlord blbridge)
 
-> Let an AI Agent remotely control *Mount & Blade II: Bannerlord* over the MCP protocol, for automated MOD testing.
+> This repository is the **text channel** of the **BlBridge** project: `lua_mod/` (in-game Lua bridge) + `mcp_server/` (Python MCP server).
+> BlBridge also has a **DLL channel** (the C# DLL in `Modules/BlBridge/` plus the MCP sub-package in `Modules/BlBridge/mcp/`, i.e. the `blbridge` MCP). Both are the **same project**, both use local file IPC, and can coexist.
+>
+> Purpose: let an AI Agent remotely control *Mount & Blade II: Bannerlord* over the MCP protocol, for automated MOD testing.
 > 中文版：见 [README.md](./README.md)。
 
 ## Project Introduction
 
-Bannerlord blbridge splits "game control" into two ends:
+This repo (BlBridge's text channel) splits "game control" into two ends:
 
 - **MOD side (in-game)**: A small Lua script that polls a local `cmd.txt` on every game tick, parses the command, calls the game API, then writes the result to `state.json`.
 - **External MCP Server (Python)**: A stdio MCP service that handles MCP protocol parsing and bridges files between the Agent and the game MOD (writes `cmd.txt` / reads `state.json`).

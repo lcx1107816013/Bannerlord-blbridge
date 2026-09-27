@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""端到端自动化流水线 Demo（Bannerlord 工具链联动）。
+"""端到端自动化流水线 Demo（BlBridge 工具链联动）。
 
-作用：用一个最小的 MCP stdio 客户端，把「资料库 / 汉化 / 运行时控制 / 本项目」四个
-MCP 服务器按顺序串成一条流水线跑一遍。
+作用：用一个最小的 MCP stdio 客户端，把参与自动化的各 MCP 服务器
+（**本项目两条通道** + 外部**资料库 / 汉化**）按顺序串成一条流水线跑一遍。
 
 组成：
   * McpStdioClient —— 极简 MCP 客户端（initialize + tools/call，仅标准库）。
-  * SERVERS       —— 服务器名 -> 启动命令（本题默认只配好本项目；其余见 servers.json）。
+  * SERVERS       —— 服务器名 -> 启动命令（默认只配好本项目文本通道；其余见 servers.json）。
   * PIPELINE      —— 有序步骤表，每步标注 side_effect（是否改变状态/需要游戏）。
+
+本项目 = BlBridge，含两条通道：
+  * 文本通道（本仓库）：`mcp_server/server.py`，server 名 "project"。
+  * DLL 通道（随游戏安装）：`<游戏根>/Modules/BlBridge/mcp/bl_mcp.py`，server 名 "blbridge"。
 
 用法：
   python examples/e2e_pipeline.py                 # 默认 --only-safe：只跑无副作用步骤
@@ -15,7 +19,7 @@ MCP 服务器按顺序串成一条流水线跑一遍。
   python examples/e2e_pipeline.py --servers path  # 指定 servers.json 配置
   python examples/e2e_pipeline.py --list          # 只打印流水线步骤
 
-说明：未配置启动命令的服务器，其步骤会被「跳过」而非报错；因此开箱即用（只有本项目会被真正拉起）。
+说明：未配置启动命令的服务器，其步骤会被「跳过」而非报错；因此开箱即用（只有本项目文本通道会被真正拉起）。
 """
 import json
 import os
@@ -25,14 +29,17 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_SERVERS = {
+    # 本项目 · 文本通道（本仓库的 Python MCP）
     "project": [sys.executable, os.path.join(REPO, "mcp_server", "server.py")],
-    # 以下按你的实际挂载方式填写（见 examples/servers.example.json），留空则跳过其步骤
+    # 本项目 · DLL 通道（BlBridge 自带 MCP 子包，随游戏安装；默认按 <游戏根> 定位，未配置则跳过）
+    "blbridge": None,
+    # 外部服务器（按你的实际挂载方式填写，见 examples/servers.example.json）
     "bannerlordsage": None,
     "bannerlordhelper": None,
-    "blbridge": None,
 }
 
 # (服务器, 工具, 参数, 是否有副作用/是否依赖运行中的游戏)
+# 说明：blbridge.* 是本项目「DLL 通道」的工具；project.* 是本项目「文本通道」的工具。
 PIPELINE = [
     ("bannerlordsage", "search_bannerlord_knowledge", {"query": "MobileParty"}, False),
     ("bannerlordsage", "bannerlord_doctor", {}, False),
@@ -132,10 +139,9 @@ def main():
 
     servers = load_servers(servers_path)
     print(f"模式: {'仅安全步骤(--only-safe)' if only_safe else '全部步骤(--all)'}")
-    print(f"配置: {servers_path or '（默认，仅本项目已配置）'}\n")
+    print(f"配置: {servers_path or '（默认，仅本项目文本通道已配置）'}\n")
 
     clients, needed, results = {}, set(), []
-    # 预启动需要且已配置的服务器
     for srv, _tool, _a, se in PIPELINE:
         if only_safe and se:
             continue

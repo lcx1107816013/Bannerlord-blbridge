@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bannerlord blbridge —— 外置 MCP Server (stdio)。
+"""BlBridge · 文本通道 —— MCP Server (stdio)。
 
 职责：
   1. 解析 MCP(JSON-RPC) 协议：initialize / ping / tools/list / tools/call。

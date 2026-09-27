@@ -1,8 +1,10 @@
 {
-  "_comment": "复制为 examples/servers.json 并按你的实际挂载方式填写各 MCP 服务器的启动命令；留空(null)则该服务器的步骤会被跳过。",
-  "_note_command": "命令为数组：[可执行文件, 参数...]，例如 [\"node\", \"path\\\\to\\\\blbridge-mcp.js\"] 或 [\"python\", \"-m\", \"my_blbridge_mcp\"]。",
+  "_comment": "复制为 examples/servers.json 并按你的实际挂载方式填写各 MCP 服务器启动命令；留空(null)则该服务器的步骤会被跳过。",
+  "_note_command": "命令为数组：[可执行文件, 参数...]，例如 [\"python\", \"mcp_server/server.py\"]。",
+  "_project_channels": "project = 本项目·文本通道（本仓库 mcp_server/server.py）；blbridge = 本项目·DLL 通道（随游戏安装的 <游戏根>/Modules/BlBridge/mcp/bl_mcp.py）。",
+  "_external": "bannerlordsage / bannerlordhelper 为外部 MCP，按你的挂载方式填写。",
   "project": ["python", "mcp_server/server.py"],
+  "blbridge": null,
   "bannerlordsage": null,
-  "bannerlordhelper": null,
-  "blbridge": null
+  "bannerlordhelper": null
 }

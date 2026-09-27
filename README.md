@@ -1,11 +1,14 @@
-# Bannerlord blbridge
+# BlBridge · 文本通道（Bannerlord blbridge）
 
-> 通过 MCP 协议让 AI Agent 远程操控《骑马与砍杀2：霸主》，用于 MOD 的自动化测试。
+> 本仓库是 **BlBridge** 项目的**文本通道**：`lua_mod/`（游戏内 Lua 桥）+ `mcp_server/`（Python MCP 服务器）。
+> BlBridge 另有 **DLL 通道**（`Modules/BlBridge/` 的 C# DLL + `Modules/BlBridge/mcp/` 的 MCP 子包，即 `blbridge` MCP）。两者**同源同项目**、都走本地文件 IPC，可并存。
+>
+> 用途：通过 MCP 协议让 AI Agent 远程操控《骑马与砍杀2：霸主》，用于 MOD 的自动化测试。
 > English version: see [README_EN.md](./README_EN.md).
 
 ## 项目简介
 
-Bannerlord blbridge 把"游戏操控"拆成两端：
+本仓库（BlBridge 的文本通道）把"游戏操控"拆成两端：
 
 - **MOD 端（游戏内）**：少量 Lua 脚本，随游戏 tick 轮询本地 `cmd.txt`，解析指令后调用游戏 API，再把结果写入 `state.json`。
 - **外置 MCP Server（Python）**：一个 stdio 型 MCP 服务，负责 MCP 协议解析，并在 Agent 与游戏 MOD 之间做文件桥接（写 `cmd.txt` / 读 `state.json`）。
