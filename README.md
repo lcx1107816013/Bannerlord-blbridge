@@ -108,7 +108,7 @@ MCP 客户端配置（写入对应客户端的 `settings.json` 的 `mcp.servers`
 | 脚本化编排 / 自动化断言 | **本项目** | 57 个工具 + Lua 文本桥（`run_ops` / `assert_state` 等） |
 
 > `blbridge` 是 C# DLL 直连（功能强、需部署）；本项目是 Lua 文本桥（轻量、可移植、易扩展），两者互补。
-> 端到端流水线与注意事项见 [docs/工具链联动.md](./docs/工具链联动.md)。
+> 端到端流水线、场景选型对照与示例脚本见 [docs/工具链联动.md](./docs/工具链联动.md)；可运行 Demo：`python examples/e2e_pipeline.py`。
 
 ## 特别鸣谢
 

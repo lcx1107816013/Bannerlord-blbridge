@@ -108,7 +108,7 @@ This project is a *lightweight scripting bridge* covering only the orchestration
 | Scripting / automated assertions | **this project** | 57 tools + Lua text bridge (`run_ops` / `assert_state`, etc.) |
 
 > `blbridge` is a C#-DLL direct link (powerful, needs deployment); this project is a Lua text bridge (lightweight, portable, easy to extend). They complement each other.
-> See [docs/工具链联动.md](./docs/工具链联动.md) for the end-to-end pipeline and caveats.
+> See [docs/工具链联动.md](./docs/工具链联动.md) for the end-to-end pipeline, scenario-based selection and the sample script; runnable demo: `python examples/e2e_pipeline.py`.
 
 ## Acknowledgements
 
