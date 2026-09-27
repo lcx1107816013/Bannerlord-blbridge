@@ -1,0 +1,14 @@
+<Module>
+  <Name>BannerlordBlbridge</Name>
+  <Id>BannerlordBlbridge</Id>
+  <Version>0.1.0</Version>
+  <SingleplayerModule>true</SingleplayerModule>
+  <MultiplayerModule>false</MultiplayerModule>
+  <DependedModules>
+    <DependedModule Id="Native"/>
+  </DependedModules>
+  <SubModules>
+    <SubModule Name="BannerlordBlbridge" DLLName=""/>
+  </SubModules>
+  <Xmls/>
+</Module>
