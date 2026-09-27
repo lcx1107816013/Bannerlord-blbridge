@@ -66,15 +66,24 @@ MCP 客户端配置（写入对应客户端的 `settings.json` 的 `mcp.servers`
 | `BL_BRIDGE_DIR` | 是 | `cmd.txt` / `state.json` 所在目录（MOD 端与 Python 端必须一致）。 |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | 否（仅用 `github-mcp-server` 管理仓库时需要） | 官方 `github-mcp-server` 的鉴权变量；本项目运行本身不依赖它。请通过系统环境变量注入，勿写入任何文件或提交到仓库。 |
 
-## 工具列表（示例）
+## 工具列表（共 57 个）
 
-| 工具 | 说明 | 参数 |
-|------|------|------|
-| `spawn_troop` | 在场景中生成一支部队 | `partyId`, `troopId`, `count` |
-| `get_hero_stats` | 读取某英雄的属性/技能 | `heroId` |
-| `read_state` | 读取最近一次 `state.json` | 无 |
+**本地工具（11 个，Python 直接处理）**：
+`ping`、`get_bridge_info`、`list_ops`、`get_protocol`、`read_state`、`wait_for_state`、`clear_state`、`assert_state`、`run_ops`、`send_raw`、`sleep`
 
-> 工具名、参数与描述以 `mcp_server/server.py` 中 `TOOLS` 定义为准。新增工具请在 `TOOLS` 与 `_dispatch` 两处同步添加。
+**游戏工具（46 个，转发给游戏内 MOD 执行）**，按类别：
+
+| 类别 | 工具 |
+|------|------|
+| 主角 / 英雄 | `get_player`、`set_player_gold`、`add_player_gold`、`get_player_inventory`、`add_item`、`get_hero_stats`、`list_heroes`、`set_hero_attr`、`heal_hero`、`wound_hero` |
+| 部队 | `spawn_troop`、`list_parties`、`get_party`、`add_troops`、`remove_troops`、`disband_party`、`teleport_party`、`merge_parties`、`start_battle`、`auto_resolve_battle`、`get_visible_parties`、`get_map_entities` |
+| 定居点 | `list_settlements`、`get_settlement`、`set_settlement_owner` |
+| 王国 / 家族 / 外交 | `list_kingdoms`、`list_clans`、`declare_war`、`make_peace`、`get_relations` |
+| 世界 / 时间 | `get_campaign_time`、`get_time_scale`、`set_time_scale`、`fast_forward`、`pause_game`、`resume_game`、`get_weather`、`set_weather` |
+| 任务 / 日志 / 存档 | `list_quests`、`add_quest`、`complete_quest`、`get_missions`、`get_campaign_log`、`save_game`、`load_game` |
+| 测试辅助 | `take_snapshot` |
+
+> 定义在 `mcp_server/server.py` 的 `ENTRIES` 中；新增工具需在 `ENTRIES` 与 `lua_mod/bridge.lua` 的 `OP2FN` 两处同步登记。运行时可用 `list_ops` / `get_protocol` 自省。
 
 ## 高级实用技巧
 

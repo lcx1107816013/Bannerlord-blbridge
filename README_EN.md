@@ -66,15 +66,24 @@ MCP client config (put under `mcp.servers` in your client's `settings.json`):
 | `BL_BRIDGE_DIR` | Yes | Directory of `cmd.txt` / `state.json` (must be identical on MOD and Python sides). |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | No (only needed if you use `github-mcp-server` for repo management) | Auth token for the official `github-mcp-server`; this project does not depend on it at runtime. Inject it via a system environment variable — never write it to a file or commit it. |
 
-## Tool List (examples)
+## Tool List (57 tools)
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `spawn_troop` | Spawn a troop party in the scene | `partyId`, `troopId`, `count` |
-| `get_hero_stats` | Read a hero's attributes/skills | `heroId` |
-| `read_state` | Read the latest `state.json` | none |
+**Local tools (11, handled in Python)**:
+`ping`, `get_bridge_info`, `list_ops`, `get_protocol`, `read_state`, `wait_for_state`, `clear_state`, `assert_state`, `run_ops`, `send_raw`, `sleep`
 
-> Tool names, parameters and descriptions follow the `TOOLS` definition in `mcp_server/server.py`. To add a tool, update both `TOOLS` and `_dispatch`.
+**Game tools (46, forwarded to the in-game MOD)**, by category:
+
+| Category | Tools |
+|----------|-------|
+| Player / Hero | `get_player`, `set_player_gold`, `add_player_gold`, `get_player_inventory`, `add_item`, `get_hero_stats`, `list_heroes`, `set_hero_attr`, `heal_hero`, `wound_hero` |
+| Party | `spawn_troop`, `list_parties`, `get_party`, `add_troops`, `remove_troops`, `disband_party`, `teleport_party`, `merge_parties`, `start_battle`, `auto_resolve_battle`, `get_visible_parties`, `get_map_entities` |
+| Settlement | `list_settlements`, `get_settlement`, `set_settlement_owner` |
+| Kingdom / Clan / Diplomacy | `list_kingdoms`, `list_clans`, `declare_war`, `make_peace`, `get_relations` |
+| World / Time | `get_campaign_time`, `get_time_scale`, `set_time_scale`, `fast_forward`, `pause_game`, `resume_game`, `get_weather`, `set_weather` |
+| Quest / Log / Save | `list_quests`, `add_quest`, `complete_quest`, `get_missions`, `get_campaign_log`, `save_game`, `load_game` |
+| Test helpers | `take_snapshot` |
+
+> Defined in `ENTRIES` of `mcp_server/server.py`; to add a tool, register it both in `ENTRIES` and in `OP2FN` of `lua_mod/bridge.lua`. At runtime, use `list_ops` / `get_protocol` to introspect.
 
 ## Advanced Tips
 
