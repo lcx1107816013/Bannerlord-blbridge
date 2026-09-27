@@ -33,6 +33,12 @@ for _, fn in pairs(OP2FN) do Game[fn] = function(c) return { stub = true, op = c
 Game.spawnTroop = function(c) return { ok = true, partyId = c.partyId, spawned = c.count } end
 Game.getHeroStats = function(c) return { heroId = c.heroId, level = math.random(1, 40), hp = math.random(50, 150) } end
 
+-- 可选宿主绑定：若同目录存在 bindings.lua，则加载并覆盖上述桩方法（失败静默，保留桩）
+pcall(function()
+  local b = dofile(DIR .. "bindings.lua")
+  if type(b) == "table" then for k, v in pairs(b) do Game[k] = v end end
+end)
+
 -- 极简 table->json（支持嵌套 table / string / number / boolean）
 local function enc(v)
   local t = type(v)
@@ -93,4 +99,9 @@ local function loop()
   pcall(tick)                 -- 顶层再包一层，确保任何异常都不抛出到游戏主循环
 end
 
-return { loop = loop, tick = tick, ops = OP2FN }
+local function bind(t)      -- 供宿主显式注入绑定：键为 OP2FN 的值（驼峰法名）
+  if type(t) == "table" then for k, v in pairs(t) do Game[k] = v end end
+  return Game
+end
+
+return { loop = loop, tick = tick, ops = OP2FN, bind = bind }

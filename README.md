@@ -88,7 +88,8 @@ MCP 客户端配置（写入对应客户端的 `settings.json` 的 `mcp.servers`
 ## 高级实用技巧
 
 - **调节延迟与稳定**：调整 `lua_mod/bridge.lua` 中 `loop` 的调用频率（轮询间隔），以及在 `mcp_server/server.py` 中调整 `POLL_TIMEOUT`，在响应速度与稳定性之间取舍。
-- **扩展工具**：在 `server.py` 的 `TOOLS` 与 `_dispatch` 两处同步新增工具定义与处理逻辑即可。
+- **扩展工具**：在 `server.py` 的 `ENTRIES` 与 `lua_mod/bridge.lua` 的 `OP2FN` 两处同步登记即可（`local=True` 的工具只在 Python 侧实现）。
+- **接入真实游戏 API**：`lua_mod/bindings.lua` 是宿主绑定示例，`bridge.lua` 启动时会自动加载同目录的它来覆盖桩方法；也可由宿主 `require` 后调用 `bridge.bind(表)` 显式注入。方法/属性名需按你的 Lua 宿主环境核对。
 - **多指令队列**：当前为"单指令覆盖"模型；如需连续下发多条指令，在 Python 端自建内存队列，逐条下发并等待回执，避免 `cmd.txt` 竞态覆盖。
 - **自动化测试闭环**：用 `read_state` 轮询游戏状态做断言，把测试脚本化、可重复执行。
 - **跨机/远程操控**：只要 `BL_BRIDGE_DIR` 指向网络共享目录，Agent 与游戏不必同机。

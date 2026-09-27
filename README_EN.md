@@ -88,7 +88,8 @@ MCP client config (put under `mcp.servers` in your client's `settings.json`):
 ## Advanced Tips
 
 - **Tune latency vs. stability**: Adjust the `loop` poll interval in `lua_mod/bridge.lua` and `POLL_TIMEOUT` in `mcp_server/server.py` to trade off responsiveness and stability.
-- **Extend tools**: Add the tool definition and handling in `TOOLS` and `_dispatch` of `server.py`.
+- **Extend tools**: Register in `ENTRIES` of `server.py` and in `OP2FN` of `lua_mod/bridge.lua` (`local=True` tools live only in Python).
+- **Bind real game APIs**: `lua_mod/bindings.lua` is a host-binding sample; `bridge.lua` auto-loads it from the same directory to override the stubs. You can also inject via `bridge.bind(table)` from your host script. Verify method/property names against your Lua host before enabling.
 - **Multi-command queue**: The current model is "single command overwrite". For sequential commands, build an in-memory queue on the Python side, dispatch one at a time and wait for the receipt to avoid `cmd.txt` races.
 - **Automated test loop**: Use `read_state` to poll game state and make assertions, turning tests into repeatable scripts.
 - **Remote / cross-machine control**: As long as `BL_BRIDGE_DIR` points to a network-shared folder, the Agent and the game need not be on the same machine.
