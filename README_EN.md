@@ -95,20 +95,19 @@ MCP client config (put under `mcp.servers` in your client's `settings.json`):
 - **Remote / cross-machine control**: As long as `BL_BRIDGE_DIR` points to a network-shared folder, the Agent and the game need not be on the same machine.
 - **Troubleshooting**: The `err` field in `state.json` quickly distinguishes `bad_cmd` (malformed command) / `timeout` / `unknown_op` (unknown operation).
 
-## Ecosystem Integration (Bannerlord Toolchain)
+## Ecosystem Integration (BlBridge Toolchain)
 
-This project is a *lightweight scripting bridge* covering only the orchestration layer. **MOD authoring/editing, localization, and game-client / BLSE debugging & launching** are provided by dedicated MCP servers and orchestrated by the AI Agent:
+This project **is BlBridge**: one mod package, two units (unit A = the C# DLL in `Modules/BlBridge/`; unit B = the MCP sub-package in `Modules/BlBridge/mcp/`), exposing **two access channels**, plus two external MCP servers for knowledge / authoring / localization:
 
-| Stage | MCP server | Representative tools |
+| Stage | Belongs to | Representative tools |
 |-------|-----------|----------------------|
-| Knowledge / API / install diagnostics | `bannerlordsage` | `search_bannerlord_knowledge`, `search_bannerlord_api_docs`, `bannerlord_doctor` |
-| MOD authoring / editing / patches | `bannerlordsage` | `create_mod_workspace`, `generate_harmony_patch`, `generate_xslt_patch`, `index_mod_source` |
-| Localization / translation | `bannerlordhelper` | `bh_list_local_modules`, `bh_translate_module`, `bh_create_external_translation` |
-| Launch / client control / runtime debug | `blbridge` | `bl_launch_game` (via BLSE), `bl_status`, `bl_get_screen`, `bl_load_save`, `bl_apply_config` |
-| Scripting / automated assertions | **this project** | 57 tools + Lua text bridge (`run_ops` / `assert_state`, etc.) |
+| Launch / BLSE debug / UI / saves / config / battle control | **This project · DLL channel** (`blbridge` MCP) | `bl_launch_game`, `bl_status`, `bl_get_screen`, `bl_load_save`, `bl_start_battle` |
+| Scripting / automated assertions / custom ops | **This project · text channel** (this repo) | 57 tools + Lua text bridge (`run_ops`, `assert_state`) |
+| Knowledge / API / diagnostics / MOD authoring | External `bannerlordsage` | `search_bannerlord_api_docs`, `bannerlord_doctor`, `create_mod_workspace` |
+| Localization / translation | External `bannerlordhelper` | `bh_translate_module`, `bh_create_external_translation` |
 
-> `blbridge` is a C#-DLL direct link (powerful, needs deployment); this project is a Lua text bridge (lightweight, portable, easy to extend). They complement each other.
-> See [docs/工具链联动.md](./docs/工具链联动.md) for the end-to-end pipeline, scenario-based selection and the sample script; runnable demo: `python examples/e2e_pipeline.py`.
+> The `blbridge` MCP is **not third-party** — it is BlBridge's own DLL channel. It and this repo's text channel are the same project, both use local file IPC, and can coexist: **the DLL channel does the heavy lifting, the text channel does the light scripting.**
+> See [docs/工具链联动.md](./docs/工具链联动.md) for the end-to-end pipeline, channel selection and the sample script; runnable demo: `python examples/e2e_pipeline.py`.
 
 ## Acknowledgements
 

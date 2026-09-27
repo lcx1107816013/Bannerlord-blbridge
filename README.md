@@ -95,20 +95,19 @@ MCP 客户端配置（写入对应客户端的 `settings.json` 的 `mcp.servers`
 - **跨机/远程操控**：只要 `BL_BRIDGE_DIR` 指向网络共享目录，Agent 与游戏不必同机。
 - **排查问题**：`state.json` 的 `err` 字段可快速区分 `bad_cmd`（指令格式错误）/ `timeout`（超时）/ `unknown_op`（未知操作）。
 
-## 生态联动（Bannerlord 工具链）
+## 生态联动（BlBridge 工具链）
 
-本项目是「轻量脚本化桥」，只负责脚本化编排这一环；**MOD 编辑/制作、汉化、客户端与 BLSE 调试/启动**由以下现成 MCP 服务器提供，由 AI Agent 统一调度：
+本项目即 **BlBridge**：一个 mod 包、两个单元（单元 A = `Modules/BlBridge/` 的 C# DLL；单元 B = `Modules/BlBridge/mcp/` 的 MCP 子包），对外提供**两条接入通道**，另有两个外部 MCP 负责查 / 造 / 译：
 
-| 环节 | MCP 服务器 | 代表工具 |
-|------|-----------|----------|
-| 资料 / API / 知识查询、安装诊断 | `bannerlordsage` | `search_bannerlord_knowledge`、`search_bannerlord_api_docs`、`bannerlord_doctor` |
-| MOD 制作 / 编辑 / 补丁生成 | `bannerlordsage` | `create_mod_workspace`、`generate_harmony_patch`、`generate_xslt_patch`、`index_mod_source` |
-| 汉化 / 本地化 / 外置汉化包 | `bannerlordhelper` | `bh_list_local_modules`、`bh_translate_module`、`bh_create_external_translation` |
-| 启动 / 客户端控制 / 运行时调试 | `blbridge` | `bl_launch_game`（走 BLSE）、`bl_status`、`bl_get_screen`、`bl_load_save`、`bl_apply_config` |
-| 脚本化编排 / 自动化断言 | **本项目** | 57 个工具 + Lua 文本桥（`run_ops` / `assert_state` 等） |
+| 环节 | 归属 | 代表工具 |
+|------|------|----------|
+| 启动 / BLSE 调试 / UI / 存档 / 配置 / 战场控制 | **本项目 · DLL 通道**（`blbridge` MCP） | `bl_launch_game`、`bl_status`、`bl_get_screen`、`bl_load_save`、`bl_start_battle` |
+| 脚本化编排 / 自动化断言 / 自定义 op | **本项目 · 文本通道**（本仓库） | 57 个工具 + Lua 文本桥（`run_ops`、`assert_state`） |
+| 资料 / API / 诊断 / MOD 制作 | 外部 `bannerlordsage` | `search_bannerlord_api_docs`、`bannerlord_doctor`、`create_mod_workspace` |
+| 汉化 / 本地化 | 外部 `bannerlordhelper` | `bh_translate_module`、`bh_create_external_translation` |
 
-> `blbridge` 是 C# DLL 直连（功能强、需部署）；本项目是 Lua 文本桥（轻量、可移植、易扩展），两者互补。
-> 端到端流水线、场景选型对照与示例脚本见 [docs/工具链联动.md](./docs/工具链联动.md)；可运行 Demo：`python examples/e2e_pipeline.py`。
+> `blbridge` MCP **不是第三方**，是 BlBridge 自带的 DLL 通道；它与本仓库的文本通道同源同项目、都走本地文件 IPC、可并存——**DLL 通道做「重活」，文本通道做「轻活」**。
+> 端到端流水线、通道选型与示例脚本见 [docs/工具链联动.md](./docs/工具链联动.md)；可运行 Demo：`python examples/e2e_pipeline.py`。
 
 ## 特别鸣谢
 
