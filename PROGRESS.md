@@ -4864,6 +4864,39 @@ dispatch(+self) / **jsontest 191** / clock_reset（全量 11 历史仍 FAIL = �
 - 事件日志里 **`0xc0000005` 一共 5 次**（`Standalone.exe`），另有 `0xc0000409` ×3、`e0434352` ×4
   ⇒ 这类崩溃**不是孤例**，但每次上下文不同，本轮只深挖了 14804 这一次。
 
+#### 1.7 把 dump 里**其余 streams** 也翻了一遍 —— 为什么"JIT vs detour"结不了案
+
+结不了案**不是没努力**，而是这个 dump **结构上缺判据**。逐条记下，免得后人重复劳动：
+
+| stream | 内容 | 结论 |
+|---|---|---|
+| 3 `ThreadList` | 193 线程 | ✅ 干净；崩溃线程栈已 walk（226 个模块内返回地址） |
+| 4 `ModuleList` | 362 模块 | ✅ 干净（修了 `ModuleNameRva` 偏移后） |
+| 6 `Exception` | 异常记录 | ✅ `0xc0000005` / read / target `0x1b8` |
+| 7 `SystemInfo` | 架构/CPU/OS | ⚠️ `ProcessorArchitecture=9`(AMD64) 可信；但 `OS version` 读成 `0.0.0`、`ProductType=251` ⇒ **部分字段与解析不符，不可信** |
+| 13 `FunctionTable` | 137 描述符 | ⚠️ **头部干净**（24/32/136/12/**137**/0），但 **129/137 解出垃圾**（跨大半用户空间的区间、`EntryCount`=36 亿）。**加合法性过滤后只剩 8 个**（均 4 KB 小 stub），**故障地址不在其中** |
+| **14 `UnloadedModuleList`** | 未加载模块 | ⚠️ 按标准布局解出**乱码**（stride 与预期不符）⇒ **本项不采信**。理论上它能直接否掉"模块被卸载"，但我**没能用这个 dump 可靠解出** |
+| 15 `MiscInfo` | 进程时间等 | ⚠️ `ProcessId` 读成 `1791173165` ⇒ **解析不符，不可信** |
+| 22 `ProcessVmCounters` | 内存计数 | ⚠️ 数值不自洽 ⇒ **不可信** |
+| 24 `ThreadNames` | **线程名** | ✅ **干净**：崩溃线程 **tid=3792 无名**；9 个有名字的全是 shell/FMOD 线程 |
+| — | **16 `MemoryInfoList`** | ❌ **缺席** ⇒ **页保护（r/w/x）完全没有记录** |
+| — | 17 ThreadInfoList / 23 IptTrace | ❌ 缺席 |
+
+**⇒ 定案（诚实版）**：
+- **"崩溃在模块外内存 + 空指针解引用"是硬结论**（模块表 362 项 + 指令译码，两条独立判据）。
+- **"JIT 还是 Harmony detour"在本 dump 上无法定案**，且**原因明确**：
+  ① 无 `MemoryInfoList` ⇒ 拿不到**页保护**（JIT 与 detour 都是"可执行但非模块"的私有页，
+  区分它们正是看页属性）；② `FunctionTable` 覆盖率不可知。
+- 崩溃线程**无名**与".NET Framework 线程池 worker"**一致**（Framework 池线程默认无名），
+  但**不是判据**（无名线程在 native 里也常见）⇒ **只作方向性提示，不当证据。**
+- 另外几条 stream 我**解出的是乱码**（14/15/22 + 7 的部分字段）——
+  按项目纪律，**解不出就不采信、也不据此下结论**，只在表里标明"不可信"。
+
+**要定案需要什么**（写给下一个人）：
+1. **full-memory dump**（`MiniDumpWithFullMemory`）⇒ 有 `MemoryInfoList`，页保护一看就知道；
+2. 或**带符号**的 dump ⇒ 栈帧名能直接点出托管方法；
+3. 或**挂调试器复现**这次崩溃。
+
 ### 2. ★★ `terrain` / `randomTerrainSeed` 的 native 侧：**找到客观判据了**
 
 **为什么上次失败**：我用**截图**当判据 —— 而截图取决于**相机朝向**（不受控），
