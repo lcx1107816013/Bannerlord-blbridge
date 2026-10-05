@@ -22,6 +22,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 import bl_crash  # noqa: E402
 
@@ -155,6 +157,14 @@ def write_tmp(data, suffix=".dmp"):
 
 # ─────────────────────────────────────────────────────────────────────
 def main():
+    # 输出统一 UTF-8（见 bl_common.safe_streams 的 docstring：写入编码 ≠ 读取编码）。
+    # ⚠️ 2026-10-06 补：本自测原先**没调它**，于是在中文 Windows 上裸跑必挂 ——
+    #    下面 ③ 的 print 里有 `⇒`，而 Python 默认按 locale(cp936) 写 stdout，
+    #    cp936 里没有 U+21D2 ⇒ `UnicodeEncodeError` 直接终止整个自测
+    #    （**看起来像自测失败，其实是编码问题**）。同批修的还有 bl_patches_selftest.py。
+    import bl_common
+    bl_common.safe_streams()
+
     print("=" * 70)
     print("bl_crash.py 自测")
     print("=" * 70)

@@ -136,6 +136,13 @@ def _run(logdir, args, method="get_patches"):
 
 
 def main():
+    # 输出统一 UTF-8（见 bl_common.safe_streams 的 docstring：写入编码 ≠ 读取编码）。
+    # ⚠️ 2026-10-06 补：本自测原先**没调它** ⇒ 在中文 Windows 上裸跑必挂：
+    #    本文件 `check()` 打印的标签里含 `⇒`，而 Python 默认按 locale(cp936) 写 stdout，
+    #    cp936 无 U+21D2 ⇒ `UnicodeEncodeError` 直接终止（**看着像自测失败，实为编码**）。
+    import bl_common
+    bl_common.safe_streams()
+
     print("=" * 78)
     print("bl_patches 自测（离线：文件 IPC + 假游戏端）")
     print("=" * 78)

@@ -869,6 +869,16 @@ def fmt(report):
 
 
 def main(argv=None):
+    # 输出统一 UTF-8（见 bl_common.safe_streams 的 docstring：写入编码 ≠ 读取编码）。
+    # ⚠️ 2026-10-06 补：本模块原先**没调它** ⇒ 作为 CLI 裸跑必挂：
+    #    非 --json 分支走 `fmt(rep)`，而报告文本里含 `⇒`/`⚠`，
+    #    Python 默认按 locale(cp936) 写 stdout，cp936 无这些码位
+    #    ⇒ `UnicodeEncodeError` 崩在 `sys.stdout.write`（**看着像工具坏了，实为编码**）。
+    #    实测：`python tools/bl_crash.py` 在中文 Windows 上 exit=1 且无任何输出。
+    #    注意 MCP 路径不受影响（`bl_mcp.py` 入口自己钉了 UTF-8），只有 CLI 裸跑会踩。
+    import bl_common
+    bl_common.safe_streams()
+
     argv = list(sys.argv[1:] if argv is None else argv)
     kw = {"limit": 8, "latest": False, "want_stack": False, "pid": None,
           "path": None, "json": False, "deep": False, "cdb": None}
