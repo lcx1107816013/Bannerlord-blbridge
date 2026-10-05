@@ -9,11 +9,18 @@
 它不是给玩家看的，是给 **AI coding agent** 看的：读完这一页，你就能把 BlBridge 的**控制通道**接成 MCP 工具，
 从而**既能让玩家用游戏内界面，也能自己驱动游戏**。
 
+> 📘 **这一页只是速览。完整教程在 `AI-TUTORIAL.md`（同目录）** —— 覆盖「装 MCP → 加载 mod 进游戏 →
+> 用能力干活（开战/改令/接管士兵/读界面/读库存/存档/改配置/跑批）」全流程，外加 JSONL 事件格式、
+> 常见报错归因表与最短上手闭环。不确定下一步做什么时，读它。
+
 > 同一个 mod 包里的两个单元：
-> **单元 A** = `Modules\BlBridge\`（DLL + 游戏内面板 + 本地化）——游戏与启动器读它；
-> **单元 B** = 本目录（MCP 服务器 + 本说明 + manifest）——AI 读它。
-> 两者共用**同一条后端**：面板上的「开始战斗」按钮与 MCP 的 `bl_start_battle` 走同一个入口，
-> 所以不存在"界面上能做的、端口做不了"。
+> **单元 A** = `Modules\BlBridge\`（`SubModule.xml` + `bin\...\BlBridge.dll`）——游戏与启动器读它；
+> **单元 B** = 本目录（MCP 服务器 + 说明 + manifest + `AI-TUTORIAL.md`）——AI 读它。
+> 两者共用**同一条后端**：界面与端口最终落到同一条官方开战链，所以不存在"界面上能做的、端口做不了"
+> （唯一例外是"用鼠标点选"这个动作本身）。
+>
+> ⚠️ **v0.8.14 起不再自建游戏内界面**：官方自定义战斗本身就是完整入口（战斗 / 围攻 / 村庄 / 海战 / 海上掠夺），
+> 自建面板与主菜单入口已删。分工定格：**人用官方界面玩，AI 用端口调**。
 
 ## 1. 先看这三件事
 
@@ -70,20 +77,18 @@ python "<游戏根>\Modules\BlBridge\mcp\bl_cmd.py" status          # ② 游戏
 
 ## 4. 两个入口，一条管线
 
-| 你想做的事 | 玩家侧（界面） | AI 侧（本 MCP 包） |
+| 你想做的事 | 玩家侧（官方界面） | AI 侧（本 MCP 包） |
 |---|---|---|
-| 唤起 BlBridge 面板 | 主菜单点「BlBridge 战场面板」 | `bl_open_ui`（不传 id 即本面板） |
-| 进官方自定义战斗选兵界面 | 主菜单点「Custom Battle」 | `bl_open_ui` + `uiId=CustomBattle` |
-| 开一场 AI 对 AI 战斗 | 面板上调好参数点「开始战斗」 | `bl_start_battle` |
-| 看有哪些入口 / 可用场景 | 面板上的场景轮选 | `bl_list_ui` |
-| 离开面板回主菜单 | 面板上的「返回主菜单」 | `bl_close_ui` |
-| 离开官方选兵界面（回到主菜单） | 官方界面上的「返回」 | `bl_close_ui` + `state=CustomBattleState` |
+| 进自定义战斗选兵界面 | 主菜单点「Custom Battle」 | `bl_open_ui`（缺省 `uiId=CustomBattle`） |
+| 开一场 AI 对 AI 战斗 | 界面上选好兵种后点「开始」 | `bl_start_battle` |
+| 看有哪些入口 / 可用场景 | 界面上的场景轮选 | `bl_list_ui` |
+| 离开选兵界面（回到主菜单） | 官方界面上的「返回」 | `bl_close_ui` + `state=CustomBattleState` |
 
 推荐的最小闭环（不需要玩家手动点任何东西）：
 
 ```powershell
 python bl_cmd.py buildcheck                 # 先确认"跑的是不是我以为的那份 DLL"
-python bl_cmd.py open-ui                    # 唤起 BlBridge 面板（也可 --id CustomBattle）
+python bl_cmd.py open-ui                    # 进官方自定义战斗界面（可 --id <其它入口>）
 python bl_cmd.py start --attacker imperial_legionary --defender battanian_wildling --a 20 --d 20
 python bl_cmd.py wait --state ended --timeout 300
 python bl_cmd.py status
@@ -91,13 +96,13 @@ python bl_cmd.py status
 
 ## 5. 已知边界（省得你当成 bug 排查）
 
-1. **入口动作是 fire-and-forget**：`open_ui` 返回 `requested:true` 只代表已触发；面板约需 1~5 秒加载完。
-   看 `bl_list_ui` 的 `activeState` 是否变成 `BattleSetupState`（面板）或 `CustomBattleState`（官方界面）。
+1. **入口动作是 fire-and-forget**：`open_ui` 返回 `requested:true` 只代表已触发；官方界面约需 1~5 秒加载完。
+   看 `bl_list_ui` 的 `activeState` 是否变成 `CustomBattleState`。
 2. **`open_ui` 的 `uiId` 必须存在**：不存在返回 `unknown_ui` 并附可用 id 清单（引擎侧 `ExecuteInitialStateOptionWithId`
    本身是**静默失败**，我们刻意把它变成显式错误）。
    ⚠️ 参数名是 **`uiId`**，**不是 `id`**：控制通道的 JSON 读取器（`src/Jmini.cs`）是扁平的，
    而请求信封自带 `id`（请求 id）⇒ 用 `id` 传参会被信封那个值顶掉（v0.8.12 真机踩过）。
-3. **`start_battle` 的前提是"自定义战斗数据已加载"**：停在官方 `CustomBattleState` 或 BlBridge 面板都算；
+3. **`start_battle` 的前提是"自定义战斗数据已加载"**：停在官方 `CustomBattleState` 才算；
    裸主菜单不算（那时所有兵种 id 都会报 `unknown_troop`）。
 3b. **`open_ui` 只在主菜单可用**（返回码 `wrong_state_for_ui`）：`InitialStateOption` 的 action 基本都是
    `MBGameManager.StartNewGame(...)`，在已加载 Game 的状态下执行它会让状态栈**卡在 `GameLoadingState`**

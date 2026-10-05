@@ -92,6 +92,40 @@ namespace BlBridge
                     }
                 }
 
+                if (Jmini.Has(raw, "maxActionLogBytes"))
+                {
+                    double v = Jmini.Num(raw, "maxActionLogBytes", double.NaN);
+                    // 0 = 不轮转（默认）；>0 ⇒ 1 KiB ~ 1 GiB。小于 1 KiB 会每写几行就轮转一次，
+                    // 等于把账本变成垃圾场，所以下限卡住而不是"照单全收"。
+                    if (double.IsNaN(v) || v < 0.0 || v > 1073741824.0)
+                    {
+                        errs.Append("maxActionLogBytes 必须在 0（不轮转）或 1024~1073741824 之间，已忽略；");
+                    }
+                    else if (v > 0.0 && v < 1024.0)
+                    {
+                        errs.Append("maxActionLogBytes 若大于 0 则必须 ≥1024（否则每几行轮转一次），已忽略；");
+                    }
+                    else
+                    {
+                        BridgeConfig.MaxActionLogBytes = (int)v;
+                        any = true;
+                    }
+                }
+
+                if (Jmini.Has(raw, "actionLogKeepFiles"))
+                {
+                    double v = Jmini.Num(raw, "actionLogKeepFiles", double.NaN);
+                    if (double.IsNaN(v) || v < 1.0 || v > 100.0)
+                    {
+                        errs.Append("actionLogKeepFiles 必须在 1~100 之间，已忽略；");
+                    }
+                    else
+                    {
+                        BridgeConfig.ActionLogKeepFiles = (int)v;
+                        any = true;
+                    }
+                }
+
                 Loaded = any;
                 Errors = errs.ToString();
                 return Errors;
@@ -113,6 +147,8 @@ namespace BlBridge
             sb.Append(",\"flushEveryLine\":").Append(Jw.B(BridgeConfig.FlushEveryLine));
             sb.Append(",\"sampleIntervalSeconds\":").Append(Jw.N(BridgeConfig.SampleIntervalSeconds));
             sb.Append(",\"maxRequestAgeSeconds\":").Append(Jw.N(BridgeConfig.MaxRequestAgeSeconds));
+            sb.Append(",\"maxActionLogBytes\":").Append(Jw.N(BridgeConfig.MaxActionLogBytes));
+            sb.Append(",\"actionLogKeepFiles\":").Append(Jw.N(BridgeConfig.ActionLogKeepFiles));
             sb.Append(",\"errors\":\"").Append(Jw.Esc(Errors)).Append('"');
             sb.Append(",\"note\":\"").Append(Jw.Esc(Loaded
                 ? "以上值已被配置文件覆盖（改完需重启游戏生效）"

@@ -75,8 +75,11 @@ namespace BlBridge
                     HandleOne(files[i]);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                // v0.8.42：原来这里是**静默** catch。巡目录/建目录失败的后果是"泵整个不干活"，
+                // 而外部看到的只是"命令没反应"——这类无法定位的状态必须有第二出口（RGL）。
+                ActionLedger.ExceptionToRgl("CommandPump.Pump", ex);
             }
         }
 
@@ -86,10 +89,17 @@ namespace BlBridge
             string id = RequestGuard.SafeFileName(Path.GetFileNameWithoutExtension(path));
             string raw = null;
             string response;
+            // ── v0.8.42：动作账本的三个观测量 ────────────────────────────────
+            // **只在采集侧加变量，一个判定分支都不改**（GC2：拒绝顺序与错误码逐字节不变）。
+            // 账本要把 method 带出来，所以它从内层 else 里提到这里（原来是块内声明）。
+            DateTime ledgerStartedUtc = DateTime.UtcNow;
+            long ledgerBytes = -1;
+            string ledgerMethod = "";
 
             try
             {
                 long len = RequestGuard.FileLength(path);
+                ledgerBytes = len;
                 if (len > RequestGuard.MaxRequestBytes)
                 {
                     response = Protocol.Failure(id, "request_too_large",
@@ -113,7 +123,7 @@ namespace BlBridge
                     {
                         int ver = Jmini.Int(raw, "protocolVersion", 0);
                         string reqId = Jmini.Str(raw, "id", null);
-                        string method = Jmini.Str(raw, "method", "");
+                        ledgerMethod = Jmini.Str(raw, "method", "");
 
                         if (!RequestGuard.IsValidId(reqId))
                         {
@@ -140,7 +150,7 @@ namespace BlBridge
                             {
                                 try
                                 {
-                                    response = Dispatch(id, method, raw);
+                                    response = Dispatch(id, ledgerMethod, raw);
                                 }
                                 catch (Exception ex)
                                 {
@@ -155,12 +165,46 @@ namespace BlBridge
             }
             catch (Exception ex)
             {
+                // v0.8.42：外层兜底异常**无条件**写游戏 RGL（照 GameMaster 的两级策略）。
+                // 理由：走到这里说明连"读文件/判大小"都出错了，而那时 <LogDir> 很可能本身不可写
+                // ⇒ 自定义账本写不进去，rgl_log 是唯一还能留痕的地方。
+                ActionLedger.ExceptionToRgl("CommandPump.HandleOne", ex);
                 response = Protocol.Failure(id, "invalid_request",
                     ex.GetType().Name + ": " + ex.Message, false);
             }
 
+            RecordLedger(id, ledgerMethod, ledgerBytes, raw, response, ledgerStartedUtc);
             WriteResponse(id, response);
             SafeDelete(path);
+        }
+
+        /// <summary>
+        /// v0.8.42：把这一次请求落进动作账本。**从已组装好的响应里反读** ok / code / note
+        /// （`Jmini` 是只读器，读自己刚拼的 JSON 是安全的）—— 这样就不需要给
+        /// `Protocol.Success/Failure` 加返回值，也就不会牵动任何既有判定分支。
+        /// 整体 try/catch：账本绝不影响请求处理结果。
+        /// </summary>
+        private static void RecordLedger(string id, string method, long bytes, string raw,
+            string response, DateTime startedUtc)
+        {
+            try
+            {
+                // v0.8.45：判定集中在 `Protocol.ReadResponseOutcome`（纯 BCL、可离线断言），
+                // 让**出货代码**与**离线断言**调同一个方法 —— 不是各抄一份判定逻辑
+                // （抄一份就是"验副本"，违反项目纪律）。
+                // 修掉的缺口 B：原来 `Jmini.Bool(response,"ok",false)` 兜底是 false
+                // ⇒ 成功的请求只要响应读不出来就被记成失败，且与真失败无法区分。
+                bool readable, ok, uncertain;
+                string code, note;
+                Protocol.ReadResponseOutcome(response, out readable, out ok, out code,
+                    out uncertain, out note);
+                double ms = (DateTime.UtcNow - startedUtc).TotalMilliseconds;
+                ActionLedger.Record(id, method, ok, code, ms, bytes, uncertain, note,
+                    ActionLedger.ArgsSnippet(raw));
+            }
+            catch
+            {
+            }
         }
 
         private static string Dispatch(string id, string method, string raw)
@@ -249,6 +293,65 @@ namespace BlBridge
             if (method == "control_agent")
             {
                 return Protocol.Success(id, ControlAgent.HandleCommand(raw));
+            }
+            // ── 只读 UI 探测（L2 #1，脱壳抄 BUTR/Bannerlord.GABS 的 Tools/GauntletUITools.cs）──
+            // 只读取 ScreenManager.TopScreen 的层/影片/ViewModel 与一个属性值，**零副作用**，
+            // 也不引入 Lib.GAB / TCP / Newtonsoft（见 docs/l2-api-drift-1.4.8.md §2 P17/P18/P19/P20/P21）。
+            // 这是让 AI「读」官方界面状态、而不是去抢鼠标的最高杠杆入口。
+            if (method == "get_screen")
+            {
+                return UiInspector.HandleGetScreen(id, raw);
+            }
+            if (method == "get_viewmodel_property")
+            {
+                return UiInspector.HandleGetViewModelProperty(id, raw);
+            }
+            // ── L2 #2：战役库存只读（脱壳抄上游 InventoryTools.cs 的 inventory/get_inventory）──
+            // needs=campaign：主菜单 / 自定义战斗里 Campaign.Current 为空 ⇒ 如实报 no_campaign，不猜。
+            if (method == "get_inventory")
+            {
+                return InventoryProbe.HandleGetInventory(id, raw);
+            }
+            // ── 存档：列表 + 按名直载（脱壳抄上游 CoreTools.cs 的 core/list_saves / core/load_save）──
+            // load_save 绕过存档选择界面 ⇒ 无人值守换档成为可能，也因此才能自主复现读档期弹窗。
+            if (method == "list_saves")
+            {
+                return CampaignProbe.HandleListSaves(id, raw);
+            }
+            if (method == "load_save")
+            {
+                return CampaignProbe.HandleLoadSave(id, raw);
+            }
+            // ── 战役时间/暂停只读诊断：mode=status（保活已于 v0.8.39 移除，见 CampaignProbe 顶部注释）──
+            if (method == "campaign_time")
+            {
+                return CampaignProbe.HandleCampaignTime(id, raw);
+            }
+            // ── A 阶段：战役只读遥测（控制面，见 src/CampaignReadProbe.cs）──
+            // 全部 campaign 上下文；主菜单 / 自定义战斗如实报 no_campaign，不猜。
+            if (method == "campaign_overview")
+            {
+                return CampaignReadProbe.HandleCampaignOverview(id, raw);
+            }
+            if (method == "list_kingdoms")
+            {
+                return CampaignReadProbe.HandleListKingdoms(id, raw);
+            }
+            if (method == "list_clans")
+            {
+                return CampaignReadProbe.HandleListClans(id, raw);
+            }
+            if (method == "list_settlements")
+            {
+                return CampaignReadProbe.HandleListSettlements(id, raw);
+            }
+            if (method == "list_parties")
+            {
+                return CampaignReadProbe.HandleListParties(id, raw);
+            }
+            if (method == "campaign_log")
+            {
+                return CampaignReadProbe.HandleCampaignLog(id, raw);
             }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }

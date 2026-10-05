@@ -360,6 +360,12 @@ internal static class GuardTest
             Check(!MainMenuStates.IsMenuLevel(notMenu), "不在主菜单层面（必须拒）: " + notMenu);
         }
 
+        // 2026-10-05：响应信封形状（BridgeProtocol 首次进单测）。放在最后 —— 它自己带一节输出。
+        // 用 `+=` 而不是 `_fail = ...`：_fail 是累计计数器，EnvelopeTest.Run() 返回的是它**自己**那节的失败数。
+        _fail += EnvelopeTest.Run();
+        // 2026-10-05：账本两个缺口（写失败静默 / 非法响应静默记错）。
+        _fail += LedgerGapTest.Run();
+
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "结果: 全部通过" : "结果: 失败 " + _fail + " 项");
         return _fail == 0 ? 0 : 1;

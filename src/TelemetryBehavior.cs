@@ -36,6 +36,7 @@ namespace BlBridge
         private float _nextStateAt = BridgeConfig.StateIntervalSeconds;
         private int _stateSeq;
         private readonly HashSet<int> _aiDumped = new HashSet<int>();
+        private readonly HashSet<int> _equipDumped = new HashSet<int>();
         private int _hitSeq;
         private int _killSeq;
         private int _shotSeq;
@@ -91,6 +92,15 @@ namespace BlBridge
                 sb.Append("\",\"mission\":\"").Append(Jw.Esc(_origin)).Append('"');
                 sb.Append(",\"randomSeed\":").Append(Jw.N(SubModule.PendingRandomSeed));
                 sb.Append(",\"round\":").Append(Jw.N(_round));
+                // v0.8.41：本场的环境旋钮 + 战术档位。
+                // 追加在 `round` 之后、`file` 之前 —— 既有键一个不删不改（老分析脚本按 key 取，不受影响）。
+                // 未请求时分别是 `""` / `-1` / `-1`，与"从没设过"无法区分也没关系：
+                // 分析时只关心"这一场是不是设了"，而 -1 在两端语义一致（不覆盖）。
+                sb.Append(BattleEnv.MetaFragment());
+                sb.Append(",\"aTactics\":").Append(Jw.N(ScenarioRunner.AttackerTacticsRequested));
+                sb.Append(",\"dTactics\":").Append(Jw.N(ScenarioRunner.DefenderTacticsRequested));
+                sb.Append(",\"aTacticsNative\":").Append(Jw.N(ScenarioRunner.AttackerTacticsNative));
+                sb.Append(",\"dTacticsNative\":").Append(Jw.N(ScenarioRunner.DefenderTacticsNative));
                 sb.Append(",\"file\":\"").Append(Jw.Esc(name)).Append("\"}");
                 Jw.Write(sb.ToString());
             }
@@ -130,6 +140,7 @@ namespace BlBridge
             _nextStateAt = BridgeConfig.StateIntervalSeconds;
             _hitSeq = _killSeq = _shotSeq = _unitSeq = _fleeSeq = _stateSeq = 0;
             _aiDumped.Clear();
+            _equipDumped.Clear();
             _initAttacker = -1;
             _initDefender = -1;
             _opened = false;      // 让 EnsureOpen 重新开一个新文件（含新的 meta）
@@ -457,6 +468,14 @@ namespace BlBridge
                 sb.Append(",\"dAlive\":").Append(Jw.N(TeamAlive(df)));
                 sb.Append(",\"aHp\":").Append(Jw.N(TeamHp(at)));
                 sb.Append(",\"dHp\":").Append(Jw.N(TeamHp(df)));
+                // v0.8.45：**尸体计数** —— 让 `keepCorpses`（`DisableCorpseFadeOut`）有观测量。
+                // 动机（2026-10-05）：`DisableCorpseFadeOut` 在**托管侧零读取消费者**（定向复核确认），
+                // 只能靠 native；要验它就必须有一个**残留尸体数**的时间序列。
+                // 口径（见 Agent.IsAddedAsCorpse → MBAPI.IMBAgent.IsAddedAsCorpse）：数
+                // `Mission.AllAgents` 里 `IsAddedAsCorpse()==true` 的。
+                // ⚠️ 用 `AllAgents`（不是 `Agents`）：尸体在 `OnAgentDeleted` 之前仍在集合里，
+                //    `Agents` 是"活跃 agent"，数不到尸体。整体 try/catch：绝不影响既有字段。
+                sb.Append(",\"corpses\":").Append(Jw.N(CorpseCount(this.Mission)));
                 sb.Append('}');
                 Jw.Write(sb.ToString());
             }
@@ -522,6 +541,11 @@ namespace BlBridge
 
                     // 首次见到这个 agent 时额外写一条 AI/精度快照（只写一次）
                     if (_aiDumped.Add(Idx(a))) EmitAiSnapshot(a);
+
+                    // v0.8.41：同样"每个 agent 只写一次"的装备逐槽快照（见 EmitEquipSnapshot）。
+                    // 与 `ai` 事件**分开**是有意的：`ai` 的字段集合已被既有分析脚本按 key 消费，
+                    // 往里加 12 个槽位会把它撑成两种东西；新开一个事件类型，旧事件逐字节不变。
+                    if (_equipDumped.Add(Idx(a))) EmitEquipSnapshot(a);
 
                     StringBuilder sb = new StringBuilder();
                     sb.Append("{\"t\":\"state\",\"seq\":").Append(Jw.N(_stateSeq));
@@ -632,6 +656,97 @@ namespace BlBridge
             }
             catch
             {
+            }
+        }
+
+        /// <summary>
+        /// v0.8.41：装备**逐槽**快照（每个 agent 只写一条，事件 `t="equip"`）。
+        ///
+        /// 为什么需要它（这是本项目一个**还没结账的**悬案）：
+        ///   `PROGRESS.md` §十五 记着「`armorBody` 是确定性的（3/3 逐场一致）⇒ **不是随机 modifier**」。
+        ///   这条推断**不成立**：`AgentBuildData.AgentEquipmentSeed` 来自 `IAgentOriginBase.Seed` /
+        ///   `UniqueSeed`，种子若每场确定，则由它抽出的随机 modifier **同样每场一致** ——
+        ///   "3/3 一致"分辨不了「没有 modifier」与「种子确定的 modifier」，而后者是
+        ///   **随 agent 序号漂移的隐藏变量**，正好污染护甲/材质对照。
+        ///
+        /// 判别判据（拿到数据后一眼可判，不需要再改代码）：
+        ///   * 同一 `troop`、同一场、不同 agent 的 `mod` 各不相同 ⇒ 随机 modifier（混杂源存在）；
+        ///   * 全部为 `""` ⇒ 该路径确实不加 modifier，旧结论成立，换装路线可继续。
+        ///
+        /// `modArmor` 就是能解释"同一件 XML 甲、运行时护甲值不同"的那个数：
+        ///   反编译 `ItemModifier.ModifyArmor(int armorValue) = Max(armorValue + Armor, 1)`
+        ///   ⇒ **修饰符对护甲的贡献是纯加法**，`Armor` 即该槽位的护甲增量（可为负）。
+        ///
+        /// 为什么用 `SpawnEquipment` 而不是 `Equipment`：后者（`MissionEquipment`）带运行时状态
+        /// （耐久、装弹），会随战斗变化；快照要的是**入场时的静态装备**，即 `SpawnEquipment`
+        /// （与 `TryGetShield` 的注释同一口径）。
+        ///
+        /// 槽位数取 `EquipmentIndex.NumEquipmentSetSlots`（= 12，反编译取证）。
+        /// 只写有物品的槽 ⇒ 空槽不进数组，体积可控（12 槽 × 每 agent 一条）。
+        /// 整体 try/catch —— 遥测铁律：绝不因观测而抛。
+        /// </summary>
+        private void EmitEquipSnapshot(Agent a)
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"t\":\"equip\",\"time\":").Append(Jw.N(_elapsed));
+                sb.Append(",\"agent\":").Append(Jw.N(Idx(a)));
+                sb.Append(",\"side\":\"").Append(SideOf(a)).Append('"');
+                sb.Append(",\"troop\":\"").Append(Jw.Esc(TroopOf(a))).Append('"');
+                // 这两个是"同兵种不同 agent 为什么会不一样"的另外两条通道，顺手一起记
+                sb.Append(",\"isFemale\":").Append(Jw.B(a.IsFemale));
+                sb.Append(",\"bodySeed\":").Append(Jw.N(a.BodyPropertiesSeed));
+                sb.Append(",\"slots\":[");
+                Equipment equipment = a.SpawnEquipment;
+                bool first = true;
+                if (equipment != null)
+                {
+                    for (EquipmentIndex i = EquipmentIndex.WeaponItemBeginSlot;
+                        i < EquipmentIndex.NumEquipmentSetSlots; i++)
+                    {
+                        EquipmentElement element = equipment[i];
+                        if (element.Item == null) continue;
+                        if (!first) sb.Append(',');
+                        first = false;
+                        ItemModifier mod = element.ItemModifier;
+                        sb.Append("{\"i\":").Append(Jw.N((int)i));
+                        sb.Append(",\"slot\":\"").Append(EnumNames.EquipSlot(i)).Append('"');
+                        sb.Append(",\"item\":\"").Append(Jw.Esc(ItemIdOf(element.Item))).Append('"');
+                        sb.Append(",\"mod\":\"").Append(Jw.Esc(mod == null ? "" : mod.StringId)).Append('"');
+                        if (mod != null)
+                        {
+                            sb.Append(",\"modName\":\"")
+                              .Append(Jw.Esc(mod.Name == null ? "" : mod.Name.ToString())).Append('"');
+                            // `Armor` 是**加法**增量（ModifyArmor 取证）；另三项同理
+                            sb.Append(",\"modArmor\":").Append(Jw.N(mod.Armor));
+                            sb.Append(",\"modDamage\":").Append(Jw.N(mod.Damage));
+                            sb.Append(",\"modSpeed\":").Append(Jw.N(mod.Speed));
+                            sb.Append(",\"modHitPoints\":").Append(Jw.N((int)mod.HitPoints));
+                        }
+                        sb.Append('}');
+                    }
+                }
+                sb.Append("]}");
+                Jw.Write(sb.ToString());
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>物品 id（取不到返回空串，绝不抛）。</summary>
+        private static string ItemIdOf(ItemObject item)
+        {
+            try
+            {
+                if (item == null) return "";
+                string id = item.StringId;
+                return id == null ? "" : id;
+            }
+            catch
+            {
+                return "";
             }
         }
 
@@ -865,6 +980,42 @@ namespace BlBridge
             catch
             {
                 return -1f;
+            }
+        }
+
+        /// <summary>
+        /// v0.8.45：残留尸体数（= `Mission.AllAgents` 里 `IsAddedAsCorpse()==true` 的个数）。
+        ///
+        /// 为什么需要它：`keepCorpses` 写的是 `MissionInitializerRecord.DisableCorpseFadeOut`，
+        /// 而该字段在**托管侧零读取消费者**（2026-10-05 定向复核）⇒ 想验它的**行为效应**，
+        /// 唯一途径是找一个**能观测到"尸体还在不在"**的量。这就是那个量。
+        ///
+        /// 口径说明（照 `Agent.IsAddedAsCorpse` → native `IMBAgent.IsAddedAsCorpse`）：
+        ///   • 必须遍历 `AllAgents`（`_allAgents`）而**不是** `Agents`（`_activeAgents`）——
+        ///     后者是"活跃 agent"，尸体不在其中（`Mission.cs` 的 `OnAgentDeleted` 才从 AllAgents 移除）。
+        ///   • 取不到一律返回 **-1**（与 `TeamAlive`/`TeamHp` 同一约定），绝不抛、绝不假装是 0。
+        /// </summary>
+        private static int CorpseCount(Mission m)
+        {
+            try
+            {
+                if (m == null) return -1;
+                int n = 0;
+                // 用 var：`AgentReadOnlyList` 在 `TaleWorlds.MountAndBlade.Missions` 命名空间里，
+                // 而本文件按既有风格只 using 到 `TaleWorlds.MountAndBlade`（不为一行加 using）。
+                var all = m.AllAgents;
+                if (all == null) return -1;
+                for (int i = 0; i < all.Count; i++)
+                {
+                    Agent a = all[i];
+                    if (a == null) continue;
+                    if (a.IsAddedAsCorpse()) n++;
+                }
+                return n;
+            }
+            catch
+            {
+                return -1;
             }
         }
 

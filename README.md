@@ -18,14 +18,20 @@
 会话身份（`runToken` + `processStartedUtc`）、版本硬校验、`outcomeUncertain` 不盲重试等规范，
 抄自 Bannerlord Coop 团队的 `CoopMcpServer` / `LiveTestProtocol`（见 `阶段2-复用尽调报告.md`）。
 
-**请求里的 `method` 只有这 9 个**（`src/CommandPump.cs`；名字**不是** CLI 子命令名 ——
-直接手写请求时容易猜错，v0.8.10 真机回归实测踩到 `unknown_method: start`）：
+**请求里的 `method` 有 17 个**（`src/CommandPump.cs`；名字**不是** CLI 子命令名 ——
+直接手写请求时容易猜错，v0.8.10 真机回归实测踩到 `unknown_method: start`）。
+
+> 这张表曾写"只有这 9 个"，而 v0.8.16–v0.8.32 期间又加进来 6 个（`ghost_camera` / `camera_speed` /
+> `skip_video` / `cheat_mode` / `order` / `control_agent`）而这里没跟上 —— **文档漂移**。
+> 现在这条不变量**可执行**：`python tools\bl_check_gabp_names.py` 双向核对「源码里的 method ↔ 命名表」，
+> 缺失与多余都报错（并附带 `--selftest` 的注入故障对照组）。
+> GABP 命名、分类词表与抄录记账见 **`docs/gabp-naming.md`**。
 
 | method | 参数 | 等价入口 |
 |---|---|---|
 | `ping` | — | `bl_cmd.py ping` / MCP `bl_status` |
 | `status` | — | `bl_cmd.py status` / MCP `bl_battle_status` |
-| `start_battle` | `attackerTroop`/`defenderTroop`/`attackerCount`/`defenderCount`/`scene`/`durationCapSec`/`orders`/`playerSide`/`spectate`/`dummySide`/`dummyArmor*`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`/`allowAnyState`/`rounds`/`roundEndAlive`/`roundSwap`/`roundSpawnAttacker`/`roundSpawnDefender`/`randomSeed`/`attackerGroups`/`defenderGroups` | `bl_cmd.py start` / MCP `bl_start_battle` |
+| `start_battle` | `attackerTroop`/`defenderTroop`/`attackerCount`/`defenderCount`/`scene`/`durationCapSec`/`orders`/`playerSide`/`spectate`/`dummySide`/`dummyArmor*`/`dummyBodyItem`/`freezeDummies`/`unlimitedAmmo`/`allowAnyState`/`rounds`/`roundEndAlive`/`roundSwap`/`roundSpawnAttacker`/`roundSpawnDefender`/`randomSeed`/`attackerGroups`/`defenderGroups`；**v0.8.41 起**另带 `attackerTacticLevel`/`defenderTacticLevel`/`terrain`/`randomTerrainSeed`/`aiFriendlyFireMultiplier`/`keepCorpses`/`sceneLevel`/`timeOfDay` | `bl_cmd.py start` / MCP `bl_start_battle` |
 | `abort` | — | `bl_cmd.py abort` / MCP `bl_abort` |
 | `fast_forward` | `enabled`（`"true"`/`"false"`） | `bl_cmd.py fastforward` / MCP `bl_fast_forward` |
 | `speed` | — | `bl_cmd.py speed` |
@@ -33,6 +39,15 @@
 | — | 场景表来源：**扫各模块 `SubModule.xml` 的 `<XmlName id="CustomBattleScenes">` 声明后直接读 XML**（纯文件读 + 缓存 + 切换窗口内降级），不再走引擎的 `GetMergedXmlForManaged`。见 `PROGRESS.md` §二十六 |
 | `open_ui` | `uiId`（可选，缺省 = `CustomBattle` 官方自定义战斗界面） | `bl_cmd.py open-ui [--ui-id …]` / MCP `bl_open_ui` |
 | `close_ui` | `state`（可选，白名单**只有** `CustomBattleState`） | `bl_cmd.py close-ui [--state …]` / MCP `bl_close_ui` |
+| `ghost_camera` | `mode` = `status`/`on`/`off`/`toggle` | MCP `bl_ghost_camera` |
+| `camera_speed` | `mode` = `status`/`shift`/`base`/`rts`/`boost`/`probe`（`value` 为倍率；`probe` 另有 `action=end`） | MCP `bl_camera_speed` |
+| `skip_video` | — | MCP `bl_skip_video` |
+| `cheat_mode` | `mode` = `status`/`on`/`off`/`toggle`（写完回读） | MCP `bl_cheat_mode` |
+| `order` | `side`/`formation` + **至少一个动作**：`movement`/`position`/`target`/`targetAgent`（互斥）/`arrangement`/`firing`/`riding`（后三者可与前者并存） | MCP `bl_order` |
+| `control_agent` | `mode` = `take`/`release`/`status`；目标 `agentIndex` > `troop` > `formation`，`side` 只接受玩家方 | MCP `bl_control_agent` |
+| `get_screen` | `layerFilter`（可选，层名子串） | MCP `bl_get_screen` |
+| `get_viewmodel_property` | `propertyName`（点号路径）/ `layerName` / `subProperties`（可选） | MCP `bl_get_viewmodel_property` |
+| `get_inventory` | `limit`（可选，默认 50） | MCP `bl_get_inventory`（needs=campaign） |
 
 > ⚠️ **参数名不能叫 `id`**：`src/Jmini.cs` 是**扁平** JSON 读取器（按"文本里第一个 `"key"`"取值），
 > 而请求信封自带 `"id"`（16 位 hex 的请求 id）⇒ `Jmini.Str(raw,"id")` 恒读到信封那个值。
@@ -61,7 +76,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 32 个（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 44 个（默认暴露 32）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -99,7 +114,7 @@ BlBridge/
   build.ps1                       一键编译 + 部署（查游戏进程 + 备份旧 DLL + SHA256 + 写构建清单）
   blbridge.example.json           MCP 侧配置模板
   blbridge_game.example.json      游戏端配置模板
-  tools/bl_mcp.py                 MCP server（stdio，32 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
+  tools/bl_mcp.py                 MCP server（stdio，44 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
@@ -111,6 +126,10 @@ BlBridge/
   tools/bl_metrics_selftest.py    上面那个的离线自测（合成事件手算期望 + 真实日志 smoke，75 项断言）
   tools/bl_death_compare.py       按兵种对照「到死挨几箭」（立项模型校验用；两个口径都报）
   tools/bl_check_clock_reset.py   多轮日志「时钟同源」校验（PROGRESS §十一 判据 6 的可执行版本）
+  tools/gabp_names.json           GABP 命名对齐表（L1 唯一真相源；见 docs/gabp-naming.md）
+  tools/bl_check_gabp_names.py    命名表 ↔ 源码 method ↔ MCP 工具 三方一致性校验（含 8 类注入故障自测）
+  tools/bl_check_dispatch.py      MCP 工具「声明(TOOLS) ↔ 派发(call_tool) ↔ 分组(TOOL_GROUPS)」校验（含 3 类注入故障自测；防「列得出却调不动」）
+  tools/l2probe/                  L2 API 漂移探针（用编译器判定上游调用点在 1.4.8 上能不能编过；见 docs/l2-api-drift-1.4.8.md）
   tools/plan.example.json         跑批计划示例（换边双跑）
   tools/plan.armor.example.json   跑批计划示例（靶子护甲对照：dummySide + dummyArmor）
   tools/plan.material.example.json 跑批计划示例（材质对照：dummyBodyItem 换身甲；两件甲护甲数值完全相同，只差材质）
@@ -162,7 +181,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 
 ---
 
-## 六、MCP 工具（32 个）
+## 六、MCP 工具（44 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -180,8 +199,13 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 | `bl_cheat_mode` | **开关作弊模式**（v0.8.20，带回读）：写 `NativeConfig.CheatMode`（私有 setter → 后备字段两条路）。开了它，**引擎自由相机的 `Ctrl+↑/↓`/`Ctrl+中键` 倍率热键与观察者 HUD 的「摄像机移动速度」读数才可用**（这是「相机太慢」的另一条正解）。⚠️ 等于打开开发者通道（F2/F3/F4 杀敌杀友等一并生效），工具**不做任何自动开启**；只作用于本次进程 | 是 |
 | `bl_order` | **战斗中途改令**（v0.8.24；**v0.8.29 扩到阵列/射击纪律，v0.8.30 扩到指定点移动，v0.8.31 扩到指定目标，v0.8.32 扩到上下马与指定单位**）：对**进行中**的战斗里某方编队改 `movement` / `position` / `target` / `targetAgent` / `arrangement` / `firing` / `riding`（**至少给一个**；`side` = player/attacker/defender；`formation` = Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或 0~4，不传 = 该方所有有兵的编队；`movement` = charge/advance/fallback/stop/retreat；`position` = `"x,y"` 或 `"x,y,z"`（米，z 省略 = 0，引擎按地面/导航网格补 Z）；`target` = **敌方编队**名或下标 ⇒ `MovementOrderChargeToTarget`，敌方 = 与 `side` 相对的那一方；**`movement` / `position` / `target` / `targetAgent` 四者互斥**；`targetAgent` = **敌方单位**的 `Agent.Index`（整数，从遥测或 `bl_control_agent status` 取）⇒ `MovementOrderAttackEntity`；`riding` = free/mount/dismount ⇒ `Formation.SetRidingOrder`（与 movement order **正交**：管骑不骑、不管去哪，**不参与**那条互斥））；`arrangement` = line/shieldwall/circle/square/skein/column/loose/scatter；`firing` = fireAtWill/holdFire —— 引擎只有这两档）。与开战 DSL 走**同一条**下发路径，每条都回传 `orderBefore`/`orderAfter`（引擎 `MovementOrder.OrderEnum`）——**判据是当场回读**，不是"我们调了 API"。`position` 另回传 `moveTarget`（引擎按导航网格算出的落点，可能被夹到合法位置）+ `formationCenter`；`target` 另回传 `targetAfter`（回读到的目标编队）+ `targetDistance`（双方编队重心距离）；`targetAgent` 另回传 `targetAgentIndex`/`targetAgentTroop`/`targetEntitySet`（回读 `MovementOrder.TargetEntity`）/`targetAgentAlive` + `targetDistance`（编队重心↔该单位的距离）；`riding` 另回传 `ridingBefore`/`ridingAfter`（引擎 `RidingOrder` 三档）—— 这些是**行为**判据：隔几秒再调一次，重心应朝目标点挪 / 距离应缩小。⚠️ `emptyFormations` > 0（applied 里对应条目带 `emptyFormation:true`、`count:0`、`formationCenter:(invalid)`）= **令写进去了但那个编队一个人都没有**（编队按兵种自动分：弓手在 Ranged、近战步兵在 Infantry）⇒ 没人执行，先核对 `formation`。⚠️ 只在 mission 内有意义（mission 之外碰 `MovementOrder` 会抛 `TypeInitializationException` 并把该类型**永久**标记为不可用 ⇒ 没有战斗时直接拒 `no_mission`）。**关键**：会同步改掉组路径"待重申的值"（回传 `pendingSpecsUpdated`），否则开战 DSL 那 **0.5 秒一次的周期重申**会把你的令改回去（真机踩过：12 秒后复读 `orderBefore` 又变回 `Charge`）；`position` / `target` 没有"名字"可重申，所以走**手动令优先**标记（重申时照原样重申同一个点/目标，用 `movement` 覆盖时该标记会被清掉；目标编队被打空后重申会**跳过**并记一条 order error，不偷偷退回冲锋）。`detachAI` 默认 true（连带 `SetControlledByAI(false,false)`）。`targetAgent` 的目标**会死**：阵亡后重申**跳过**并记一条 order error，**不**退回 `s.Movement`（不静默改成冲锋）。目前**没有**未实现的参数（`UnsupportedParams` 已清空） | 是 |
 | `bl_control_agent` | **接管某个友方士兵**（v0.8.26，**最小版**）：`mode` = take/release/status；目标用 `agentIndex` > `troop` > `formation`（不传 = 该方第一个存活者，**默认跳过当前 MainAgent**）。五步：老主角色交回 AI（否则同编队两个 `Player` 控制器会让编队逻辑栈溢出）→ `Mission.MainAgent = 目标` → 目标 `Controller = Player` + 清 `AIStateFlags` + 摘 `VictoryComponent` → 复位 `MissionScreen._isPlayerAgentAdded`（反射；**v0.8.32 起**：装了 RTSCamera 时改走它自己的**平滑推镜** —— 反射 `Utility.BeforeSetMainAgent` → 赋值 → `AfterSetMainAgent`，结果见返回的 `cameraFollow`：`applied`/`shouldSmooth`/`lastFollowed`（回读判据）/`why`；没装则退回这条老路，行为与旧版一致）→ **当场回读**。⚠️ **真机实测边界**：AI 对 AI（无真人）场次里主角色能换，但 `Controller` 回读仍是 `AI` ⇒ 工具如实报 `ok=false` / `controller_not_verified`，**不假装成功**；要真接管需**真人场次**。只允许玩家方（敌方 `not_player_team`）。未实现：`agentId`/`slot`/`mount`/`weapon`（传了报 `unsupported_param`） | 是 |
+| `bl_get_screen` | **只读读当前界面**：层 / 影片 / 可点按钮（文本 + 是否可用 + 状态 + id）；地图装饰层默认跳过，`layerFilter` 只看某一层。读界面，不模拟鼠标（合成输入到不了官方界面）。脱壳抄自 BUTR/Bannerlord.GABS 的 `ui/get_screen`。⚠️ 按钮**优先用 text 定位**：id 常空且不唯一（真机：主菜单 11 个按钮只有 1 个有 id；自定义战斗界面 8 个都叫 `AddTroopButton`）。前置：游戏在跑 **且** 已部署含该 method 的 DLL（v0.8.34+）。真机判据见 `docs/mcp-tool-desc-audit-2026-09-27.md` §7.1 | 是 |
+| `bl_get_viewmodel_property` | **只读读 ViewModel 属性**：`propertyName`（点号路径穿透嵌套，如 `PlayerGold` / `Smelting.SmeltableItemList`）+ `layerName`（从 `bl_get_screen` 的 `layers[].name` 取）；列表返回 `count` + `items` + `missingSubProperties`，`subProperties` 抽每项子字段。脱壳抄自上游 `ui/get_viewmodel_property`。⚠️ 属性不存在 = `ok:false` / `property_not_found` **并列出真实可用属性名**（v0.8.35 起；`value:null` 只表示"属性存在、值就是空"）；层名写错 = `no_data_source`。前置同 `bl_get_screen`。真机判据见同文档 §7.3/§7.4 | 是 |
+| `bl_get_inventory` | **只读读战役库存**（v0.8.36，L2 #2）：主队伍 `ItemRoster` + 主英雄金币。返回 `gold` / `itemCount` / `totalElements` / `items[]`（name、id、quantity、type、value、weight、tier），`limit` 默认 50。脱壳抄自上游 `inventory/get_inventory`。⚠️ 前置 = **战役内**：主菜单 / 自定义战斗如实报 `no_campaign`（needs=campaign，命名表 C6 已登记） | 是 |
+| `bl_list_saves` / `bl_load_save` | **存档列表 / 按名直载**（v0.8.36）：`MBSaveLoad.GetSaveFiles`（meta 含 `Module_*` 模组启停键值）+ `LoadSaveGameData + StartNewGame` 直载——**不经过存档选择界面**，无人值守换档的正门，也是复现读档期弹窗的测试入口。⚠️ `load_save` 前置 = 主菜单（战役中拒 `in_campaign`）；名字不存在 = `save_not_found` 并列出可用档；读档期"模组不匹配"确认框（引擎自绘，回车=『是』）会被自动应答。脱壳抄自上游 `core/list_saves` / `core/load_save` | 是 |
+| `bl_campaign_time` | **只读：战役时间/暂停诊断**（v0.8.36 起，v0.8.39 收成只读）：`mode` 只接受 `status`，回读 `timeControlMode` / `inMenuContext` / `campaignDays` / `pauseMenuOpen`。`pauseMenuOpen` = 地图上的暂停菜单（ESC 菜单）是否开着——原版失焦 + `BannerlordConfig.StopGameOnFocusLost=true` 会自动打开它，而它会 `RegisterActiveStateDisableRequest` ⇒ MapState 不再 Tick ⇒ 战役冻结（档位却仍是 StoppablePlay）。`campaignDays` = `CampaignTime.Now.ToDays`，失焦前后各读一次才证明"时间真的在走"。⚠️ **时间保活（原 mode=on/off）已在 v0.8.39 移除**（用户明确不需要改游戏的时间暂停；且它看不见上面那种暂停、副作用会顶掉手动暂停）⇒ 传 on/off 会显式报 `keep_awake_removed`。真机 A/B 见 `PROGRESS.md` §三十二 | 是 |
 | `bl_battle_status` | 推演状态机 + 双方存活数 + 战果 | 是 |
-| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头（**本机装了 RTSCamera 时自动让位**，v0.8.16 起写明这条）；**`rtsPreset` = 开战前套用 RTSCamera 预设**；返回 `formationWarnings` = 开战 DSL 的 `formation` 只是**回显**，与兵种实际编队不一致时逐条点名，**不阻断开战**） | 是 |
+| `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头（**本机装了 RTSCamera 时自动让位**，v0.8.16 起写明这条）；**`rtsPreset` = 开战前套用 RTSCamera 预设**；返回 `formationWarnings` = 开战 DSL 的 `formation` 只是**回显**，与兵种实际编队不一致时逐条点名，**不阻断开战**）；**v0.8.41**：`attackerTacticLevel`/`defenderTacticLevel`（战术档位，需配 `orders=default` 才看得出效果）、`terrain`/`randomTerrainSeed`、`aiFriendlyFireMultiplier`、`keepCorpses`、`sceneLevel`/`timeOfDay`（攻城）；返回另带 `tactics`（请求值 + 引擎原生值）、`env`、`envNotes`（被显式忽略的参数**逐条报出**） | 是 |
 | `bl_wait_for_state` | 等状态（idle/loading/running/ended/error） | 是 |
 | `bl_abort` | 中止当前推演 | 是 |
 | `bl_list_ui` | **列出游戏内可进入的入口** + **官方自定义战斗场景全表**（模式 / 地形 / 是否存在；可按 `scenesMode` 过滤） | 是 |
@@ -356,7 +380,7 @@ manifest_missing         旧版部署，没有清单
 
 | 侧 | 文件 | 可配 | 生效时机 |
 |---|---|---|---|
-| 游戏端 | `<LogDir>\blbridge_game.json` | `enabled` / `sampleIntervalSeconds`(1~600) / `flushEveryLine` / `maxRequestAgeSeconds`(5~3600) | 模块加载时读一次，**改完要重启游戏** |
+| 游戏端 | `<LogDir>\blbridge_game.json` | `enabled` / `sampleIntervalSeconds`(1~600) / `flushEveryLine` / `maxRequestAgeSeconds`(5~3600) / **`maxActionLogBytes`(0=不轮转，默认；或 1024~1GiB)** / **`actionLogKeepFiles`(1~100，默认 5)** | 模块加载时读一次，**改完要重启游戏** |
 | MCP 端 | `BlBridge\blbridge.json` | `logDir` / `gameDir` / `waitForStateTimeoutSec` / `statusTimeoutSec` / `maxRequestAgeSec` | 读一次即缓存，改完不影响运行中 |
 
 模板：`blbridge.example.json`、`blbridge_game.example.json`（每个键都写了范围与来历）。
@@ -366,6 +390,41 @@ manifest_missing         旧版部署，没有清单
 1. **加载即校验，坏值不拖累好值**：越界/类型错的项**逐项忽略并记录原因**（写进 `bridge_status.json` 的 `config.errors`），而不是让整份配置失效；
 2. **来历可查**：`bl_config` 会说明每个值来自 环境变量 / 配置文件 / 内置默认值，避免"我明明改了但没生效"这种无从定位的状态。
    优先级：**环境变量 > 配置文件 > 默认值**。
+
+---
+
+## 六点五、动作账本 `commands/actions.jsonl`（v0.8.42）
+
+控制通道的**审计流水**：游戏每处理一个请求就追加一行，**永不重写、永不删除**（除非显式开了轮转）。
+
+在此之前，`CommandPump.HandleOne` 把 id / method / 错误码 / 异常全算出来了，然后只写一个
+**按 id 命名的响应文件** —— 外部消费完就没了，同 id 再来一次还会被覆盖
+⇒ **"我到底下过什么命令"在磁盘上不留痕**。崩溃复盘时只能靠 battle 日志反推。
+
+一行一个 JSON 对象（单行自闭合，字段集由自测 ⑮ 与 `src/ActionLedger.cs` 双向对账）：
+
+| 字段 | 含义 |
+|---|---|
+| `t` | UTC ISO 时间戳 |
+| `seq` | 进程内单调序号（判"有没有丢行/两个写者交错"，比时间戳可靠） |
+| `runToken` | 游戏**进程会话**标识 ⇒ 账本能按会话分组（重启游戏即换 token） |
+| `id` / `method` | 请求 id / 方法名（拒绝路径上 method 可能为空） |
+| `ok` / `code` | 是否成功 / 失败码（成功时 `code` 为空） |
+| `ms` / `bytes` | 处理耗时（毫秒）/ 请求文件字节数（读不到为 -1） |
+| `uncertain` | 协议里的 `outcomeUncertain` —— 为 true 时**绝不盲目重试** |
+| `note` | 成功时 `state=<状态>`；失败时错误消息（截断） |
+| `args` | 请求参数片段（截断 600 字符；账本是**索引**不是副本） |
+
+读它：`python tools\bl_cmd.py actions [--limit 30] [--fail-only] [--json] [--path …]`
+
+- **每个请求都有且只有一行**，含全部拒绝路径：过大 / id 非法 / 版本不符 / 过期 / 未知方法 / 处理器异常。
+- ⚠️ **轮转默认关闭**（`maxActionLogBytes` 默认 0）。理由：battle 日志是**实验数据**（`battles/` 从不自动删），
+  而账本是**过程记录**、天生可截断 —— 但"默认删除用户磁盘上的文件"是另一回事，所以只在你显式配置后才删。
+  开了之后只留最近 `actionLogKeepFiles` 个归档（对照：Bannerlord.GameMaster 的 `CommandLogger` 是**无条件**只留 5 个）。
+- **坏行不静默**：`bl_common.load_actions()` 遇到解析失败或"合法 JSON 但非对象"的行会**计数并带出原文**，
+  与 `load_events()` 的"静默跳过"**故意不同** —— v0.8.4 那个非法 JSON 的 bug 正是靠那种静默活下来的。
+- 异常**无条件**写游戏 RGL 日志（引擎自己的 `rgl_log_<pid>.txt`），
+  因为账本写不进去时（`<LogDir>` 不可写）**恰恰是最需要留痕的时候**。
 
 ---
 
@@ -393,15 +452,16 @@ manifest_missing         旧版部署，没有清单
 
 | t | 字段 |
 |---|---|
-| `meta` | schema / mod / version / startedUtc / file；**v0.8.3 起**另带 `mission`（`bridge`=BlBridge 自建靶场 / `game`=其它，含玩家在战役沙盒里的实战）；**v0.8.4 起**另带 `randomSeed`（-1 = 未指定）；**v0.8.5 起**另带 `round`（多轮连续实验的轮次） |
+| `meta` | schema / mod / version / startedUtc / file；**v0.8.3 起**另带 `mission`（`bridge`=BlBridge 自建靶场 / `game`=其它，含玩家在战役沙盒里的实战）；**v0.8.4 起**另带 `randomSeed`（-1 = 未指定）；**v0.8.5 起**另带 `round`（多轮连续实验的轮次）；**v0.8.41 起**另带 `terrain` / `terrainSeed` / `friendlyFire`（未设分别是 `""` / `-1` / `-1`）与 `aTactics` / `dTactics`（请求的战术档位，-1 = 不覆盖）/ `aTacticsNative` / `dTacticsNative`（**引擎原生**档位 = 该方参战兵种 `max(Tactics 技能)`） |
 | `unit` | agent, side, troop, level, isHero, isMounted, maxHp；**v0.8.8 起**另带 `formation`（该 agent 的**实际**编队名，见下注） |
 | `hit` | attacker, defender, aSide, dSide, aTroop, dTroop, weaponClass, isMissile, damageType, bodyPart, **dmg**, magnitude, absorbedByArmor, strikeType, hpAfter, hpMax, mounted；**v0.7.9 起**另带 `blocked`、**`damagedHp`**（引擎直给的实际扣血）、`hitDistance`、`shotDifficulty`、`attackDir`、`attackType`、`speedMod`、`atkStun`、`defStun`、`dmgPct`、`blowFlags`（逗号组合串）、`shieldHp`、`shieldMax`；**v0.8.1 起**另带 `bodyPartName`（部位直名）、`shieldSlot`、`shieldItem`（盾的槽位与物品 id，用于区分"换了盾"与"盾被修复"） |
 | `shot` | **v0.7.9 起**：shooter, side, troop, weaponSlot, weaponClass, px/py/pz（位置）, vx/vy/vz（速度向量）, speed；**v0.8.1 起**另带 `weaponSlotName`（槽位直名） |
 | `state` | **v0.7.9 起**：每 2 秒 × agent：agent, side, troop, px/py/pz, vx/vy, speed, maxSpeed, combatSpeed, armorEnc, weapEnc, morale, aiState, reloading, reloadPhase, reloadCount, ammo, ammoMax（末 5 项在取不到武器时会缺）。⚠️ **三者的量纲不同，不可直接比较**：`speed` 是 `MovementVelocity.Length`（**世界单位速度 m/s**），而 `maxSpeed` / `combatSpeed` 是 `DrivenProperty.MaxSpeedMultiplier` / `CombatMaxSpeedMultiplier`（**倍率**，基准 1.0）—— 见下方「速度上限」注 |
 | `ai` | **v0.7.9 起**：每 agent 一条，30 个 AI / 精度参数（格挡能力、射击频率、瞄准误差、提前量误差…）；**v0.8.0 起**另带 `armorHead` / `armorTorso` / `armorLegs` / `armorArms`（四部位护甲值，用于验证护甲覆盖是否生效）；**v0.8.1 起**另带 `topSpeedReach`（加速到顶速所需时长；引擎不暴露世界单位速度上限，见下注） |
+| `equip` | **v0.8.41**：每 agent 一条的**入场静态装备逐槽快照** —— agent, side, troop, isFemale, bodySeed, `slots[]`（只含有物品的槽），每槽 `{i, slot, item, mod, modName?, modArmor?, modDamage?, modSpeed?, modHitPoints?}`。`mod` = `ItemModifier.StringId`（**空串 = 该槽没有修饰符**）。用途见下方「装备修饰符」注 |
 | `kill` | victim, killer, victimTroop, killerTroop, vSide, state, dmg, damageType, bodyPart, isMissile, weaponClass；**v0.8.1 起**另带 `bodyPartName` |
 | `flee` / `panic` | agent, side, troop |
-| `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp |
+| `sample` | 每 10 秒：aAlive, dAlive, aHp, dHp；**v0.8.45 起**另带 `corpses`（残留尸体数 = `Mission.AllAgents` 里 `IsAddedAsCorpse()` 为真的个数；取不到 = -1）。用途：让 `keepCorpses`（`DisableCorpseFadeOut`）这个**托管侧零消费者**的旋钮有可观测的行为判据 |
 | `squad` | **v0.8.8** 多兵种/战术组：每组一行，**仅当该方给了 `attackerGroups`/`defenderGroups` 时才出现**（旧 plan 不产生）。字段 `t / round / side / group / troop / count / formation / movement / spawned / source`；`round` 是 1 基轮次、`group` 是 **0 基**组下标、`formation` 是该组的**实际**编队（**不是** DSL 里写的那个）、`movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量（`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）|
 | `end` | aAlive, dAlive, aInitial, dInitial, hits, kills, flees, **ioFailed, ioError**；**v0.7.9 起**另带 `nanCount` 与 `validity{verdict, ticks, ticksPerSecond, wallSeconds, maxStallMs, …}` |
 | `dummy_meta` / `dummy_hit` / `dummy_end` | 靶场专用（阶段 2①）：dummySide, freeze, **armor**（v0.8.0 的护甲覆盖值）, applied, appliedByHp, blocked, hpAfter, hpMax, restored, leakedDeaths, hpMismatch；**v0.8.1 起** `dummy_hit` 另带 `bodyPartName`；**v0.8.2 起** `dummy_meta` 另带 `bodyItem`（请求替换的身甲物品 id） |
@@ -429,6 +489,56 @@ manifest_missing         旧版部署，没有清单
 >   `movement` 是 DSL 原值（缺省 `charge`）、`spawned` = 该组实际生成/提供的数量
 >   （`source="supplier"` 时 = 交给引擎的 origin 数；`source="respawn"` 时 = `SpawnAgent` 成功次数）。
 > - 原则：**schema 1 内的新增字段/事件，旧日志仍可解析**（GC2）。
+>
+> **`equip` 事件（v0.8.41）：装备修饰符到底有没有在动护甲**
+> - 为什么加它：`PROGRESS.md` §十五 曾写下「`armorBody` 是确定性的（3/3 逐场一致）⇒ **不是随机 modifier**」。
+>   **这条推断不成立** —— `AgentBuildData.AgentEquipmentSeed` 来自 `IAgentOriginBase.Seed` / `UniqueSeed`，
+>   种子若每场确定，则由它抽出的随机 modifier **同样每场一致**："3/3 一致"分辨不了
+>   「没有 modifier」与「种子确定的 modifier」，而后者是**随 agent 序号漂移的隐藏变量**，
+>   正好污染护甲/材质对照。
+> - 判别判据（拿到数据一眼可判，不用改代码）：同一 `troop`、同一场、**不同 agent 的 `mod` 是否各不相同** ——
+>   不同 ⇒ 随机 modifier 成立（混杂源存在）；全 `""` ⇒ 该路径确实不加，旧结论可用。
+> - `modArmor` 就是能解释「同一件 XML 甲、运行时护甲值不同」的那个数：反编译取证
+>   `ItemModifier.ModifyArmor(int armorValue) => Math.Max(armorValue + Armor, 1)`
+>   ⇒ **修饰符对护甲的贡献是纯加法**，`Armor` 即该槽的护甲增量。
+> - 槽位上限取 `EquipmentIndex.NumEquipmentSetSlots`（= 12，反编译取证）；只写有物品的槽。
+> - 数据源是 `Agent.SpawnEquipment`（**入场静态装备**），不是 `Equipment`（`MissionEquipment`，带耐久/装弹的运行时状态）。
+>
+> **战术档位（v0.8.41）：`attackerTacticLevel` / `defenderTacticLevel`**
+> - 引擎真身：`CustomBattleCombatant.GetTacticsSkillAmount()` = **该方参战兵种的 `max(Tactics 技能)`**；
+>   `MissionCombatantsLogic.EarlyStart` 拿它**分 20 / 50 两档**决定给该方挂哪些 `TacticOption`
+>   （`<20` 只有 `TacticCharge`；`>=20` 追加 `TacticFullScaleAttack` 等；`>=50` 再追加 `TacticFrontalCavalryCharge` 等）。
+>   ⇒ 这就是 EBT README 所说"战术等级 0-20 / 20-50 / 50+"的引擎真身。
+> - 实现：`src/TacticsCombatant.cs` —— 一个**只读包装**（`IBattleCombatant`），只在请求了档位时才包上。
+>   `CustomBattleCombatant` 非 sealed，但 `GetTacticsSkillAmount` 是 `virtual final`（子类无法覆盖），
+>   而 `MissionCombatantsLogic` 的 4 个 ctor 参数**声明类型全是 `IBattleCombatant`、全类无下转型** ⇒ 包装安全。
+> - ⚠️ **默认 `orders=charge` 会 `ClearTacticOptions()` 只留 `TacticCharge`**，档位看不出效果；
+>   要看效果必须配 `orders=default`。`status` / 响应里的 `aNative` / `dNative` 是引擎原生值，用它与请求值对照。
+>
+> **环境旋钮（v0.8.41）：`terrain` / `randomTerrainSeed` / `aiFriendlyFireMultiplier` / `keepCorpses`**
+> - 全部是 `MissionInitializerRecord` 上的**已核字段**，零 Harmony。**不传就不动**（未请求时与改动前逐字段一致）。
+> - 地形名取自 `TaleWorlds.Core.TerrainType` 全表（23 项，小写）；非法名**显式报错**并列候选，不静默兜底成 plain。
+>   `bl_common.TERRAINS` ↔ `src/BattleEnv.cs` 的 `TerrainTable` 由 `bl_selftest` ⑭ **双向对账**（防两表漂移）。
+> - ⚠️ **`terrain` 在自定义战斗里没有托管消费者**（2026-10-05 反证）：它唯一已知的托管消费点
+>   `SandboxAgentStatCalculateModel`（按地形给**队长**加 Tactics Perk）**注册在 `if (game.GameType is Campaign)` 里**
+>   （`SandBoxSubModule.cs:37-41`），而自定义战斗注册的是 `CustomBattleAgentStatCalculateModel`（`CustomGame.cs:95`），
+>   后者全文 `Terrain`/`Perk` 命中 **0**。⇒ 本靶场里 `terrain` **托管侧无影响路径**（native 侧未排除）。
+>   实测"默认 vs snow 无可测差异"与此一致。
+> - ⚠️ **`aiFriendlyFireMultiplier` 的作用面与名字不符**（2026-10-05 实测）：它写的是
+>   `DamageToFriendsMultiplier`，而引擎判据是 `victimAgent.IsFriendOf(mainAgent)`
+>   ⇒ 它管的是"**打到「玩家方」身上的伤害**倍率"（本靶场玩家方 = `Attacker`，可用 `playerSide` 改），
+>   **不是"消掉同队误伤"**（同队误伤在引擎里本就近乎无害：418131 次命中里仅 1.39%，其中 99% 判定为 0 伤害）。
+>   实测（匹配集交错 A/B，`fian_champion`20 vs `legionary`20）：设 0 时"打到玩家方的命中零伤害占比"
+>   从 **20.2%±3.4（n=5）升到 71.7%（n=4）**，`t=5.20`、两组范围不重叠 ⇒ **显著**，但**不是"全部归零"**。
+> - ⚠️ **攻城路径不支持这四项**（走官方 `OpenSiegeMissionWithDeployment`，它自建 record）⇒
+>   传了会被**显式忽略**并出现在响应/`status` 的 `envNotes` 里，**不静默**。
+>   攻城可设的是 `sceneLevel`（1..3，默认 3）与 `timeOfDay`（小时，默认 6）—— 这两个原本是写死值。
+>   **2026-10-05 已真机取证**：`sceneLevel` 有硬判据（rgl 日志 `Opening new mission CustomSiegeBattle level_1 siege.`
+>   逐字对上，且与默认 `level_3` 成对照）；`timeOfDay` 用截图判据（22 → 黑夜/月光/火把，12 → 正午）。
+>   ⚠️ **`timeOfDay` 只有 `{6,12,15,18,22}` 这五个值有别**，其它值（如 14）引擎查表落空
+>   ⇒ **回落到场景自带氛围**（看起来像"没生效"）。另注 `15 → TOD_04_00_SemiCloudy`（名叫"下午"、取的是凌晨 4 点）。
+> - **时刻/天气/雾暂未做**：`AtmosphereInfo` 是 `TaleWorlds.Library` 里的 ValueType，含 10 个子结构与 `IsValid`；
+>   手搓一份要先把子结构全部核清，核错就是黑屏或原生崩溃 ⇒ 留待专门取证，本轮不做。
 
 ---
 
@@ -450,7 +560,7 @@ manifest_missing         旧版部署，没有清单
 **已本地验证（无需游戏）**
 - Roslyn 编译通过：全部 `src\*.cs`（源文件数以 `out/BlBridge.manifest.json` 的 `sourceCount` 为准，DLL 体积以 `dllBytes` 为准 —— 不再手写数字避免漂移），已部署
 - **离线单测 146 项**（`tools/jsontest/build_and_run.ps1`）：JSON 读取器（含"字符串值劫持键查找"）、请求闸门、探针判定规则、构建身份、配置校验、编队 DSL、主菜单层面状态名、改令名字表/校验器（含 v0.8.32 的骑乘令三档、`targetAgent` 下标上界、`formation` 死字段家族比对）
-- **Python 自测 306 项断言**（`tools/bl_selftest.py`，2026-09-26 实测；`[OK]` 计数可复算）：分析器（血量偏差 0.0%）、MCP 协议（32 工具）、控制通道（含 `list_ui`/`open_ui`/`close_ui` 往返、`bl_order` 往返、`bl_control_agent` 往返）、
+- **Python 自测 306 项断言**（`tools/bl_selftest.py`，2026-09-26 实测；`[OK]` 计数可复算）：分析器（血量偏差 0.0%）、MCP 协议（44 工具）、控制通道（含 `list_ui`/`open_ui`/`close_ui` 往返、`bl_order` 往返、`bl_control_agent` 往返）、
   **构建链四段判定**、**配置加载即校验**、**崩溃判定**、真实 config.xml 回读与 dry-run
 - `bl_build_check` 在真实目录实跑：`builtVersion` 与 `deployedSha256` 与清单一致（游戏未启动时为 `game_offline`）
 

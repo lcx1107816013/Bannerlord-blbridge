@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using TaleWorlds.Core;
 using TaleWorlds.Library;
@@ -95,6 +96,11 @@ namespace BlBridge
             sb.Append(",\"defenderGroups\":").Append(Protocol.Q(DefenderGroupsDsl));
             // v0.8.32：`formation` 死字段的一致性告警（每场 start 时重算 ⇒ 天然按场次隔离）
             sb.Append(",\"formationWarnings\":").Append(FormationWarningsJson());
+            // v0.8.41：环境旋钮与被显式忽略的原因（见 BattleEnv.cs）；无 ⇒ null / []
+            sb.Append(",\"env\":").Append(BattleEnv.Json());
+            sb.Append(",\"envNotes\":").Append(EnvNotesJson());
+            // v0.8.41：战术档位（请求值 + 引擎原生值；见 TacticsCombatant.cs）
+            sb.Append(",\"tactics\":").Append(TacticsJson());
             sb.Append(",\"durationCapSec\":").Append(Jw.N((int)DurationCapSeconds));
             sb.Append('}');
             sb.Append(",\"progress\":").Append(ProgressJson());
@@ -205,22 +211,68 @@ namespace BlBridge
         }
 
         /// <summary>
-        /// 「可以在这里开战」的状态：**只有官方自定义战斗界面** `CustomBattleState`。
+        /// 「可以在这里开战」的状态：**官方自定义战斗界面**。
         ///
         /// 沿革（别把这段读成"一直如此"）：
         ///   v0.8.11 及之前 —— 同样是单值 `CustomBattleState`；
         ///   v0.8.12        —— 放宽成白名单，多放行一个自建面板态 `BattleSetupState`；
         ///   v0.8.14        —— 面板删除（官方自带完整界面：战斗/围攻/村庄/海战/海上掠夺 + 玩家类型
-        ///                     + 选择攻守方 + 全套地图参数，复刻属重复建设）⇒ 收回为单值。
+        ///                     + 选择攻守方 + 全套地图参数，复刻属重复建设）⇒ 收回为单值；
+        ///   v0.8.44        —— **再放宽成"同一族状态"**：装了 **NavalDLC** 时，从主菜单
+        ///                     `open_ui(CustomBattle)` 落的是 **`NavalCustomBattleState`**
+        ///                     （官方把自定义战斗入口劫持到海战选兵界面）。
+        ///                     旧实现写死单值 ⇒ 带 NavalDLC 的机器上：
+        ///                       ① `bl_start_battle` 直接报 `wrong_state`（要调用方手动传
+        ///                          `allowAnyState=true` 才绕过 —— 那是**把缺陷推给调用方**）；
+        ///                       ② `close_ui` 报 `not_open`（**进去了出不来**，而进去正是本模块给的门）。
+        ///                     实测见工作区报告 2026-10-05（`activeState=NavalCustomBattleState`
+        ///                     时 `close_ui` → `code=not_open`）。
         ///
-        /// 与 `UiEntry.CustomBattleStateName` **共用同一个常量**，免得两处字符串各自漂移。
-        /// 集合外一律拒绝 —— 不做前缀匹配、不靠 catch 兜底；
+        /// 判据是**后缀匹配** `*CustomBattleState`（同时容纳 `CustomBattleState` 与
+        /// `NavalCustomBattleState`），而不是"前缀"或"包含"：
+        /// 这样 `MapState` / `CampaignState` / `InitialState` / `VideoPlaybackState`
+        /// **都不匹配**（它们不以 `CustomBattleState` 结尾）—— 集合外一律拒绝，
+        /// 不做更宽的匹配、不靠 catch 兜底。
         /// 判据可离线对照：假造一个集合外状态名必须仍报 wrong_state（见 tools\bl_selftest.py 的断言）。
         /// </summary>
         internal static bool IsBattleSetupState(string stateName)
         {
             if (string.IsNullOrEmpty(stateName)) return false;
-            return stateName == UiEntry.CustomBattleStateName;
+            // 后缀必须严格是 CustomBattleState（大小写敏感，与引擎给的名字逐字一致）
+            return stateName.EndsWith(UiEntry.CustomBattleStateName, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// v0.8.41：战术档位的合法域 = `-1`（不覆盖）或 `0..100`。
+        /// 上限 100 不是因为引擎需要它（引擎只在 20 / 50 分档），而是为了给一个**有限域**，
+        /// 好让打错的值当场报错 —— 静默接受 999 会做出一场"看起来设了、其实等于 100"的实验。
+        /// </summary>
+        private static bool InTacticLevelRange(int value)
+        {
+            return value == -1 || (value >= 0 && value <= 100);
+        }
+
+        /// <summary>
+        /// v0.8.41：整数参数 —— **同时接受**裸数字与带引号的字符串。
+        /// 理由与 `Jmini.Bool` 收两种形态同源（v0.8.14 真机踩到 `spectate` 被静默丢弃：
+        /// CLI 发字符串、MCP 发裸字面量，只认一种就是"调用方猜谜"）。不动 Jmini 本体，
+        /// 只给本版新增的参数用，避免影响既有参数的解析路径（GC2）。
+        /// </summary>
+        private static int IntOrQuoted(string raw, string key, int fallback)
+        {
+            if (!Jmini.Has(raw, key)) return fallback;
+            string quoted = Jmini.Str(raw, key, null);
+            if (quoted != null)
+            {
+                int parsed;
+                if (int.TryParse(quoted.Trim(), NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out parsed))
+                {
+                    return parsed;
+                }
+                return fallback;
+            }
+            return Jmini.Int(raw, key, fallback);
         }
 
         public static string Start(string id, string raw)
@@ -238,6 +290,89 @@ namespace BlBridge
             //   B 场：不带 groups ⇒ 响应里出现了 A 场那条告警 ⇒ 残留坐实。
             // 位置：放在 Busy 短路**之后**（正在跑的那一场的告警不该被一个被拒的请求清掉）。
             _pendingFormationWarnings = new List<string>();
+
+            // v0.8.41：环境旋钮 + 战术档位，**每场无条件复位**（理由同上一段）。
+            // 不传 = "不覆盖"：既不能沿用上一场的值，也不能悄悄改成引擎默认之外的别的值。
+            BattleEnv.Reset();
+            _pendingEnvNotes = new List<string>();
+            AttackerTacticsRequested = -1;
+            DefenderTacticsRequested = -1;
+            AttackerTacticsNative = -1;
+            DefenderTacticsNative = -1;
+
+            // 战术档位（0..100；-1 = 不覆盖）。阈值 20 / 50 是引擎自己的分档线
+            // （反编译 MissionCombatantsLogic.EarlyStart 取证，见 TacticsCombatant.cs）。
+            int atkTactics = IntOrQuoted(raw, "attackerTacticLevel", -1);
+            int defTactics = IntOrQuoted(raw, "defenderTacticLevel", -1);
+            if (!InTacticLevelRange(atkTactics))
+            {
+                return Protocol.Failure(id, "bad_tactic_level",
+                    "attackerTacticLevel 只接受 -1（不覆盖）或 0..100，收到 " + atkTactics, false);
+            }
+            if (!InTacticLevelRange(defTactics))
+            {
+                return Protocol.Failure(id, "bad_tactic_level",
+                    "defenderTacticLevel 只接受 -1（不覆盖）或 0..100，收到 " + defTactics, false);
+            }
+
+            // 地形（空 = 不覆盖）。名字非法**显式报错**，绝不静默兜底成 Plain。
+            string terrainArg = Jmini.Str(raw, "terrain", "");
+            int terrainValue;
+            string terrainError;
+            if (!BattleEnv.TryParseTerrain(terrainArg, out terrainValue, out terrainError))
+            {
+                return Protocol.Failure(id, "bad_terrain", terrainError, false);
+            }
+            BattleEnv.TerrainTypeValue = terrainValue;
+            BattleEnv.TerrainName = string.IsNullOrEmpty(terrainArg)
+                ? "" : terrainArg.Trim().ToLowerInvariant();
+
+            // 随机地形种子（不给 = 不覆盖 ⇒ record 保持引擎默认 0 且不开 NeedsRandomTerrain）
+            if (Jmini.Has(raw, "randomTerrainSeed"))
+            {
+                BattleEnv.RandomTerrainSeedValue = IntOrQuoted(raw, "randomTerrainSeed", 0);
+            }
+
+            // 「打到玩家方身上的伤害」倍率（不给 = 不覆盖 ⇒ 保持引擎默认 1f）。
+            // ⚠️ 名字里的 "FriendlyFire" 容易误导：见 BattleEnv.FriendlyFireMultiplier 的注释 ——
+            //    引擎比的是"受害者是否属于玩家一方"，不是"加害者与受害者同队"。
+            if (Jmini.Has(raw, "aiFriendlyFireMultiplier"))
+            {
+                double ff = Jmini.Num(raw, "aiFriendlyFireMultiplier", 1.0);
+                if (ff < 0.0 || ff > 1.0)
+                {
+                    return Protocol.Failure(id, "bad_env",
+                        "aiFriendlyFireMultiplier 只接受 0..1（引擎默认 1），收到 " + ff, false);
+                }
+                BattleEnv.FriendlyFireMultiplier = (float)ff;
+            }
+
+            // 关尸体淡出（长跑时尸体量稳定；不给 = 不覆盖）
+            BattleEnv.KeepCorpses = Jmini.Bool(raw, "keepCorpses", false);
+
+            // 攻城专用：场景等级（1..3）与开战时刻（小时）。范围外**显式报错**。
+            SiegeSceneLevel = 3;
+            SiegeTimeOfDay = 6f;
+            if (Jmini.Has(raw, "sceneLevel"))
+            {
+                int lv = IntOrQuoted(raw, "sceneLevel", 3);
+                if (lv < 1 || lv > 3)
+                {
+                    return Protocol.Failure(id, "bad_env",
+                        "sceneLevel 只接受 1..3（攻城场景升级等级），收到 " + lv, false);
+                }
+                SiegeSceneLevel = lv;
+            }
+            if (Jmini.Has(raw, "timeOfDay"))
+            {
+                double tod = Jmini.Num(raw, "timeOfDay", 6.0);
+                if (tod < 0.0 || tod > 24.0)
+                {
+                    return Protocol.Failure(id, "bad_env",
+                        "timeOfDay 只接受 0..24（小时），收到 " + tod, false);
+                }
+                SiegeTimeOfDay = (float)tod;
+            }
 
             string attacker = Jmini.Str(raw, "attackerTroop", "");
             string defender = Jmini.Str(raw, "defenderTroop", "");
@@ -263,6 +398,15 @@ namespace BlBridge
             // 引擎没有"必须处于 CustomBattleState"的要求。但**实测发现另一道墙**：主菜单时
             // MBObjectManager 里还没有角色数据（所有兵种 id 都是 unknown_troop），
             // 所以这个开关本身不足以在裸主菜单开战——真正的依赖是"数据已加载"。
+            //
+            // ⚠️ v0.8.44 复核结论（**保留此开关，但用途已被掏空**，勿再照抄旧文档）：
+            //   • 原始设计目标「从主菜单直接开战」**当年就已排除**（PROGRESS §四"已排除的路线"）；
+            //   • 后来被实际使用的唯一场景是"绕过带 NavalDLC 时的 `wrong_state`" ——
+            //     而那**本来是我们的判据写死单值造成的假报**（见 IsBattleSetupState 的 v0.8.44 注释），
+            //     v0.8.44 改为后缀匹配后**该用途自动消失**。
+            //   ⇒ 现在它只剩"从数据已加载的其他状态开战"这个**未经实测**的理论用途。
+            //     保留而不删的理由：删参数会让仍在传它的调用方直接报错（破坏性），
+            //     而留着一个不用的开关成本近乎为零。**别再把"绕过 wrong_state"写成它的用途。**
             bool allowAnyState = Jmini.Str(raw, "allowAnyState", "false") == "true";
 
             // 不朽靶场（阶段 2①）：dummySide=attacker|defender 把该方设为"永不倒下"的靶子。
@@ -295,9 +439,12 @@ namespace BlBridge
             string roundSpawnA = Jmini.Str(raw, "roundSpawnAttacker", "");
             string roundSpawnD = Jmini.Str(raw, "roundSpawnDefender", "");
 
-            // 1) 必须处于官方自定义战斗界面（官方 benchmark 同样要求 CustomBattleState）。
+            // 1) 必须处于官方自定义战斗界面（官方 benchmark 同样要求该界面）。
             //    v0.8.12 曾放宽为白名单（含自建面板态 `BattleSetupState`）；v0.8.14 面板删除
-            //    （官方自带完整界面，复刻属重复建设）⇒ 白名单收回为单值，判据见 IsBattleSetupState。
+            //    （官方自带完整界面，复刻属重复建设）⇒ 收回；
+            //    **v0.8.44 再放宽为"同一族"**：判据是**后缀匹配** `*CustomBattleState`，
+            //    因为装了 NavalDLC 时官方入口落 `NavalCustomBattleState`（详见 IsBattleSetupState
+            //    的注释：那个写死单值造成过三条连带缺陷）。判据本身仍然唯一（不复刻）。
             //    真正的前提其实是"MBObjectManager 里的兵种/文化已加载"（裸主菜单下所有兵种 id
             //    都报 unknown_troop），而官方自定义战斗正是加载它们的正门 —— 所以就用它当判据。
             string stateName = ActiveGameStateName();
@@ -307,7 +454,7 @@ namespace BlBridge
                     "需要停留在「自定义战斗」界面（当前状态: " + (stateName.Length == 0 ? "未知" : stateName) +
                     "）。" + StuckMissionHint(stateName) +
                     "进游戏后点 Custom Battle 停在选兵界面，或用 open_ui（uiId=CustomBattle，主菜单下可用）走进去；" +
-                    "也可以传 allowAnyState=true 跳过本检查（但那时兵种 id 可能还解析不了）。", false);
+                    "也可以传 allowAnyState=true 跳过本检查（但那时兵种 id 可能还解析不了，见该参数的说明）。", false);
             }
 
             // 2) T5 多兵种/战术组参数：`troop:count[:formation[:movement]]`，多组用 | 分隔。
@@ -507,12 +654,47 @@ namespace BlBridge
                 // v0.8.14：上帝视角标志必须与 SiegePending 同一时刻写入（都在开 mission 之前），
                 // 由 SubModule.OnBeforeMissionBehaviorInitialize 消费一次（挂 SpectatorWatchBehavior）。
                 SpectateRequested = spectate;
+                // v0.8.41：战术档位请求值必须在 CreateBehaviors 之前写进静态字段
+                //（CreateBehaviors 里据此决定要不要包 TacticsCombatant）。
+                AttackerTacticsRequested = atkTactics;
+                DefenderTacticsRequested = defTactics;
                 // v0.8.11：城池场景必须走 siege mission（理由见 IsSiegeScene 的实测说明）
                 SiegePending = IsSiegeScene(scene);
                 if (SiegePending)
+                {
                     OpenSiegeMission(scene, attackerTroop, defenderTroop, aCount, dCount);
+                    // 攻城走官方 OpenSiegeMissionWithDeployment（内部自建 record + 自建 combatant）
+                    // ⇒ 环境字段无处可落、战术档位也不可控。显式记，不静默。
+                    AttackerTacticsNative = -1;
+                    DefenderTacticsNative = -1;
+                    if (BattleEnv.AnyRequested())
+                    {
+                        _pendingEnvNotes.Add(
+                            "env: 攻城路径不支持 terrain / randomTerrainSeed / aiFriendlyFireMultiplier"
+                            + " / keepCorpses（走官方 OpenSiegeMissionWithDeployment，它自建"
+                            + " MissionInitializerRecord）⇒ 本场这些参数已被忽略");
+                        // v0.8.43 修复：**meta 不能声称一个没被应用的参数**。
+                        // 实测（2026-10-05）：攻城场次的 meta 里 `terrain:"snow"`，而同一场的
+                        // envNotes 明说"已被忽略" —— 两处对同一事实给了相反的说法，下游按 meta
+                        // 做分组/对照就会把这场当成 snow 场。既然攻城路径的 record 是官方自建的，
+                        // 这些旋钮**确实没生效**，故在此把它们清回"未请求"哨兵，
+                        // 让 meta 如实写 `terrain:"" / terrainSeed:-1 / friendlyFire:-1`
+                        // （与"野战且没传这些参数"完全同形）。
+                        // envNotes 仍然照写，调用方依旧知道"你传了、但没生效"——两条口径自此一致。
+                        BattleEnv.Reset();
+                    }
+                }
                 else
+                {
                     OpenMission(scene, attackerTroop, defenderTroop, aCount, dCount);
+                    // 引擎**原生**战术档位：该方 combatant 的 GetTacticsSkillAmount()
+                    //  = 参战兵种里 max(GetSkillValue(Tactics))。留着它才能回答
+                    //  "我设了 60，但这场本来是多少" —— 否则覆盖值无法与原生值对照。
+                    AttackerTacticsNative = _pendingAttacker != null
+                        ? _pendingAttacker.GetTacticsSkillAmount() : -1;
+                    DefenderTacticsNative = _pendingDefender != null
+                        ? _pendingDefender.GetTacticsSkillAmount() : -1;
+                }
                 State = RunStateLoading;
                 LastHeartbeatUnix = NowUnix;
 
@@ -526,6 +708,10 @@ namespace BlBridge
                 sb.Append(",\"spectate\":").Append(Jw.B(spectate));
                 // v0.8.32：开战 DSL `formation` 与实际编队不一致的告警（空数组 = 无；不阻断开战）
                 sb.Append(",\"formationWarnings\":").Append(FormationWarningsJson());
+                // v0.8.41：战术档位（请求 + 引擎原生）与环境旋钮（含"被显式忽略"的原因）
+                sb.Append(",\"tactics\":").Append(TacticsJson());
+                sb.Append(",\"env\":").Append(BattleEnv.Json());
+                sb.Append(",\"envNotes\":").Append(EnvNotesJson());
                 sb.Append(",\"note\":\"战斗无玩家参与，10 倍速运行；用 bl_wait_for_state 等 ended\"}");
                 return Protocol.Success(id, sb.ToString());
             }
@@ -1004,11 +1190,11 @@ namespace BlBridge
                 attackerMachines,
                 defenderMachines,
                 isPlayerAttacker,
-                3,              // sceneUpgradeLevel（CPUBenchmark 同值）
+                SiegeSceneLevel,   // sceneUpgradeLevel（默认 3 = CPUBenchmark 同值；v0.8.41 起可设）
                 "",             // seasonString
                 false,          // isSallyOut
                 false,          // isReliefForceAttack
-                6f);            // timeOfDay
+                SiegeTimeOfDay);   // timeOfDay（默认 6f = 改动前的写死值；v0.8.41 起可设）
 
             SiegeTrace("returned mission=" + (mission == null ? "null" : "ok"));
 
@@ -1128,6 +1314,8 @@ namespace BlBridge
             rec.DoNotUseLoadingScreen = false;
             rec.PlayingInCampaignMode = false;
             rec.DecalAtlasGroup = 2;
+            // v0.8.41：环境旋钮（只写调用方显式请求过的字段；不请求 ⇒ record 逐字段与改动前一致）
+            BattleEnv.Apply(ref rec);
 
             MissionState.OpenNew("BlBridgeScenario", rec, CreateBehaviors, true, true);
         }
@@ -1168,6 +1356,8 @@ namespace BlBridge
             rec.DoNotUseLoadingScreen = false;
             rec.PlayingInCampaignMode = false;
             rec.DecalAtlasGroup = 2;
+            // v0.8.41：环境旋钮（与单值路径同一个调用点语义：只写显式请求过的字段）
+            BattleEnv.Apply(ref rec);
 
             MissionState.OpenNew("BlBridgeScenario", rec, CreateBehaviors, true, true);
         }
@@ -1241,6 +1431,48 @@ namespace BlBridge
             }
             catch
             {
+            }
+        }
+
+        /// <summary>v0.8.41：把 `_pendingEnvNotes` 渲染成 JSON 数组（无 ⇒ `[]`）。绝不抛。</summary>
+        private static string EnvNotesJson()
+        {
+            try
+            {
+                if (_pendingEnvNotes == null || _pendingEnvNotes.Count == 0) return "[]";
+                StringBuilder sb = new StringBuilder("[");
+                for (int i = 0; i < _pendingEnvNotes.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(Protocol.Q(_pendingEnvNotes[i]));
+                }
+                sb.Append(']');
+                return sb.ToString();
+            }
+            catch
+            {
+                return "[]";
+            }
+        }
+
+        /// <summary>v0.8.41：战术档位的单行 JSON（请求值 + 引擎原生值；都未参与 ⇒ `null`）。绝不抛。</summary>
+        private static string TacticsJson()
+        {
+            try
+            {
+                if (AttackerTacticsRequested < 0 && DefenderTacticsRequested < 0
+                    && AttackerTacticsNative < 0 && DefenderTacticsNative < 0) return "null";
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"aRequested\":").Append(Jw.N(AttackerTacticsRequested));
+                sb.Append(",\"dRequested\":").Append(Jw.N(DefenderTacticsRequested));
+                sb.Append(",\"aNative\":").Append(Jw.N(AttackerTacticsNative));
+                sb.Append(",\"dNative\":").Append(Jw.N(DefenderTacticsNative));
+                sb.Append('}');
+                return sb.ToString();
+            }
+            catch
+            {
+                return "null";
             }
         }
 
@@ -1432,6 +1664,45 @@ namespace BlBridge
         internal static string AttackerGroupsDsl = "";
         internal static string DefenderGroupsDsl = "";
 
+        // ── v0.8.41：战术档位 + 环境旋钮 ─────────────────────────────────
+        // 取证与动机见 `src/TacticsCombatant.cs`（战术档位）与 `src/BattleEnv.cs`（环境）。
+        // -1 = 不覆盖 ⇒ 该方照旧走引擎原生路径（GC2）。
+
+        /// <summary>请求的战术档位（&lt; 0 = 不覆盖）。引擎用它分 20/50 两档决定加哪些 TacticOption。</summary>
+        internal static int AttackerTacticsRequested = -1;
+
+        /// <summary>请求的战术档位（&lt; 0 = 不覆盖）。</summary>
+        internal static int DefenderTacticsRequested = -1;
+
+        /// <summary>
+        /// 引擎**原生**战术档位 = `combatant.GetTacticsSkillAmount()` = 该方所有参战兵种的
+        /// `GetSkillValue(DefaultSkills.Tactics)` 最大值（反编译 CustomBattleCombatant 取证）。
+        /// 开战时取一次即可（参战名单在开战后不再变）。攻城路径由官方入口内部自建 combatant ⇒ 保持 -1。
+        /// </summary>
+        internal static int AttackerTacticsNative = -1;
+
+        /// <summary>引擎原生战术档位（守方）。</summary>
+        internal static int DefenderTacticsNative = -1;
+
+        /// <summary>
+        /// 环境旋钮被**显式忽略**的原因（如"攻城路径不支持 terrain"）。
+        /// 与 `formationWarnings` 同一模式：不阻断开战，但绝不静默 —— 静默是这类
+        /// "参数写了、没接线"最贵的坑。空列表 ⇒ 无。
+        /// </summary>
+        private static List<string> _pendingEnvNotes = new List<string>();
+
+        // ── v0.8.41：攻城专用旋钮 ────────────────────────────────────────
+        // 攻城路径走官方 `BannerlordMissions.OpenSiegeMissionWithDeployment(..., sceneUpgradeLevel,
+        // seasonString, isSallyOut, isReliefForceAttack, timeOfDay)` —— 这两个值一直是**写死**的
+        // （3 与 6f，照 CPUBenchmark）。官方入口内部自建 record ⇒ terrain/seed 那些字段落不进去，
+        // 但这两个是入口的显式参数，可以开出来。默认值 = 改动前的写死值 ⇒ 不传就是原样（GC2）。
+
+        /// <summary>攻城场景升级等级（1..3；官方入口参数）。默认 3 = 改动前的写死值。</summary>
+        internal static int SiegeSceneLevel = 3;
+
+        /// <summary>攻城开战时刻（小时，0..24；官方入口参数）。默认 6f = 改动前的写死值。</summary>
+        internal static float SiegeTimeOfDay = 6f;
+
         // v0.8.32：开战 DSL `formation` 死字段的一致性告警（已渲染好的 JSON 数组元素，空 = 无不一致）。
         // 见 `SquadSpec.CollectFormationMismatches` —— 把"写 Infantry 的弓手静默进 Ranged"变成显式信号。
         private static List<string> _pendingFormationWarnings = new List<string>();
@@ -1445,6 +1716,18 @@ namespace BlBridge
             // 注意：3/4 号参数必须分别是**两个不同阵营**的首领，只有 playerBattleCombatant 跟着开关变。
             IBattleCombatant attackerLeader = _pendingAttacker;
             IBattleCombatant defenderLeader = _pendingDefender;
+            // v0.8.41：只在**请求了档位**时才包一层 TacticsCombatant（不传 ⇒ 逐字节走原路径，GC2）。
+            // 包装的安全性取证（无下转型、引擎只读 4 处成员）见 `TacticsCombatant.cs`。
+            // ⚠️ `CustomBattleMissionSpawnHandler` 仍拿**未包装**的 `_pendingDefender/_pendingAttacker`：
+            //    它的参数类型是具体类 `CustomBattleCombatant`，本来也塞不进接口对象。
+            if (attackerLeader != null && AttackerTacticsRequested >= 0)
+            {
+                attackerLeader = new TacticsCombatant(attackerLeader, AttackerTacticsRequested);
+            }
+            if (defenderLeader != null && DefenderTacticsRequested >= 0)
+            {
+                defenderLeader = new TacticsCombatant(defenderLeader, DefenderTacticsRequested);
+            }
             IBattleCombatant playerParty = _pendingPlayerSide == BattleSideEnum.Attacker
                 ? attackerLeader : defenderLeader;
             list.Add(new MissionCombatantsLogic(null, playerParty, defenderLeader, attackerLeader,
@@ -2077,11 +2360,93 @@ namespace BlBridge
                 }
             }
 
+            // ── v0.8.43：战术档位观测事件（`t`=`tactics`）──────────────────────────────
+            /// <summary>
+            /// 每 5s 写两行 `tactics`（每方一行），**只在请求过战术档位时**写。
+            ///
+            /// 为什么需要它（这是 T3② 之前测不出来的第二重原因，2026-10-05 真机验证定位）：
+            ///   要做"档位 60 vs 不覆盖"的 A/B，必须用 `orders=default`（默认的 `orders=charge`
+            ///   会 `ClearTacticOptions()` 只留 `TacticCharge`，档位必然看不出差别）。而
+            ///   `orders=default` 且**不带 groups** 时，`order` 事件一条都不写
+            ///   （`WriteOrderEvents` 开头就 return）⇒ 整场没有任何战术观测出口。
+            ///   `MissionCombatantsLogic.EarlyStart` 依 `GetTacticsSkillAmount()` 分 20/50 两档
+            ///   挂 `TacticOption`，而档位正是通过 `TacticsCombatant` 覆盖那个值的。
+            ///
+            /// **GC2 论证**：触发条件是 `AttackerTacticsRequested >= 0 || DefenderTacticsRequested >= 0`，
+            ///   而这两个字段是 v0.8.41 才有的新参数、默认 -1 ⇒ 任何 v0.8.41 之前的 plan /
+            ///   不传档位的请求都**不会**产生本事件，旧路径逐字节不变。
+            /// 整体 try/catch，绝不抛。
+            /// </summary>
+            private static void WriteTacticsEvents(Mission m)
+            {
+                try
+                {
+                    if (AttackerTacticsRequested < 0 && DefenderTacticsRequested < 0) return; // GC2
+                    if (!Jw.IsOpen) return;
+                    if (m == null) return;
+                    float time = (float)DurationNow();
+                    WriteTacticsSide("Attacker", m.AttackerTeam, time, AttackerTacticsRequested);
+                    WriteTacticsSide("Defender", m.DefenderTeam, time, DefenderTacticsRequested);
+                }
+                catch
+                {
+                }
+            }
+
+            /// <summary>写一方的一行 `tactics` 事件（请求档位 + 引擎真实战术）。绝不抛。</summary>
+            private static void WriteTacticsSide(string side, Team team, float time, int requested)
+            {
+                if (team == null) return;
+                try
+                {
+                    string names = ReadTacticNames(team);
+                    string state;
+                    if (names == null) state = "(unknown)";        // 反射读不到
+                    else if (names.Length == 0) state = "(no-teamai)"; // 读到了：该队没挂 TeamAI
+                    else state = names;                            // `可用集/当前生效`
+
+                    // v0.8.43：把"档位是否真的生效"一并落盘（只读、不干预）。
+                    // 只在**可用集**段上判 —— `/` 之后是"当前生效的那个"，两者同源。
+                    string availOnly = names == null ? "" : names;
+                    int slash = availOnly.IndexOf('/');
+                    if (slash >= 0) availOnly = availOnly.Substring(0, slash);
+                    string overriddenBy = DetectOverriddenBy(requested, side, availOnly);
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append("{\"t\":\"tactics\"");
+                    sb.Append(",\"time\":").Append(Jw.N(time));
+                    sb.Append(",\"side\":\"").Append(side).Append('"');
+                    sb.Append(",\"requested\":").Append(Jw.N(requested));
+                    sb.Append(",\"actual\":\"").Append(Jw.Esc(state)).Append('"');
+                    // 空串 = 未检测到覆盖者。**字段恒在**（不省略），便于下游稳定取用。
+                    sb.Append(",\"overriddenBy\":\"").Append(Jw.Esc(overriddenBy)).Append('"');
+                    sb.Append('}');
+                    Jw.Write(sb.ToString());
+                }
+                catch
+                {
+                }
+            }
+
             /// <summary>写该方每个编队一行 `order` 事件（`count==0` 的也写，便于看「编队是否存在」）。绝不抛。</summary>
             private static void WriteOrderSide(string side, Team team, float time)
             {
                 if (team == null) return;
-                string tactic = "none";
+                // v0.8.43：`tactic` 改为**真实读取**。
+                // 缺陷背景（2026-10-05 真机验证发现，**既有缺陷、非本轮引入**）：本方法原先写的是
+                //   `string tactic = "none";` —— 该变量此后**从未被重新赋值**，落盘时原样写出，
+                //   于是**所有** `order` 事件的 `tactic` 恒为 `"none"`，是个占位字段。
+                //   ⇒ 交接文档里"看 order 的 tactic 名判断档位是否分岔"那条判据**永远测不出东西**。
+                // 读法用反射：`TeamAIComponent` 的 `_availableTactics`（可用集）与 `_currentTactic`
+                //   （当前生效的那个）都是 private。本仓库既有反射先例见 CameraFollow / CameraSpeed /
+                //   ControlAgent / UiInspector。
+                // ⚠️ 三态必须可分辨（本项目反复吃过亏，同 UiInspector 的"属性不存在 vs 值为 null"）：
+                //     null       = 反射读不到（字段名漂了/异常）→ 写 "(unknown)"
+                //     ""         = 读到了，但该队没有 TeamAI / 一个战术都没有 → 写 "(none)"
+                //     非空       = 真实战术名（多个用 + 连）
+                string tactic = ReadTacticNames(team);
+                if (tactic == null) tactic = "(unknown)";
+                else if (tactic.Length == 0) tactic = "(none)";
                 foreach (Formation f in team.FormationsIncludingEmpty)
                 {
                     string formation; // JSON 片段：带引号的名字，或裸 `null`
@@ -2123,6 +2488,156 @@ namespace BlBridge
                     sb.Append(",\"tactic\":\"").Append(Jw.Esc(tactic)).Append('"');
                     sb.Append('}');
                     Jw.Write(sb.ToString());
+                }
+            }
+
+            // ── v0.8.43：真实战术名读取（反射，解决 order.tactic 恒为 "none" 的既有缺陷）────
+            /// <summary>`TeamAIComponent` 的两个 private 字段，只解析一次。</summary>
+            private static FieldInfo _availableTacticsField;
+            private static FieldInfo _currentTacticField;
+            private static bool _tacticFieldsResolved;
+
+            /// <summary>
+            /// 读该队**真实**的战术名，返回 `可用集/当前生效` 两段（形如 `TacticCharge/TacticFullScaleAttack`）。
+            /// 返回值语义（**三态必须可分辨**，见调用点的说明）：
+            ///   `null` = 反射读不到（字段名漂了 / 抛异常）；`""` = 读到了但没有任何战术；非空 = 真实名。
+            /// 整体 try/catch，绝不抛。
+            /// </summary>
+            private static string ReadTacticNames(Team team)
+            {
+                try
+                {
+                    TeamAIComponent ai = team.TeamAI;
+                    if (ai == null) return "";   // 读到了：该队没挂 TeamAI
+
+                    if (!_tacticFieldsResolved)
+                    {
+                        const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+                        Type t = typeof(TeamAIComponent);
+                        _availableTacticsField = t.GetField("_availableTactics", F);
+                        _currentTacticField = t.GetField("_currentTactic", F);
+                        _tacticFieldsResolved = true;
+                    }
+                    if (_availableTacticsField == null || _currentTacticField == null) return null; // 字段名漂了
+
+                    string available = JoinTacticTypes(_availableTacticsField.GetValue(ai) as System.Collections.IEnumerable);
+                    TacticComponent current = _currentTacticField.GetValue(ai) as TacticComponent;
+                    string curName = current == null ? "" : current.GetType().Name;
+                    return available + "/" + curName;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>把战术集合拼成 `A+B`（空集合 ⇒ `""`）。绝不抛。</summary>
+            private static string JoinTacticTypes(System.Collections.IEnumerable items)
+            {
+                if (items == null) return "";
+                try
+                {
+                    StringBuilder sb = new StringBuilder();
+                    foreach (object o in items)
+                    {
+                        TacticComponent tc = o as TacticComponent;
+                        if (tc == null) continue;
+                        if (sb.Length > 0) sb.Append('+');
+                        sb.Append(tc.GetType().Name);
+                    }
+                    return sb.ToString();
+                }
+                catch
+                {
+                    return "";
+                }
+            }
+
+            // ── v0.8.43：战术覆盖者检测（谁改写了档位挂上的战术集）──────────────────
+            /// <summary>
+            /// 判断"请求的档位是否真的产生了它应有的战术集"，并在没有时给出**归因**。
+            /// **只读、不 patch、不干预。**
+            ///
+            /// 为什么要它（2026-10-05 真机验证，见工作区报告 §8 / §14）：
+            ///   纯原版下 `attackerTacticLevel`/`defenderTacticLevel` **确实生效**（换边自对照证实：
+            ///   攻方 60→0 时战术集从 5 个塌成 1 个）。但**装了 RBM 时档位是空操作** ——
+            ///   RBM 给 `MissionCombatantsLogic.EarlyStart` 挂了**纯 Postfix**，它**无条件
+            ///   `ClearTacticOptions()`** 再按 `BasicCulture` + `Side` 重建，且全上游 grep
+            ///   `GetTacticsSkillAmount` **零命中** ⇒ 档位没有任何路径会被读到。
+            ///   ⇒ 后果：调用方拿到 `accepted:true` 却**看不出"档位没接上"**，只能靠统计猜
+            ///   （§三十七 之前正是这么误判成"样本不足"的）。本方法让它**一眼可读**。
+            ///
+            /// 判据（**不依赖文化知识，且比"类名含 RBMTactic"强**）：
+            ///   按引擎 `MissionCombatantsLogic.EarlyStart` 的 FieldBattle 三档逻辑算出**应有集**，
+            ///   与**观测到的可用集**比对；不等即为"被覆盖"。理由：
+            ///   `&lt; 20` 只给 `TacticCharge`；`&gt;= 20` 追加 `FullScaleAttack`（攻方另加
+            ///   `RangedHarrassmentOffensive`，守方另加 `DefensiveEngagement`/`DefensiveLine`）；
+            ///   `&gt;= 50` 追加 `FrontalCavalryCharge`（攻方另加 `CoordinatedRetreat`，守方另加
+            ///   `DefensiveRing`/`HoldChokePoint`）。
+            ///   ⚠️ **为什么不用"含 `RBMTactic*`"**：那会**漏报** —— 实测守方 req=0 时 RBM 已覆盖
+            ///   （应只有 `Charge`，实际 4 个），但它那支没有 `RBMTactic*` 类名（RBM 的守卫分支按文化
+            ///   条件追加，未命中）⇒ 只看类名会报"无覆盖"。见工作区报告 §18。
+            ///
+            /// 归因：判为覆盖后，RBM 模块激活则报 `"RBM"`，否则报 `"(unknown)"` ——
+            ///   **模块身份与战术集异常是两条独立证据**，能对上才写成因，不替调用方编因果。
+            /// 整体 try/catch，绝不抛。
+            /// </summary>
+            /// <param name="requested">该方请求的档位（`&lt; 0` = 未覆盖 ⇒ 无法判定，返回空串）。</param>
+            /// <param name="side">`"Attacker"` / `"Defender"`（决定 20/50 档的侧向成员）。</param>
+            /// <param name="availableTacticNames">`A+B+C` 形式的**可用集**（`/` 之前那段）。</param>
+            private static string DetectOverriddenBy(int requested, string side, string availableTacticNames)
+            {
+                try
+                {
+                    if (requested < 0) return "";                       // 没覆盖档位 ⇒ 无从判定
+                    if (string.IsNullOrEmpty(availableTacticNames)) return "";
+
+                    bool isAttacker = side == "Attacker";
+
+                    // 引擎应有集（FieldBattle 分支，反编译逐条对齐）
+                    List<string> expect = new List<string>();
+                    expect.Add("TacticCharge");
+                    if (requested >= 20)
+                    {
+                        expect.Add("TacticFullScaleAttack");
+                        if (isAttacker) expect.Add("TacticRangedHarrassmentOffensive");
+                        else { expect.Add("TacticDefensiveEngagement"); expect.Add("TacticDefensiveLine"); }
+                        if (requested >= 50)
+                        {
+                            expect.Add("TacticFrontalCavalryCharge");
+                            if (isAttacker) expect.Add("TacticCoordinatedRetreat");
+                            else { expect.Add("TacticDefensiveRing"); expect.Add("TacticHoldChokePoint"); }
+                        }
+                    }
+
+                    // 观测集（`A+B` → 排序去重）
+                    List<string> got = new List<string>();
+                    string[] parts = availableTacticNames.Split('+');
+                    for (int i = 0; i < parts.Length; i++)
+                    {
+                        string s = parts[i].Trim();
+                        if (s.Length > 0 && !got.Contains(s)) got.Add(s);
+                    }
+
+                    // 集合相等（顺序无关）⇒ 档位生效，未被覆盖
+                    if (got.Count == expect.Count)
+                    {
+                        bool same = true;
+                        for (int i = 0; i < expect.Count; i++)
+                        {
+                            if (!got.Contains(expect[i])) { same = false; break; }
+                        }
+                        if (same) return "";
+                    }
+
+                    bool rbmActive = false;
+                    try { rbmActive = ModuleHelper.IsModuleActive("RBM"); }
+                    catch { rbmActive = false; }
+                    return rbmActive ? "RBM" : "(unknown)";
+                }
+                catch
+                {
+                    return "";
                 }
             }
 
@@ -2338,6 +2853,7 @@ namespace BlBridge
                     {
                         _sinceOrderSample = 0f;
                         WriteOrderEvents(m);
+                        WriteTacticsEvents(m);   // v0.8.43：档位观测（仅请求过档位时才写 ⇒ GC2）
                     }
 
                     int aAlive = CountAlive(m.AttackerTeam);
@@ -2414,8 +2930,15 @@ namespace BlBridge
             {
                 try
                 {
-                    // 官方 10 倍速通道（MissionState.MissionFastForwardSpeedMultiplier = 10）
-                    m.SetFastForwardingFromUI(true);
+                    // v0.8.33：先尊重"用户显式干预"。
+                    // 在此之前这里是**无条件** `SetFastForwardingFromUI(true)` ⇒ 推演场次里
+                    // 用户按热键关掉加速后，1 秒后就被这里重申回 true（关不住）。
+                    // 现在：未干预时保持历史行为（推演一律 10 倍速），干预过就以用户为准。
+                    if (!TimeControl.UserOverride)
+                    {
+                        TimeControl.TargetSpeed = 10;
+                    }
+                    TimeControl.Apply(m);
                 }
                 catch
                 {

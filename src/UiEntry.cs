@@ -239,7 +239,13 @@ namespace BlBridge
         /// `close_ui`：从官方自定义战斗界面回主菜单（与官方 CustomBattle 的「返回」同一路径：
         /// `CustomBattleVM.ExecuteBack()` → `Game.Current.GameStateManager.PopState(0)`）。
         ///
-        /// **白名单只有一个状态 `CustomBattleState`**，不接受任意状态名 —— 那等于把引擎状态栈交给调用方。
+        /// **白名单 = 自定义战斗界面这一族**（`*CustomBattleState`），不接受任意状态名 ——
+        /// 那等于把引擎状态栈交给调用方。
+        ///   v0.8.44 放宽：装了 **NavalDLC** 时官方入口落 `NavalCustomBattleState`，
+        ///   旧实现写死 `CustomBattleState` 会让 `close_ui` 报 `not_open`
+        ///   ⇒ **进去了出不来**（而进去那扇门正是本模块开的，见 `open_ui`）。
+        ///   判据与 `ScenarioRunner.IsBattleSetupState` **同一套**（那里是唯一真相源），
+        ///   免得两处各自漂移。
         /// 保留它的理由：`open_ui` 给了 agent `id=CustomBattle` 这扇门；没有出口，agent 进去就出不来
         /// （而它又不能从那里再 `open_ui` —— 见上面的主菜单闸门）。
         /// </summary>
@@ -247,10 +253,13 @@ namespace BlBridge
         {
             string wantState = Jmini.Str(raw, "state", CustomBattleStateName);
             if (string.IsNullOrEmpty(wantState)) wantState = CustomBattleStateName;
-            if (wantState != CustomBattleStateName)
+            // 白名单：只要**属于自定义战斗界面这一族**就放行（v0.8.44），
+            // 但仍拒绝任意状态名（拿 IsBattleSetupState 当判据，与开战守卫同源）。
+            if (!ScenarioRunner.IsBattleSetupState(wantState))
             {
                 return Protocol.Failure(id, "bad_state",
-                    "close_ui 只接受 state=" + CustomBattleStateName + "，收到: " + wantState +
+                    "close_ui 只接受自定义战斗界面这一族的状态（如 " + CustomBattleStateName +
+                    " 或带 NavalDLC 的 NavalCustomBattleState），收到: " + wantState +
                     "。不接受任意状态名 —— 那等于让调用方 pop 引擎状态栈。", false);
             }
 
@@ -269,9 +278,12 @@ namespace BlBridge
             try
             {
                 string state = ScenarioRunner.ActiveGameStateName();
-                if (state != wantState)
+                // v0.8.44：**实际状态**只要属于自定义战斗界面这一族即可，
+                // 不要求与 `wantState` 逐字相等 —— 调用方常按默认值传 `CustomBattleState`，
+                // 而带 NavalDLC 时实际是 `NavalCustomBattleState`；逐字比较会把它误判成"不在该界面"。
+                if (!ScenarioRunner.IsBattleSetupState(state))
                 {
-                    message = "当前不在 " + wantState + "（state=" +
+                    message = "当前不在自定义战斗界面（state=" +
                               (state.Length == 0 ? "主菜单/无激活状态" : state) + "），close_ui 只对白名单状态生效";
                     return false;
                 }

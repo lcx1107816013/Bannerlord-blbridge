@@ -16,8 +16,17 @@ import sys
 
 
 def default_log_dir():
-    return os.path.join(os.path.expanduser("~"), "Documents",
-                        "Mount and Blade II Bannerlord", "BlBridge")
+    """日志目录。**先看 `BLBRIDGE_LOG_DIR`**，再退到 我的文档。
+
+    为什么加环境变量覆盖（v0.8.42）：`bl_mcp.py` 早就在读这个变量（`:69`），
+    而 `bl_common` 不读 —— 于是"设了变量跑自测/MCP"与"跑 CLI 子命令"会看到**两个不同目录**。
+    自测里本来就有几处 `os.environ["BLBRIDGE_LOG_DIR"] = ...`（如合成战斗那段），
+    在 `bl_common` 不读它的时候，那些设置其实只对 MCP 生效、对分析器无效。
+    统一到一处口径，与 `bl_mcp.py` 逐字一致。
+    """
+    return (os.environ.get("BLBRIDGE_LOG_DIR")
+            or os.path.join(os.path.expanduser("~"), "Documents",
+                            "Mount and Blade II Bannerlord", "BlBridge"))
 
 
 def battles_dir(log_dir=None):
@@ -64,6 +73,73 @@ def load_events(path):
             except ValueError:
                 continue
     return ev
+
+
+# ── v0.8.42：动作账本（commands/actions.jsonl，GameMaster 的 CommandLogger 同款）──
+
+def commands_dir(log_dir=None):
+    """控制通道目录（pending / done / actions.jsonl 都在这里）。"""
+    return os.path.join(log_dir or default_log_dir(), "commands")
+
+
+def actions_path(log_dir=None):
+    """动作账本文件路径。"""
+    return os.path.join(commands_dir(log_dir), "actions.jsonl")
+
+
+def load_actions(path=None, limit=None, fail_only=False):
+    """读动作账本 → ``(entries, stats)``。
+
+    **与 ``load_events`` 的口径故意不同**：``load_events`` 遇到坏行**静默跳过**，
+    而 v0.8.4 那个"meta 产出非法 JSON"的 bug 正是靠这种静默活下来的（分析器不报错、
+    只是少了一段数据）。账本是**审计**用途，"少了一行"本身就是结论，所以这里
+    **坏行计入 `stats["bad"]` 并把前几条原文带出来**，绝不静默。
+
+    ``stats`` 键：``path`` / ``lines``（非空行总数）/ ``bad``（解析失败行数）/
+    ``badSamples``（前 3 条坏行原文，截断 160 字符）/ ``runs``（出现过的 runToken 列表）。
+    ``limit`` 取**过滤后的最后 N 条**（要的是"最近发生了什么"）。
+    """
+    p = path or actions_path()
+    entries = []
+    bad_samples = []
+    lines = 0
+    bad = 0
+    if not os.path.isfile(p):
+        return [], {"path": p, "lines": 0, "bad": 0, "badSamples": [], "runs": [],
+                    "missing": True}
+    with io.open(p, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            lines += 1
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                bad += 1
+                if len(bad_samples) < 3:
+                    bad_samples.append(line[:160])
+                continue
+            # ⚠️ 合法 JSON 但**不是对象**（如 `[1,2,3]`）同样要挡掉：
+            #    否则后面的 `.get()` 会抛 AttributeError，把一个"读审计日志"的动作
+            #    变成崩溃 —— 这条是自测 ⑮ 用合成的 `[1,2,3]` 行当场抓到的。
+            if not isinstance(ev, dict):
+                bad += 1
+                if len(bad_samples) < 3:
+                    bad_samples.append(line[:160])
+                continue
+            if fail_only and ev.get("ok") is not False:
+                continue
+            entries.append(ev)
+    if limit is not None and limit >= 0:
+        entries = entries[-limit:]
+    runs = []
+    for ev in entries:
+        tok = ev.get("runToken")
+        if tok and tok not in runs:
+            runs.append(tok)
+    return entries, {"path": p, "lines": lines, "bad": bad, "badSamples": bad_samples,
+                     "runs": runs, "missing": False}
 
 
 def fmt(v, nd=1, dash="-"):
@@ -205,6 +281,57 @@ def parse_squad_groups(text):
                                  % (idx, part, fields[3], ", ".join(SQUAD_MOVEMENTS), hint))
         out.append({"troop": troop, "count": count, "formation": formation, "movement": movement})
     return out
+
+
+# ── v0.8.41：环境旋钮与战术档位（与 src/BattleEnv.cs / src/TacticsCombatant.cs 一一对应）──
+#
+# 为什么在这里也做一遍校验（GC3 同款理由）：游戏端 `Jmini` 是**扁平文本读**器，
+# 名字错了/类型错了它读不到就落 fallback ⇒ "请求 accepted、参数没生效"。
+# 这类静默在 2026-09-24 废掉过一整批 9 场实验，所以**本地先拒**。
+
+# `TaleWorlds.Core.TerrainType` 全表（反编译取证）。全小写，与 C# 侧表逐项一致。
+TERRAINS = ("plain", "desert", "snow", "forest", "steppe", "fording", "mountain",
+            "lake", "water", "river", "canyon", "ruralarea", "swamp", "dune",
+            "bridge", "coastalsea", "opensea", "beach", "cliff",
+            "nonnavigableriver", "landrestriction", "searestriction", "underbridge")
+
+# 战术档位合法域：-1（不覆盖）或 0..100。引擎自己的分档线是 20 / 50。
+TACTIC_LEVEL_MIN = -1
+TACTIC_LEVEL_MAX = 100
+
+
+def parse_terrain(text):
+    """校验地形名（大小写不敏感）→ 规范小写名；空串/None → ""（= 不覆盖）。
+
+    非法名一律抛 ValueError（附候选清单），绝不静默兜底成 plain。
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        raise ValueError("terrain 必须是字符串，收到 %s" % type(text).__name__)
+    key = text.strip().lower()
+    if not key:
+        return ""
+    if key not in TERRAINS:
+        raise ValueError("terrain 未知：%r（可用：%s）" % (text, " | ".join(TERRAINS)))
+    return key
+
+
+def check_tactic_level(value, label):
+    """校验战术档位。返回 int；非法抛 ValueError。
+
+    接受 ``-1``（不覆盖）或 ``0..100``。``None`` → -1。
+    """
+    if value is None:
+        return -1
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s 必须是整数，收到 %r" % (label, value))
+    if v != -1 and not (TACTIC_LEVEL_MIN <= v <= TACTIC_LEVEL_MAX):
+        raise ValueError("%s 只接受 -1（不覆盖）或 0..%d，收到 %d"
+                         % (label, TACTIC_LEVEL_MAX, v))
+    return v
 
 
 def end_metrics(events, end=None):

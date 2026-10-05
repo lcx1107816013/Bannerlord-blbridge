@@ -21,6 +21,29 @@
 
 > 改任何输出前，先读 `bl_common.safe_streams()` 的 docstring。
 
+### ⚠️ `.ps1` 里的中文注释会吃掉下一行（2026-10-05 真机踩到，**这条只对 PowerShell 5.1 成立**）
+
+**判据**：PowerShell **5.1** 对**无 BOM** 的 `.ps1` 按**ANSI 代码页（本机 cp936）**解码 ——
+**不是**按 UTF-8。而本仓库的硬规则是"UTF-8 无 BOM"（上表），两者**正好冲突**：
+一个 UTF-8 中文字符占 3 字节，按 cp936 解可能把**行尾换行也吃进去**，
+于是**下一行被并进注释**。
+
+**实测后果**（`tools/jsontest/build_and_run.ps1`）：我给编译清单加了一句中文注释，
+下一行的 `& $csc …` 被吞掉 ⇒ **csc 根本没被执行**，
+而 `$LASTEXITCODE` 还是上一次（失败）的值 ⇒ 门禁报出**假的** `compile failed`，
+**手工跑同一批 csc 参数却 exit=0**。定位花了好几轮。
+
+**规则**：
+- **门禁/工具类 `.ps1` 一律写纯 ASCII**（注释也用英文）；
+- 想验证一个 `.ps1` 是否安全（**要能在 PS 5.1 里跑**，所以别用 PS7 才有的 `-AsByteStream`）：
+  ```powershell
+  $b = [System.IO.File]::ReadAllBytes('tools\jsontest\build_and_run.ps1')
+  ($b | Where-Object { $_ -gt 127 }).Count   # 0 = 纯 ASCII，安全
+  ```
+- ⚠️ `tools/check_repo_encoding.py` **查不出这一类**：它只管"UTF-8 无 BOM + LF"，
+  而这里的问题是**读取方（PS 5.1）的假设**，不是文件本身的合规性。
+  （`pwsh` 7+ 默认按 UTF-8 读无 BOM 文件，所以**在 `pwsh` 里测不出来** —— 必须用 `powershell.exe` 5.1 复现。）
+
 ### Gauntlet prefab 硬规则（2026-09-25 增，真机确证）
 
 - **`ButtonWidget`（或任何"自己处理点击"的 widget）只要内含子 widget，就必须写 `DoNotPassEventsToChildren="true"`。**
@@ -91,7 +114,71 @@ python tools\bl_selftest.py                          # 离线自测（合成数�
 python tools\bl_metrics_selftest.py                  # 指标模块自测
 powershell -ExecutionPolicy Bypass -File tools\jsontest\build_and_run.ps1   # C# 离线单测（Jmini/RequestGuard/SquadSpec…）
 python tools\bl_check_clock_reset.py                 # 多轮日志「时钟同源」校验（见下）
+python tools\bl_check_gabp_names.py --selftest       # GABP 命名表 ↔ 源码 method ↔ MCP 工具 三方一致（含注入故障对照组）
+python tools\bl_check_dispatch.py                    # MCP 工具 声明 ↔ 派发 ↔ 分组 一致（防"列得出却调不动"）
+python tools\bl_check_dispatch.py --selftest         # 上面那个的注入故障对照组（3 类，必须全抓到）
 ```
+
+### 新增/删除 method 或 MCP 工具时的硬规则（2026-09-27 增）
+
+- **一处改动必须同步四处**：`src/CommandPump.cs` 的 `Dispatch` 分支、`tools/bl_mcp.py` 的 `TOOLS` 表、
+  **`tools/bl_mcp.py` 的 `call_tool()` 派发分支**、`tools/gabp_names.json` 的命名。
+  漏了前两处或命名表，`bl_check_gabp_names.py` 会红（C1 双向核对）；
+  **漏了派发分支它不红** —— 后果是"tools/list 看得见、一调就 `unknown tool`"
+  （2026-09-27 实测：`bl_get_screen` / `bl_get_viewmodel_property` 就是这个漏法，而当时自测全绿，
+  因为它只数工具个数、从不真的 call 一次）⇒ 由 `bl_check_dispatch.py` + `bl_selftest.py` ④ 的真派发判据兜住。
+  另：`TOOL_GROUPS` 也要登记，否则设了 `BLBRIDGE_TOOLSET` 的环境里这个工具会**凭空消失**。
+- **命名按 `docs/gabp-naming.md` 的 5 条规则**：形状 `<category>/<snake_case>`、category 取自已声明词表、
+  不撞 GABP 协议自留前缀（`session`/`tools`/`events`/`resources`/`attention`…）、读写能分开就必须分开、
+  动词复用上游词表。**新前置条件**（`needs`）要在 `bl_check_gabp_names.py` 的 `NEEDS_ALLOWED` 里登记 —— 这是故
+  意的门槛：逼着"想清楚它在哪个状态下可用"成为一次显式动作。
+- **新增异步动作必须同时给出等待器**，命名 `<同一 category>/wait_for_<什么>`（上游 `wait_for_arrival` 同款；
+  调用方**不需要** sleep / 手写轮询）。
+- 这是**命名对齐，不是传输迁移**：控制通道仍是文件 IPC。别顺手把 `Lib.GAB` / TCP / `Newtonsoft.Json`
+  引进来 —— 取舍分析见交接记录里那份 `GABP-GABS-Lib.GAB-适配评估`（结论：抄进来，不转换形态）。
+
+### 主线程 tick 里的硬规则（2026-09-27 增，来源：对照 Bannerlord.GABS 的 `MainThreadDispatcher`）
+
+- **`OnApplicationTick` 的三段必须互相隔离**，顺序是
+  `TimeControl.RealDt = dt` → `CommandPump.Pump()` → `ScenarioRunner.Watchdog()`。
+  一段抛异常会**吃掉它后面那段**，而看门狗正是"出事时最需要跑的那段"。现状实测：`Pump()` 的 try
+  覆盖 `EnsureDirs` / `GetFiles` / 整个循环，`Watchdog()` 自带 try ⇒ 隔离成立。
+  （已知的理论缺口：`Pump()` 的 `if (!BridgeConfig.Enabled) return;` 在 try 之外，静态构造失败会抛
+  `TypeInitializationException` —— **未实测、近乎不可达**，记着即可，别当缺陷写。）
+- **长时间阻塞主线程的操作（存档 / 换场景 / 跑加载）不得在 `CommandPump.HandleOne` 内直接执行**，
+  要走"登记 + 在 `Pump()` 之后执行"的形状。
+  - 上游的依据：`MainThreadDispatcher.ScheduleSave` 的注释明写 `SaveAs` 会阻塞主线程、
+    **在队列循环里调用会死锁**，所以它专门开了个队列之外的逃生口。
+  - 我们自己的同类实例：v0.8.10 的看门狗 —— 熔断逻辑曾经与它要监控的回调**同在 mission tick 里**，
+    卡死时两者一起停；解法是挂 `OnApplicationTick` 但独立于泵循环。
+  - **现在 15 个 method 里没有这种操作**（`open_ui` / `start_battle` 是"发起"而非"同步阻塞"）
+    ⇒ 这是**预防性规则，不是已发生的缺陷**。别把它写成 bug。
+- 完整对照（含"为什么不需要抄 dispatcher"、"我们的超时四值归因是上游没有的"）见
+  `docs/thread-model-comparison.md`。
+
+### 抄上游代码时的硬规则（2026-09-27 增）
+
+- **脱壳抄**：只抄实现体（对游戏 API 的调用序列、回调、判据），外壳换成我们自己的 `CommandPump` method + `Jmini`。
+  上游的工具是 `[Tool]` 特性 + 源生成器 + `Lib.GAB` 外壳 —— 直接拖 `Tools/*.cs` 会把它的框架一起拖进来，
+  那就不是抄、是换形态了。（成功样本：`bl_skip_video` 脱壳抄了它的 `core/skip_video`，没引 `Lib.GAB`。）
+- **抄之前先跑 API 漂移探针**：`python tools\l2probe\run_probe.py`。
+  上游声明支持的是 v1.3.15 / v1.3.13 / v1.2.12，本机是 1.4.8；探针用编译器判定"这个调用点在 1.4.8 上还能不能编过"，
+  另用反编译器核**字符串反射**的目标成员名（编译期测不到的那一类）。结论与短名单见 `docs/l2-api-drift-1.4.8.md`。
+- **抄录记账**：来源仓库 + 文件 + 取用日期 + MIT 署名，写进 `docs/`（见 `docs/gabp-naming.md` §五、
+  `docs/lessons-from-bannerlord-gabs.md` §四）。
+
+### 工具描述与诊断输出的硬规则（2026-09-27 增，来源：一次"新调用方式"实测）
+
+- **描述要能让调用方一眼判断"现在能不能用"**：前置条件（游戏是否在跑、要不要已部署的某版本 DLL、
+  在哪个状态下可用）写进描述；**出处/署名（脱壳抄自谁）写进 `docs/`，不占描述字数** ——
+  描述是给调用方看的判据，不是给维护者看的记事本。
+- **"有没有"不等于"是不是"**：凡是判定"游戏在不在"，必须验**进程身份**（`bl_mcp._pid_is_game`：
+  tasklist 取映像名，命中 `bannerlord|mountandblade|taleworlds`）。只查"这个 pid 上有进程吗"会因
+  **pid 被系统回收再用**而误报 —— 2026-09-27 实测：状态文件里的 pid 6040 已变成
+  `MSI_Central_Service.exe`，`bl_status` 却报 `verdict: running / 游戏进程存活`。
+  探测不出名字 ⇒ **返回 None（未知）**，绝不冒充"活着"或"死了"。
+- **工具可用 ≠ 能力可用**：MCP 侧列得出一个工具，不代表游戏侧已经实现了对应 method。
+  跨进程/跨版本的能力要在**描述里点明版本门槛**，让调用方第一次就拿对预期。
 
 **第 5 项（时钟同源校验）是正式必跑项**，理由不是「它很重要」，而是**它的判据本身就是对照实验**：
 

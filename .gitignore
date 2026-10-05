@@ -7,6 +7,10 @@ __pycache__/
 
 # ── 探针 / 实验的临时备份（勿入库）──
 *.bak_probe
+# 手改前的备份一律不入库（如 tools/bl_mcp.py.bak_20260927 / .bak_predesc）。
+# 上一行只覆盖 *.bak_probe，而实际备份名带日期/词缀 ⇒ 漏网了两个文件（2026-10-05 发现）。
+*.bak
+*.bak_*
 
 # ── 本机运行时配置（入库的是 *.example.json）──
 /blbridge.json

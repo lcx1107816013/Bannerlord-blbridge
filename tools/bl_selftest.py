@@ -325,6 +325,54 @@ def start_fake_game(logdir, token):
                     result = {"closeRequested": True,
                               "state": (req.get("parameters") or {}).get("state") or "CustomBattleState",
                               "note": "PopState"}
+                elif method == "get_screen":
+                    # v0.8.34：只读 UI 探测。**假端只保证"参数被透传 + 结构被原样带回"**，
+                    # 真机读到的是不是这些层/按钮，由真机判据覆盖（离线阶段无法验）。
+                    result = {"screenType": "CustomBattleScreen", "layerCount": 1,
+                              "layerFilterEcho": (req.get("parameters") or {}).get("layerFilter") or "",
+                              "layers": [{"name": "CustomBattle", "isActive": True,
+                                          "movies": [{"movieName": "CustomBattleScreen",
+                                                      "dataSource": "CustomBattleVM", "buttonCount": 1,
+                                                      "buttons": [{"id": "StartButton", "text": "开始",
+                                                                   "isEnabled": True,
+                                                                   "currentState": "Default"}]}]}]}
+                elif method == "get_viewmodel_property":
+                    op = req.get("parameters") or {}
+                    result = {"layer": op.get("layerName") or "", "property": op.get("propertyName") or "",
+                              "type": "System.Int32", "value": 1234,
+                              "subPropertiesEcho": op.get("subProperties") or ""}
+                elif method == "get_inventory":
+                    # v0.8.36：L2 #2 战役库存只读。假端只保证"limit 透传 + 结构带回"，
+                    # 真机读到的 ItemRoster 内容由真机判据覆盖（主菜单/自定义战斗应 no_campaign）。
+                    op = req.get("parameters") or {}
+                    lim = int(op.get("limit") or 50)
+                    result = {"gold": 12345, "itemCount": 2, "totalElements": 7, "limitEcho": lim,
+                              "items": [{"name": "Iron Ingot", "id": "iron_ingot", "quantity": 3,
+                                         "type": "TradeGood", "value": 42, "weight": 1.0, "tier": "0"},
+                                        {"name": "Warbow", "id": "war_bow_3", "quantity": 1,
+                                         "type": "Bow", "value": 720, "weight": 1.5, "tier": "4"}]}
+                elif method == "list_saves":
+                    result = {"count": 2, "saves": [
+                        {"name": "save_1", "isCorrupted": False,
+                         "meta": {"ModuleName": "SandBox", "ApplicationVersion": "v1.4.8"}},
+                        {"name": "save_old", "isCorrupted": False, "meta": {}}]}
+                elif method == "load_save":
+                    op = req.get("parameters") or {}
+                    nm = op.get("name") or ""
+                    # 假端照 C# 口径：不存在的名字回 save_not_found（并带可用档），存在则 started=true
+                    if nm == "save_1":
+                        result = {"ok": True, "started": nm, "note": "fake async load"}
+                    else:
+                        result = {"ok": False, "code": "save_not_found",
+                                  "error": "存档 \"" + nm + "\" 不存在（可用的存档：save_1, save_old）"}
+                elif method == "campaign_time":
+                    # v0.8.39：只读诊断（时间保活已移除）。假端按真机 v0.8.39 的字段形状回显，
+                    # 免得调用方按假端形状写代码；真实的 pauseMenuOpen 判定要真机（切窗口）覆盖。
+                    op = req.get("parameters") or {}
+                    m = op.get("mode") or "status"
+                    result = {"ok": True, "inCampaign": True, "timeControlMode": "StoppablePlay",
+                              "inMenuContext": False, "campaignDays": 1084.25,
+                              "pauseMenuOpen": False, "modeEcho": m}
                 else:
                     result = {}
                 resp = {"protocolVersion": 1, "id": rid, "ok": True,
@@ -502,6 +550,350 @@ def test_parse_squad_groups():
         check(False, "非字符串必须报错")
     except ValueError as e:
         check(True, "非字符串报错: %s" % e)
+
+
+def test_cli_enter_battle_parity():
+    """⑰ CLI `enter-battle` 必须把 MCP 侧已有的进界面参数**真的传下去**。
+
+    存在理由（v0.8.44，真机依据 2026-10-05）：`bl_cmd.py enter-battle` 调
+    `bl_mcp._enter_custom_battle(...)` 时**漏传了 `auto_open`**（该参数默认 False），
+    于是 CLI **永远**返回 `await_confirm`（"主菜单就绪即返回，不自动 fire open_ui"）
+    ⇒ **无人值守跑批在这一步断掉**，只能在脚本里自己轮询 + 自己 `open-ui`。
+    而 MCP 侧的 `bl_launch_game` **早就支持 `autoOpen=true`** —— 是 CLI 少暴露了一个已存在的参数。
+
+    这个缺陷的形态值得记：**不是逻辑错，是"调用点漏传"** —— 两种入口能力不对等，
+    而当时**没有任何断言**在看这件事（`bl_selftest` 只测 `_menu_state` 的判定，
+    不测 CLI 有没有把参数送进去）。所以这里补上**静态 + 动态**两道：
+      * 静态：给 `enter-battle` 传 `--auto-open`，`argparse` 必须解析出 `args.auto_open is True`；
+      * 动态：把 `_enter_custom_battle` 换成探针，确认 CLI **真的**把 auto_open 传下去了。
+    两道缺一不可：只做静态的话，"解析出来了但没往函数传"仍然漏。
+    """
+    import argparse as _argparse
+    import bl_mcp
+    import bl_cmd
+
+    # ── 静态：参数存在且调用点真的传下去了 ────────────────────────────────────
+    import io as _io
+    src = _io.open(os.path.join(HERE, "bl_cmd.py"), encoding="utf-8").read()
+    check("--auto-open" in src, "静态：bl_cmd.py 定义了 --auto-open", "未找到该开关")
+    check("auto_open=args.auto_open" in src,
+          "静态：enter-battle 调用点真的把 auto_open 传下去了", "调用点漏传（这正是当初的缺陷形态）")
+    check("min_startup_sec=args.min_startup_sec" in src,
+          "静态：min_startup_sec 也一并传下去", "调用点漏传")
+
+    # ── 动态：**走真的 `bl_cmd.main()` 派发**，用探针接住被调函数 ──────────────
+    # 这条是"可证伪"的那一半：静态 substring 只能证明"文本里有"，
+    # 证明不了"运行期真的把值送进去了"。做法是把 `bl_mcp._enter_custom_battle`
+    # 换成探针，再用真实 argv 调 `main()` —— 若调用点漏传（当初的缺陷），
+    # 探针收到的 `auto_open` 就是默认的 False，断言当场变红。
+    seen = {}
+    original = bl_mcp._enter_custom_battle
+
+    def probe(**kw):
+        seen.update(kw)
+        return {"ok": True, "phase": "probe", "uiId": kw.get("ui_id")}
+
+    buf = _io.StringIO()
+    saved_stdout = sys.stdout
+    try:
+        bl_mcp._enter_custom_battle = probe
+        sys.stdout = buf
+        try:
+            # ⚠️ `main(argv)` 内部做的是 `ap.parse_args(argv[1:])` —— 它**期望 argv 含程序名**
+            #    （即 CLI 的真正形态 `sys.argv`）。传裸参数表会把第一个参数当成程序名丢掉、
+            #    再把 `--min-startup-sec` 的值当成子命令 ⇒ `invalid choice: '7'`。
+            #    这是本测试第一版的真实 bug，已修；留注释免得后人重踩。
+            bl_cmd.main(["bl_cmd.py", "enter-battle", "--auto-open", "--min-startup-sec", "7",
+                         "--menu-timeout", "3", "--entry-timeout", "3", "--no-esc"])
+        except SystemExit:
+            pass
+    finally:
+        sys.stdout = saved_stdout
+        bl_mcp._enter_custom_battle = original
+
+    check(bool(seen), "动态：探针被调用到（走的是真 main() 派发）", "探针未被调用")
+    check(seen.get("auto_open") is True,
+          "动态：auto_open=True 真的传到了 _enter_custom_battle", "收到 auto_open=%r" % seen.get("auto_open"))
+    check(seen.get("min_startup_sec") == 7.0,
+          "动态：auto_open 时 min_startup_sec 也传到了（7）", "收到 %r" % seen.get("min_startup_sec"))
+
+    # ── 对照：**不传 `--auto-open` 时必须仍是 False** ─────────────────────────
+    # 否则"默认关闭的安全门"就被架空了（启动期 fire open_ui 崩过游戏，见 bl_mcp 注释）。
+    seen2 = {}
+    try:
+        bl_mcp._enter_custom_battle = lambda **kw: (seen2.update(kw), {"ok": True})[1]
+        sys.stdout = buf
+        try:
+            # 同上的 `argv[1:]` 约定：argv 必须含程序名
+            bl_cmd.main(["bl_cmd.py", "enter-battle", "--menu-timeout", "3",
+                         "--entry-timeout", "3", "--no-esc"])
+        except SystemExit:
+            pass
+    finally:
+        sys.stdout = saved_stdout
+        bl_mcp._enter_custom_battle = original
+    check(seen2.get("auto_open") is False,
+          "对照：不传 --auto-open 时 auto_open=False（安全门默认仍是关的）",
+          "收到 %r" % seen2.get("auto_open"))
+
+
+def test_allow_any_state_recipe():
+    """⑱ `bl_cmd.py enter-battle --auto-open` 的**安全门**不得被静默绕过。
+
+    存在理由：`auto_open` 会**自动 fire `open_ui`**，而 2026-09-25 真机事故是
+    "启动动画期间 fire `open_ui` → 21 s 后崩溃"。所以 MCP 侧才有 `min_startup_sec` 下限。
+    这里断言：下限**确实存在且默认为 20**，且 CLI 把它一并传下去 ——
+    免得将来有人"为了跑快点"把下限去掉却不留痕。
+    """
+    import io as _io
+    src = _io.open(os.path.join(HERE, "bl_cmd.py"), encoding="utf-8").read()
+    check("default=20.0" in src and "min-startup-sec" in src,
+          "CLI 暴露了 --min-startup-sec 且默认 20（auto_open 的安全下限）", "未找到")
+    mcp = _io.open(os.path.join(HERE, "bl_mcp.py"), encoding="utf-8").read()
+    check("min_startup_sec=20.0" in mcp,
+          "MCP `_enter_custom_battle` 的 min_startup_sec 默认仍是 20", "被改过？")
+    check("if auto_open:" in mcp and "_time.sleep(min_startup_sec - waited)" in mcp,
+          "安全门实现仍在：auto_open 时先 sleep 补足下限再 fire", "安全门被移除")
+
+
+def test_custom_battle_state_suffix():
+    """⑲ 进自定义战斗的落地判据必须**同时容纳** `CustomBattleState` 与 `NavalCustomBattleState`。
+
+    存在理由（v0.8.44，真机依据 2026-10-05）：`_enter_custom_battle` 旧实现写死
+    `if state == "CustomBattleState"`，而**装了 NavalDLC** 时从主菜单 `open_ui(CustomBattle)`
+    落的是 **`NavalCustomBattleState`**（官方把自定义战斗入口劫持到海战选兵界面）
+    ⇒ 带 NavalDLC 的机器上 `--auto-open` **永远等不到**、只能等到超时（实测 140 s）。
+
+    这个缺陷**原先被掩盖**：手写跑批脚本用的是子串匹配 `-match 'CustomBattleState'`，
+    侥幸绕开了。⇒ 判据必须落在**真源**（`bl_mcp`）里，并有断言看着它。
+    """
+    import bl_mcp
+    sfx = getattr(bl_mcp, "_CUSTOM_BATTLE_STATE_SUFFIX", None)
+    check(sfx == "CustomBattleState", "常量 _CUSTOM_BATTLE_STATE_SUFFIX 存在且值正确", repr(sfx))
+
+    # 应接受：两种自定义战斗界面
+    for s in ("CustomBattleState", "NavalCustomBattleState"):
+        check(s.endswith(sfx), "接受 %s（带 NavalDLC 的落点）" % s, "结尾不匹配 → 会等超时")
+    # 不应接受：别的主菜单/战役态
+    for s in ("MapState", "CampaignState", "InitialState", "VideoPlaybackState", "", "CustomBattleStateX"):
+        check(not s.endswith(sfx), "拒绝 %r（不是自定义战斗界面）" % s, "被误判为已落地")
+
+    # 修好的证据：源码里不许再出现「把 activeState 与 CustomBattleState 写死相等比较」。
+    # ⚠️ **本测试踩了四版才成立，逐条记下来（这是个典型的"断言自身不成立"案例）**：
+    #    ① 裸 substring：会把**注释里对旧写法的引用**判成缺陷（假阳性）；
+    #    ② 只按 `#` 剥注释：docstring 里我也引用了旧写法，仍假阳性；
+    #    ③ tokens 用空格 join 后 substring：`==` 与字符串之间的空白形式对不上，
+    #       **注入真缺陷后仍通过**（恒绿 ⇒ 等于零守护，最危险）；
+    #    ④ 用 tokenize 剔 COMMENT+STRING：**把字符串字面量本身也剔掉了**，
+    #       而 `"CustomBattleState"` 就是字符串 ⇒ 仍然恒绿。
+    #    ⇒ 正确做法：**用 AST 只看比较节点**（`ast.Compare` 且 op 为 `Eq` 且有一个
+    #       `Constant` 值等于 `CustomBattleState`）。注释与 docstring 天然不在比较节点里，
+    #       字符串字面量也能被正确识别。**并且必须做注入验证**（见下方注释）。
+    import ast as _ast
+    import io as _io
+    src = _io.open(os.path.join(HERE, "bl_mcp.py"), encoding="utf-8").read()
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError as exc:  # noqa: BLE001 - 语法都坏了，判定前提不成立，如实报
+        check(False, "bl_mcp.py 可被 ast 解析（判定前提）", str(exc))
+        return
+    offenders = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Compare):
+            continue
+        if not any(isinstance(op, _ast.Eq) for op in node.ops):
+            continue
+        for cmp_node in node.comparators:
+            if isinstance(cmp_node, _ast.Constant) and cmp_node.value == "CustomBattleState":
+                offenders.append("line %d" % getattr(node, "lineno", -1))
+    check(not offenders,
+          "bl_mcp 的**代码**里不再有 `activeState == \"CustomBattleState\"` 这类写死比较"
+          "（注释/docstring 里的引用不算）",
+          "写死比较仍在：%s → 带 NavalDLC 时会等超时" % (", ".join(offenders) or "-"))
+
+
+def test_env_tactic_validators():
+    """v0.8.41：地形名与战术档位的本地校验器 + **C#/Python 两张表不许漂移**。
+
+    后者是真正的重点：terrain 表在 C#（src/BattleEnv.cs）与 Python（bl_common.TERRAINS）
+    各存一份。两份一旦漂移，症状是"CLI 放行、游戏端读不到 ⇒ 静默落 fallback"，
+    而离线自测完全抓不到 —— 所以这里直接把 C# 源码当**数据源**读出来逐项比对，
+    与 `bl_check_gabp_names.py` 的"源码 ↔ 命名表双向核对"是同一套做法。
+    """
+    import re
+    import bl_common
+
+    check(bl_common.parse_terrain(None) == "" and bl_common.parse_terrain("  ") == "",
+          "terrain 空 ⇒ 不覆盖（空串）")
+    check(bl_common.parse_terrain("Snow") == "snow",
+          "terrain 大小写不敏感 → 规范小写名", bl_common.parse_terrain("Snow"))
+    try:
+        bl_common.parse_terrain("plains")
+        check(False, "未知 terrain 必须报错")
+    except ValueError as e:
+        check("可用" in str(e), "未知 terrain 报错须带候选清单", e)
+    try:
+        bl_common.parse_terrain(7)
+        check(False, "非字符串 terrain 必须报错")
+    except ValueError:
+        check(True, "非字符串 terrain 报错")
+
+    # 战术档位：-1 与 0..100 合法，其余全拒
+    check(bl_common.check_tactic_level(None, "x") == -1, "tactic level None ⇒ -1（不覆盖）")
+    check(bl_common.check_tactic_level(-1, "x") == -1, "tactic level -1 ⇒ 不覆盖")
+    check(bl_common.check_tactic_level(0, "x") == 0 and bl_common.check_tactic_level(100, "x") == 100,
+          "tactic level 边界 0 / 100 合法")
+    check(bl_common.check_tactic_level("60", "x") == 60, "tactic level 接受数字字符串")
+    for bad in (-2, 101, 999):
+        try:
+            bl_common.check_tactic_level(bad, "x")
+            check(False, "越界 tactic level 必须报错：%r" % bad)
+        except ValueError:
+            check(True, "越界 tactic level 报错（%r）" % bad)
+    try:
+        bl_common.check_tactic_level("abc", "x")
+        check(False, "非整数 tactic level 必须报错")
+    except ValueError:
+        check(True, "非整数 tactic level 报错")
+
+    # ── 两张表不许漂移：把 src/BattleEnv.cs 的 TerrainTable 与 bl_common.TERRAINS 对账 ──
+    src = os.path.join(HERE, "..", "src", "BattleEnv.cs")
+    if not os.path.isfile(src):
+        check(False, "找不到 src/BattleEnv.cs（无法做 C#/Python 表对账）", src)
+        return
+    with io.open(src, encoding="utf-8") as f:
+        text = f.read()
+    cs_keys = set(m.group(1) for m in re.finditer(r'KeyValuePair<string,\s*int>\("([a-z]+)"', text))
+    py_keys = set(bl_common.TERRAINS)
+    check(cs_keys == py_keys,
+          "C# BattleEnv.TerrainTable 与 Python TERRAINS 完全一致（%d 项）" % len(py_keys),
+          "仅 C# 有：%s ／ 仅 Python 有：%s" % (sorted(cs_keys - py_keys), sorted(py_keys - cs_keys)))
+
+    # ── 档位上下限也两边一致（C# InTacticLevelRange 的 100 vs Python TACTIC_LEVEL_MAX）──
+    runner = os.path.join(HERE, "..", "src", "ScenarioRunner.cs")
+    with io.open(runner, encoding="utf-8") as f:
+        rtext = f.read()
+    m2 = re.search(r"value >= 0 && value <= (\d+)\)", rtext)
+    check(m2 is not None and int(m2.group(1)) == bl_common.TACTIC_LEVEL_MAX,
+          "C# 战术档位上限与 Python TACTIC_LEVEL_MAX 一致（%d）" % bl_common.TACTIC_LEVEL_MAX,
+          m2.group(1) if m2 else "未在 ScenarioRunner.cs 找到上限判据")
+
+    # ── 请求面不许悄悄漂移（GC2）：不传新参数时，请求 JSON 里**一个新键都不许出现** ──
+    # 这是本项目最贵的一类坑（"离线绿灯、真机才炸"），所以用**真调用 + 抓请求**来验，
+    # 而不是靠读代码声称。做法：import bl_mcp，把 send_command 换成抓取器，再走 call_tool。
+    import bl_mcp
+    captured = {}
+
+    def _capture(method, params, **kw):
+        captured["method"] = method
+        captured["params"] = params
+        return {"ok": True, "result": {"accepted": True}}, None
+
+    _real_send = getattr(bl_mcp, "send_command", None)
+    bl_mcp.send_command = _capture
+    try:
+        NEW_KEYS = ("attackerTacticLevel", "defenderTacticLevel", "terrain",
+                    "randomTerrainSeed", "aiFriendlyFireMultiplier", "keepCorpses",
+                    "sceneLevel", "timeOfDay")
+        old_only = {"attackerTroop": "imperial_legionary", "defenderTroop": "sturgian_spearman"}
+        bl_mcp.call_tool("bl_start_battle", dict(old_only))
+        got = set(captured.get("params") or {})
+        leaked = sorted(k for k in NEW_KEYS if k in got)
+        check(captured.get("method") == "start_battle" and not leaked,
+              "不传新参数 ⇒ 请求里一个新键都没有（GC2 请求面逐字节不变）",
+              "method=%r leaked=%s keys=%s" % (captured.get("method"), leaked, sorted(got)))
+
+        captured.clear()
+        bl_mcp.call_tool("bl_start_battle", dict(
+            old_only, attackerTacticLevel=60, terrain="Snow", aiFriendlyFireMultiplier=0.0,
+            keepCorpses=True, randomTerrainSeed=7))
+        p = captured.get("params") or {}
+        check(p.get("attackerTacticLevel") == 60 and p.get("terrain") == "snow"
+              and p.get("aiFriendlyFireMultiplier") == 0.0 and p.get("keepCorpses") == "true"
+              and p.get("randomTerrainSeed") == 7,
+              "传了新参数 ⇒ 按约定落到请求（数值裸数字 / terrain 归小写 / 布尔走字符串）", p)
+        # 本地校验器必须**先于**透传生效（GC3）：非法值不许发出去
+        captured.clear()
+        r = bl_mcp.call_tool("bl_start_battle", dict(old_only, terrain="plains"))
+        check(isinstance(r, dict) and r.get("ok") is False and not captured,
+              "非法 terrain 在本地被拒、且没有发出任何请求", r)
+        captured.clear()
+        r = bl_mcp.call_tool("bl_start_battle", dict(old_only, attackerTacticLevel=999))
+        check(isinstance(r, dict) and r.get("ok") is False and not captured,
+              "越界战术档位在本地被拒、且没有发出任何请求", r)
+    finally:
+        if _real_send is not None:
+            bl_mcp.send_command = _real_send
+
+
+def test_action_ledger():
+    """v0.8.42：动作账本 —— 读侧口径 + **C# 写侧字段集不许漂移**。
+
+    两条判据：
+      1. `load_actions` 对坏行**必须计数并报原文**（对照 `load_events` 的静默跳过 ——
+         v0.8.4 的非法 JSON 就是靠那种静默活下来的）。
+      2. 从 `src/ActionLedger.cs` 源码里抽出写侧字段集，与本测试的期望集**逐项对账**
+         （与 ⑭ 的 C#↔Python 表对账、`bl_check_gabp_names.py` 的源码↔命名表对账同一套做法）。
+    """
+    import re
+    import bl_common
+
+    tmp = tempfile.mkdtemp(prefix="blbridge_ledger_")
+    try:
+        missing_path = os.path.join(tmp, "nope.jsonl")
+        entries, stats = bl_common.load_actions(missing_path)
+        check(entries == [] and stats.get("missing") is True,
+              "账本不存在 ⇒ 空结果 + missing=True（不是异常）", stats)
+
+        p = os.path.join(tmp, "actions.jsonl")
+        good1 = {"t": "2026-10-05T04:00:00.000Z", "seq": 1, "runToken": "abc123",
+                 "id": "0011223344556677", "method": "start_battle", "ok": True, "code": "",
+                 "ms": 12.5, "bytes": 300, "uncertain": False, "note": "state=loading", "args": "{}"}
+        good2 = dict(good1, seq=2, method="bad_method", ok=False, code="unknown_method",
+                     note="未知方法: x", runToken="def456")
+        good3 = dict(good1, seq=3, method="ping", ok=True)
+        with io.open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(good1, ensure_ascii=False) + "\n")
+            fh.write("\n")                      # 空行：不算坏行、也不计数
+            fh.write("{不是 JSON\n")             # 坏行 ①：解析失败
+            fh.write(json.dumps(good2, ensure_ascii=False) + "\n")
+            fh.write("[1,2,3]\n")                # 坏行 ②：合法 JSON 但**不是对象**
+            fh.write(json.dumps(good3, ensure_ascii=False) + "\n")
+
+        entries, stats = bl_common.load_actions(p)
+        check(stats["lines"] == 5 and len(entries) == 3,
+              "空行不计入；非法 JSON 与「非对象的合法 JSON」都判坏行 ⇒ 3 条有效", stats)
+        check(stats["bad"] == 2 and len(stats["badSamples"]) == 2
+              and any("不是 JSON" in s for s in stats["badSamples"])
+              and any(s.startswith("[1,2,3]") for s in stats["badSamples"]),
+              "坏行**计数并带出原文**（不静默跳过）", stats)
+        check(stats["runs"] == ["abc123", "def456"],
+              "runToken 按出现顺序去重（用来按游戏进程会话分组）", stats["runs"])
+
+        entries, _ = bl_common.load_actions(p, fail_only=True)
+        check(len(entries) == 1 and entries[0]["method"] == "bad_method",
+              "--fail-only 只留 ok=False", entries)
+        entries, _ = bl_common.load_actions(p, limit=2)
+        check([e.get("seq") for e in entries] == [2, 3],
+              "limit 取**过滤后的最后 N 条**（要的是最近发生了什么）",
+              [e.get("seq") for e in entries])
+
+        # ── C# 写侧字段集对账 ──
+        src = os.path.join(HERE, "..", "src", "ActionLedger.cs")
+        if not os.path.isfile(src):
+            check(False, "找不到 src/ActionLedger.cs（无法做写侧字段对账）", src)
+            return
+        with io.open(src, encoding="utf-8") as fh:
+            text = fh.read()
+        cs_keys = set(m.group(1) for m in re.finditer(r'Append\([^)]*?\\"(\w+)\\":', text))
+        cs_keys.add("t")   # 首键写法是 '{\"t\":\"'（带左花括号），上面的正则抓不到，显式补
+        expected = set(["t", "seq", "runToken", "id", "method", "ok", "code",
+                        "ms", "bytes", "uncertain", "note", "args"])
+        check(cs_keys == expected,
+              "C# 写侧字段集 == 读侧期望集（%d 项）" % len(expected),
+              "仅 C# 有：%s ／ 仅期望有：%s" % (sorted(cs_keys - expected), sorted(expected - cs_keys)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_bl_batch_plan_args():
@@ -986,7 +1378,23 @@ def main():
     check(init.get("protocolVersion") == "2024-11-05", "initialize 返回协议版本", init.get("protocolVersion"))
     tools = by_id.get(2, {}).get("result", {}).get("tools", [])
     names = sorted(t["name"] for t in tools)
-    check(len(tools) == 32, "tools/list 返回 32 个工具", names)
+    # v0.8.41：把"硬编码工具个数"换成**与源码 TOOLS 对账**。
+    # 为什么：原断言 `len(tools) == 44` 在 v0.8.34/v0.8.40 两次加工具后就已经偏了一位
+    # （源码 TOOLS 45 个，断言还写 44 —— 真机跑出来的失败只在"env 没设 BLBRIDGE_TOOLSET"时出现，
+    #  而生产配置 core+config+lab 下只有 41 个，两头都跟 44 不符 ⇒ 这条判据其实谁也没在守）。
+    # 与 `bl_check_dispatch.py` 同一套做法：**源码当数据源**，双向核对，数字不再手工维护。
+    import ast as _ast
+    with io.open(os.path.join(HERE, "bl_mcp.py"), encoding="utf-8") as _f:
+        _src = _f.read()
+    _declared = []
+    for _node in _ast.walk(_ast.parse(_src)):
+        if isinstance(_node, _ast.Assign) and any(
+                isinstance(_t, _ast.Name) and _t.id == "TOOLS" for _t in _node.targets):
+            _declared = sorted(d["name"] for d in _ast.literal_eval(_node.value))
+    check(bool(_declared) and _declared == names,
+          "tools/list 暴露的工具集合与源码 TOOLS 完全一致（%d 个）" % len(names),
+          "仅源码声明：%s ／ 仅运行时暴露：%s"
+          % (sorted(set(_declared) - set(names)), sorted(set(names) - set(_declared))))
     check("bl_lookup_troop" in names, "bl_lookup_troop 已注册", names)
     check("bl_order" in names, "bl_order（战斗中途改令）已注册", names)
     check("bl_control_agent" in names, "bl_control_agent（接管士兵）已注册", names)
@@ -1005,6 +1413,16 @@ def main():
           == ["base", "boost", "probe", "rts", "shift", "status"],
           "bl_camera_speed 的 mode 枚举齐全（status/shift/base/rts/boost/probe）",
           (_cs or {}).get("inputSchema"))
+    # ── 声明 ↔ 派发 ↔ 分组 三方一致（bl_check_dispatch.py，2026-09-27 立的项）──
+    # 只数 tools/list 的个数抓不到"列得出却调不动"，所以这条不变量单独成脚本、
+    # 并在这里挂一道门：改完 bl_mcp.py 忘了配派发分支 ⇒ 这里立刻红。
+    try:
+        import bl_check_dispatch
+        disp_problems = bl_check_dispatch.audit()
+        check(not disp_problems, "每个 MCP 工具都：声明了 ⇒ 派发得到 ⇒ 分了组", disp_problems)
+    except Exception as _exc:  # noqa: BLE001
+        check(False, "bl_check_dispatch 可加载并跑通（脚本自身失效要报出来）", repr(_exc))
+
     check("bl_skip_video" in names and "bl_cheat_mode" in names,
           "启动/流程控制工具已注册（v0.8.20：skip_video / cheat_mode）", names)
     _cm = next((t for t in tools if t.get("name") == "bl_cheat_mode"), None)
@@ -1226,6 +1644,60 @@ def main():
           "targetAgent=0 是**合法下标**（0 是假值 ⇒ 本地判断必须用 is not None，否则会被静默丢掉）",
           ro21)
 
+    # ── v0.8.34：只读 UI 工具「在 tools/list 里看得见 ⇒ 必须调得动」──────────
+    # 2026-09-27 实测踩到：上一轮只把 bl_get_screen / bl_get_viewmodel_property 加进了
+    # TOOLS 表和命名表，**漏了 call_tool 的派发分支** ⇒ 工具列得出来、一调就 `unknown tool`。
+    # 光数 tools/list 的个数（② 那条 44 个工具）永远绿，抓不到这个 ⇒ 这里必须真的 call 一次，
+    # 并配一个"不存在的工具名"作对照组：它仍报 unknown tool，才说明上面三条的通过是真判定。
+    gs1 = bl_mcp.call_tool("bl_get_screen", {})
+    check(gs1.get("ok") is True and (gs1.get("result") or {}).get("screenType") == "CustomBattleScreen",
+          "bl_get_screen 真的被派发（不是 unknown tool）", gs1)
+    gs2 = bl_mcp.call_tool("bl_get_screen", {"layerFilter": "Custom"})
+    check((gs2.get("result") or {}).get("layerFilterEcho") == "Custom",
+          "bl_get_screen 的 layerFilter 透传到端口", gs2)
+    vp1 = bl_mcp.call_tool("bl_get_viewmodel_property",
+                           {"propertyName": "PlayerGold", "layerName": "CustomBattle"})
+    check(vp1.get("ok") is True and (vp1.get("result") or {}).get("property") == "PlayerGold",
+          "bl_get_viewmodel_property 真的被派发（不是 unknown tool）", vp1)
+    vp2 = bl_mcp.call_tool("bl_get_viewmodel_property", {"propertyName": "PlayerGold"})
+    check(vp2.get("ok") is False and "layerName" in (vp2.get("error") or ""),
+          "bl_get_viewmodel_property 缺 layerName ⇒ 本地就拒（不发空请求去撞 C# 的 bad_args）", vp2)
+    # ── v0.8.36：L2 #2 战役库存只读「列得出 ⇒ 调得动」（同上一轮的教训，必须真 call）──
+    gi1 = bl_mcp.call_tool("bl_get_inventory", {})
+    check(gi1.get("ok") is True and (gi1.get("result") or {}).get("gold") == 12345,
+          "bl_get_inventory 真的被派发（不是 unknown tool）", gi1)
+    gi2 = bl_mcp.call_tool("bl_get_inventory", {"limit": 1})
+    check((gi2.get("result") or {}).get("limitEcho") == 1,
+          "bl_get_inventory 的 limit 透传到端口", gi2)
+    # ── v0.8.36：存档列表 + 按名直载（列得出 ⇒ 调得动 + 名字校验回路）──
+    ls1 = bl_mcp.call_tool("bl_list_saves", {})
+    check(ls1.get("ok") is True and (ls1.get("result") or {}).get("count") == 2,
+          "bl_list_saves 真的被派发（不是 unknown tool）", ls1)
+    lv_bad = bl_mcp.call_tool("bl_load_save", {"name": "no_such_save"})
+    check(lv_bad.get("ok") is False and "save_not_found" in json.dumps(lv_bad),
+          "bl_load_save 名字不存在 ⇒ save_not_found 并列出可用档（透传 C# 口径）", lv_bad)
+    lv_ok = bl_mcp.call_tool("bl_load_save", {"name": "save_1"})
+    check(lv_ok.get("ok") is True and (lv_ok.get("result") or {}).get("started") == "save_1",
+          "bl_load_save 合法名字 ⇒ started=true（假端异步加载形态）", lv_ok)
+    lv_empty = bl_mcp.call_tool("bl_load_save", {})
+    check(lv_empty.get("ok") is False and "name" in (lv_empty.get("error") or ""),
+          "bl_load_save 缺 name ⇒ 本地就拒", lv_empty)
+    ct0 = bl_mcp.call_tool("bl_campaign_time", {"mode": "status"})
+    check(ct0.get("ok") is True and (ct0.get("result") or {}).get("pauseMenuOpen") is False,
+          "bl_campaign_time status ⇒ 只读诊断（pauseMenuOpen/campaignDays 在返回里）", ct0)
+    ct1 = bl_mcp.call_tool("bl_campaign_time", {"mode": "on"})
+    check(ct1.get("ok") is False and "移除" in (ct1.get("error") or ""),
+          "bl_campaign_time on ⇒ 显式报「已移除」（v0.8.39 起不再静默失效）", ct1)
+    ct2 = bl_mcp.call_tool("bl_campaign_time", {"mode": "off"})
+    check(ct2.get("ok") is False and "移除" in (ct2.get("error") or ""),
+          "bl_campaign_time off ⇒ 同样显式报「已移除」", ct2)
+    ct3 = bl_mcp.call_tool("bl_campaign_time", {"mode": "boom"})
+    check(ct3.get("ok") is False and "mode" in (ct3.get("error") or ""),
+          "bl_campaign_time 非法 mode ⇒ 本地就拒", ct3)
+    bogus = bl_mcp.call_tool("bl_no_such_tool", {})
+    check(bogus.get("ok") is False and "unknown tool" in (bogus.get("error") or ""),
+          "对照组：不存在的工具名仍报 unknown tool（上面三条的通过才算真判定）", bogus)
+
     # ── v0.8.25：接管士兵 `bl_control_agent`（目标 / before-after 回读 / 降级字段要被带回）──
     rc1 = bl_mcp.call_tool("bl_control_agent", {"agentIndex": 7})
     check(rc1.get("ok") is True and (rc1.get("target") or {}).get("index") == 7
@@ -1391,21 +1863,29 @@ def main():
     check(r["code"] == "game_offline", "进程已退出的遗留状态 → game_offline（不误报）", r["code"])
     check("上次会话" in (r.get("detail") or ""), "并在 detail 里说明那是上次会话", r.get("detail"))
 
-    # 进程活着但加载的是旧 DLL：这是真正的 game_not_restarted
-    with io.open(status_file, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"runToken": "x", "pid": os.getpid(),
-                             "build": {"version": "old", "loadedSha256": "deadbeefdeadbeef",
-                                       "fileChangedSinceLoad": True}}))
-    r = bl_mcp.build_check(src_dir, mod_dir)
-    check(r["code"] == "game_not_restarted", "进程活着 + 旧 DLL → game_not_restarted", r["code"])
-    os.environ["BLBRIDGE_LOG_DIR"] = saved_log2 if saved_log2 is not None else logdir
+    # 下面两条要的是"进程活着"这一支。本机没有真的游戏进程，而 `_pid_is_game` 自 2026-09-27 起
+    # **要验映像名**（python.exe 不算游戏）⇒ 这里显式替换判定函数，而不是放宽判据：
+    # `_pid_is_game` 本身的真假由 ⑧ 那几条单测锁住（含 pid 被复用的回归）。
+    _saved_is_game = bl_mcp._pid_is_game
+    bl_mcp._pid_is_game = lambda pid: True
+    try:
+        # 进程活着但加载的是旧 DLL：这是真正的 game_not_restarted
+        with io.open(status_file, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"runToken": "x", "pid": os.getpid(),
+                                 "build": {"version": "old", "loadedSha256": "deadbeefdeadbeef",
+                                           "fileChangedSinceLoad": True}}))
+        r = bl_mcp.build_check(src_dir, mod_dir)
+        check(r["code"] == "game_not_restarted", "进程活着 + 旧 DLL → game_not_restarted", r["code"])
+        os.environ["BLBRIDGE_LOG_DIR"] = saved_log2 if saved_log2 is not None else logdir
 
-    with io.open(status_file, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"runToken": "x", "pid": os.getpid(),
-                             "build": {"version": "t", "loadedSha256": dll_hash[:16],
-                                       "fileChangedSinceLoad": False}}))
-    r = bl_mcp.build_check(src_dir, mod_dir)
-    check(r["code"] == "ok", "四段一致 → ok", r["code"])
+        with io.open(status_file, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"runToken": "x", "pid": os.getpid(),
+                                 "build": {"version": "t", "loadedSha256": dll_hash[:16],
+                                           "fileChangedSinceLoad": False}}))
+        r = bl_mcp.build_check(src_dir, mod_dir)
+        check(r["code"] == "ok", "四段一致 → ok", r["code"])
+    finally:
+        bl_mcp._pid_is_game = _saved_is_game
 
     # ── ⑦ 配置（C24）：加载即校验 + 优先级 ────────────────────────────
     print()
@@ -1456,8 +1936,20 @@ def main():
         with io.open(diag_status, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(payload))
 
+    # ── 进程身份判据（2026-09-27 实测立的项）───────────────────────────
+    # pid 会被系统回收再用：状态文件里的 pid 6040 实测已变成 `MSI_Central_Service.exe`，
+    # 只查"这个 pid 上有进程吗"就会报 `verdict: running / 游戏进程存活`，把调用方直接带偏。
+    check(bl_mcp._pid_is_game(os.getpid()) is False,
+          "本机 python 进程不是游戏（pid 身份校验成立）", bl_mcp._pid_image_name(os.getpid()))
+    check(bl_mcp._pid_is_game(999999) is False, "不存在的 pid → False（不是未知）")
+    check(bl_mcp._pid_is_game(None) is None, "pid 无法探测 → None（未知，绝不冒充 False）")
+
     write_diag({"pid": os.getpid(), "state": "battle", "cleanExit": False, "missionInProgress": True})
-    check(bl_mcp.run_state_diagnosis(diag_logs)["verdict"] == "running", "进程存活 → running")
+    check(bl_mcp.run_state_diagnosis(diag_logs, pid_probe=lambda p: True)["verdict"] == "running",
+          "pid 上确实是游戏进程 → running（注入判定，绕开真机依赖）")
+    r_reuse = bl_mcp.run_state_diagnosis(diag_logs)
+    check(r_reuse["verdict"] != "running" and bool(r_reuse.get("pidImageName")),
+          "同一个 pid 上不是游戏进程（pid 被复用）→ **不许报 running**，并给出实际映像名", r_reuse)
 
     write_diag({"pid": 999999, "state": "idle", "cleanExit": True, "missionInProgress": False})
     r = bl_mcp.run_state_diagnosis(diag_logs)
@@ -1524,6 +2016,41 @@ def main():
     print("⑬ 启动门 bl_mcp._menu_state（C# 静态优先后主菜单名 = InitialState）")
     print("=" * 90)
     test_menu_state_gate()
+
+    # ── ⑰ CLI enter-battle 与 MCP 的能力对等（v0.8.44，真机缺陷）──────────────
+    print()
+    print("=" * 90)
+    print("⑰ CLI `enter-battle` 必须把 MCP 的 auto_open 真的传下去（漏传 = 无人值守断链）")
+    print("=" * 90)
+    test_cli_enter_battle_parity()
+
+    # ── ⑱ auto_open 的安全门不得被静默绕过（启动期 fire open_ui 崩过游戏）──────
+    print()
+    print("=" * 90)
+    print("⑱ auto_open 安全门：min_startup_sec 默认 20 且实现仍在")
+    print("=" * 90)
+    test_allow_any_state_recipe()
+
+    # ── ⑲ 进自定义战斗的落地判据必须容纳 NavalCustomBattleState（v0.8.44）────────
+    print()
+    print("=" * 90)
+    print("⑲ 落地判据后缀匹配：CustomBattleState 与 NavalCustomBattleState 都要认")
+    print("=" * 90)
+    test_custom_battle_state_suffix()
+
+    # ── ⑭ 环境旋钮 / 战术档位校验器 + C#↔Python 两张表对账（v0.8.41）──────
+    print()
+    print("=" * 90)
+    print("⑭ terrain / tacticLevel 校验 + src/BattleEnv.cs ↔ bl_common.TERRAINS 对账")
+    print("=" * 90)
+    test_env_tactic_validators()
+
+    # ── ⑮ 动作账本：读侧口径 + C# 写侧字段集对账（v0.8.42）──────────────
+    print()
+    print("=" * 90)
+    print("⑮ 动作账本 bl_common.load_actions + src/ActionLedger.cs 字段对账")
+    print("=" * 90)
+    test_action_ledger()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))

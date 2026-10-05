@@ -93,6 +93,11 @@ namespace BlBridge
                     // 遥测先读到扣血后的 hpAfter，靶场随后才改血量 ——
                     // 这样遥测里的 hpMax - hpAfter 恒等于"本次真实伤害"。
                     mission.AddMissionBehavior(new DummyRangeBehavior());
+                    // v0.8.33：游戏内热键 —— 加速切换（默认 Home，10x ⇄ 1x）+ Tab 诊断探针。
+                    // 挂在这里而不是 `ScenarioRunner.CreateBehaviors`，就是为了**玩家自己打的
+                    // 战斗也生效**（CreateBehaviors 只服务于 AI 推演那条开战路径）。
+                    // 详见 HotkeyBehavior 的类注释（含"为什么只能 1x/10x、做不出 2x/5x"）。
+                    mission.AddMissionBehavior(new HotkeyBehavior());
                     // v0.8.14 上帝视角（AI 测试场次专用）：`start_battle` 传 spectate=true 时，
                     // 把镜头交给引擎自带的自由观察相机（实现见 SpectatorWatchBehavior）。
                     // **消费即清**：读完立刻复位，保证玩家自己打的战斗绝不会继承这个标志 ——
@@ -163,7 +168,14 @@ namespace BlBridge
         protected override void OnApplicationTick(float dt)
         {
             base.OnApplicationTick(dt);
+            // v0.8.34：应用级真实帧时间 —— 2x/5x 挡靠它算 `Mission.FixedDeltaTime`。
+            // **不能**用 mission tick 的 dt：在 `FixedDeltaTimeMode` 下那个 dt 已经被引擎
+            // 换成 `FixedDeltaTime` 自己了，拿它乘 N 会正反馈爆炸（×2 → ×4 → ×8 …）。
+            TimeControl.RealDt = dt;
             CommandPump.Pump();
+            // v0.8.39：失焦"保活"（CampaignProbe.Tick 每帧改 Campaign.TimeControlMode）已按
+            // 用户要求移除 —— 它看不见"失焦自动打开的暂停菜单"那种暂停，且会顶掉手动暂停。
+            // 见 CampaignProbe 顶部注释与 PROGRESS §三十二/§三十三。
             // v0.8.10：看门狗必须挂在这里而不是 Mission tick —— mission tick 卡住时
             // 主线程仍在跑，这里能观察到「busy 但久无心跳」并强制收尾（见 ScenarioRunner.Watchdog）。
             ScenarioRunner.Watchdog();
@@ -226,6 +238,12 @@ namespace BlBridge
             sb.Append(",\"cleanExit\":").Append(Jw.B(_cleanExit));
             sb.Append(",\"missionInProgress\":").Append(Jw.B(_missionInProgress));
             sb.Append(",\"enabled\":").Append(Jw.B(true));
+            // v0.8.45：账本健康 —— 把"写失败静默"变成外部**一眼可见**。
+            // 缺口的全部危害在于"少行而无人知"；有了这两个字段，bl_cmd/bl_mcp 就能报警。
+            sb.Append(",\"ledger\":{");
+            sb.Append("\"writeFailures\":").Append(ActionLedger.WriteFailureCount);
+            sb.Append(",\"lastWriteFailure\":").Append(Protocol.Q(ActionLedger.LastWriteFailure));
+            sb.Append('}');
             sb.Append("}\n");
 
             // 原子写：先写临时文件再替换，避免外部读到半截内容

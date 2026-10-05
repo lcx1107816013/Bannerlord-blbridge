@@ -9,10 +9,10 @@
 #   1) THE MODULE LIST.  Bannerlord.BLSE.Standalone.exe WITHOUT `_MODULES_*...*_MODULES_` starts
 #      the game in "no mods" mode: the SubModule.xml files are still scanned, but no community
 #      module is activated, so BlBridge never loads.  Observed: `Command Args: no_watchdog` and
-#      zero new lines in proto_ui.log / bridge_status.json.  The list below is copied from a run
-#      that DID load everything (see the `Command Args:` line in
-#      C:\ProgramData\Mount and Blade II Bannerlord\logs\rgl_log_<pid>.txt of a good run) --
-#      keep the order, and keep BlBridge in it.
+#      zero new lines in proto_ui.log / bridge_status.json.
+#      v0.8.43 (2026-10-05): this list is no longer hardcoded -- it is derived from the user's own
+#      selection in Configs\LauncherData.xml, because the hardcoded copy silently drifted and
+#      launched a game WITHOUT RBM five times in a row.  See the $mods block below for the evidence.
 #
 #   2) TWO MODAL DIALOGS shown BEFORE the game window appears.  If nobody answers them the
 #      launcher gives up and the game never starts:
@@ -65,6 +65,13 @@ param(
     [string]$GameDir = 'G:\Program Files (x86)\Steam\steamapps\common\Mount & Blade II Bannerlord',
     [int]$TimeoutSec = 180,
     [switch]$SkipModuleList,
+    # Answer-only mode (v0.8.36): don't launch anything, just run the dialog-answering loop for
+    # $AnswerSec seconds and exit.  Why: load-time modal dialogs (the "this save's module list does
+    # not match" one, seen 2026-09-27 on ContinueCampaign) appear LONG after this script's normal
+    # grace period has ended, so nobody answered it and the load sat there waiting for a human.
+    # bl_mcp.py calls this shape while waiting for a campaign to load.
+    #   .\bl_launch.ps1 -AnswerSec 8
+    [int]$AnswerSec = 0,
     # Module names to leave OUT of the _MODULES_ list (v0.8.16). Why this exists: an A/B control
     # has to be "same launch, one module different", and unchecking boxes in the BLSE launcher
     # is neither reproducible nor available at all in unattended launches. Usage:
@@ -129,10 +136,12 @@ public class BlLaunch {
         var res = new List<string>();
         EnumWindows((h, l) => {
             if (!IsWindowVisible(h)) return true;
+            // v0.8.36: empty-caption windows are NO LONGER dropped here. Native MessageBox-style
+            // dialogs (the load-time "module mismatch" one) can have an empty caption, and the
+            // PowerShell side filters empty titles by class (#32770 only) after ClassOf().
             int len = GetWindowTextLength(h);
-            if (len == 0) return true;
             var sb = new StringBuilder(len + 1);
-            GetWindowText(h, sb, sb.Capacity);
+            if (len > 0) GetWindowText(h, sb, sb.Capacity);
             uint pid; GetWindowThreadProcessId(h, out pid);
             res.Add(h.ToInt64() + "|" + pid + "|" + sb.ToString());
             return true;
@@ -155,12 +164,78 @@ public class BlLaunch {
 }
 "@
 
+# -- ENTRY POINT: Standalone (no GUI) ----------------------------------------------------------
+# KEEP Standalone.exe.  Reason (v0.8.43, 2026-10-05): `Bannerlord.BLSE.Launcher.exe` is the PLAY
+# screen itself -- using it costs the unattended property this whole script exists for, and that
+# screen is Gauntlet, so synthetic clicks do not reach it (measured: gridhand `Failed to set
+# foreground window`; only a human pressing PLAY got past it).
+# The "wrong client" bug was NEVER the exe -- it was the hardcoded `$mods` list drifting from the
+# user's real selection.  Fix the list, keep the no-GUI exe.  See $mods construction below.
 $exe = Join-Path $GameDir 'bin\Win64_Shipping_Client\Bannerlord.BLSE.Standalone.exe'
-if (-not (Test-Path $exe)) { Write-Host "LAUNCH FAILED: not found: $exe"; exit 1 }
+$answerOnly = ($AnswerSec -gt 0)
+if (-not $answerOnly -and -not (Test-Path $exe)) { Write-Host "LAUNCH FAILED: not found: $exe"; exit 1 }
 
-# Module list, order matters (Harmony/ButterLib/UIExtenderEx/MCM must come first).  Copied from
-# a known-good run; update it the same way if the module set changes.
-$mods = '_MODULES_*Bannerlord.Harmony*Bannerlord.ButterLib*Bannerlord.UIExtenderEx*Bannerlord.MBOptionScreen*Native*SandBoxCore*Sandbox*CustomBattle*StoryMode*BirthAndDeath*FastMode*NavalDLC*WarlordsBattlefieldWarSailsEdition*BannerFix*Bloodlust*Warbandlord*WarbandlordBloodlustFix*PerfectFireArrows*RaiseYourTorch*RaiseYourBanner*MutliLittleFixes*T7TroopUnlocker*CharacterReload*BetterBanditsPlus*StrategicCampaignAI*Byzantium1071*HarvestAndProduction*BellumCivile*customloot*WanderersInParties*Bannerlord.EquipBestItem*GovernorsGonnaGovern*HeroesEvolve*BannerWand*RTSCamera*RTSCamera.CommandSystem*RealisticWeather*MBGA_AchievementEnabler*MBGA_ModernHealthBar*WB_CN*SiegeAIFix*BannerlordSage*BlBridge*_MODULES_'
+# -- MODULE LIST: derived from LauncherData.xml, NOT hardcoded --------------------------------
+# Why this changed (v0.8.43, 2026-10-05, measured): the previous hardcoded list had drifted from
+# the user's real selection by 6 modules -- it was missing RBM / RBM_WS / BattleSizeResized and
+# still named Warbandlord, which no longer exists on disk (Modules\Warbandlord holds only a
+# leftover config.xml, no SubModule.xml).  Result on the SAME machine and mod set:
+#   * hardcoded list  (5 launches): 44 modules, NO RBM; `Loading assembly` shows BlBridge.dll but
+#     never RBM.dll  -> the "wrong client" that wasted four launches.
+#   * LauncherData.xml (1 launch, official launcher): 44 modules incl. RBM/RBM_WS/BattleSizeResized,
+#     and RBM.dll DOES load.
+# Raising this by hand is what got forgotten twice before (2026-10-04 memory, handoff log section 7), so
+# the list is now READ FROM THE USER'S OWN SELECTION.  Verified: the ids below, filtered to
+# IsSelected=true in file order, reproduce the good run's `Command Args:` EXACTLY (44/44, same order)
+# -- `Compare-Object -SyncWindow 0` reports no difference.
+#
+# Fallback: if LauncherData.xml is missing/unreadable, use $fallbackMods and SAY SO on stdout --
+# never silently launch with a guessed or empty list.
+$fallbackMods = @('Bannerlord.Harmony', 'Bannerlord.ButterLib', 'Bannerlord.UIExtenderEx',
+                  'Bannerlord.MBOptionScreen', 'Native', 'SandBoxCore', 'Sandbox', 'CustomBattle',
+                  'StoryMode', 'BirthAndDeath', 'FastMode', 'NavalDLC',
+                  'WarlordsBattlefieldWarSailsEdition', 'BlBridge')
+
+$launcherData = Join-Path $env:USERPROFILE 'Documents\Mount and Blade II Bannerlord\Configs\LauncherData.xml'
+$selected = @()
+if (Test-Path $launcherData) {
+    try {
+        [xml]$ld = Get-Content -LiteralPath $launcherData -Encoding UTF8
+        # File order is significant: it is what the engine's own launcher produced and it keeps
+        # Harmony/ButterLib/UIExtenderEx/MCM ahead of the modules that depend on them.
+        $selected = @($ld.UserData.SingleplayerData.ModDatas.UserModData |
+                      Where-Object { $_.IsSelected -eq 'true' } |
+                      ForEach-Object { [string]$_.Id } |
+                      Where-Object { $_ -ne '' })
+    } catch {
+        Write-Host ("WARNING: could not parse " + $launcherData + " : " + $_.Exception.Message)
+        $selected = @()
+    }
+}
+
+if ($selected.Count -gt 0) {
+    Write-Host ("module list from LauncherData.xml: " + $selected.Count + " selected module(s)")
+} else {
+    Write-Host ("WARNING: LauncherData.xml gave no selection; falling back to " + $fallbackMods.Count + " built-in module(s)")
+    Write-Host ("  (this is the path that produced the 'wrong client' -- check " + $launcherData + ")")
+    $selected = $fallbackMods
+}
+
+# Existence pre-check: a module named in the list but absent on disk is silently skipped by the
+# engine, which is exactly how a stale entry (the old 'Warbandlord') hid in plain sight.  Report it
+# loudly instead.  This is a WARNING, not a hard failure: the engine tolerates it and aborting here
+# would be a behaviour change for anyone mid-edit.
+$modulesDir = Join-Path $GameDir 'Modules'
+$absent = @($selected | Where-Object { -not (Test-Path (Join-Path $modulesDir ($_ + '\SubModule.xml'))) })
+if ($absent.Count -gt 0) {
+    Write-Host ("WARNING: module(s) selected but NOT on disk (engine will skip them): " + ($absent -join ', '))
+}
+# Same check the other way: BlBridge must be in the list or this whole exercise is pointless.
+if ($selected -notcontains 'BlBridge') {
+    Write-Host "WARNING: 'BlBridge' is NOT in the module list; the bridge will not load"
+}
+
+$mods = '_MODULES_*' + ($selected -join '*') + '*_MODULES_'
 
 if ($ExcludeModules.Count -gt 0) {
     # Accept BOTH "-ExcludeModules A,B" and '-ExcludeModules "A,B"'. The quoted form binds the
@@ -186,16 +261,22 @@ $argList = @('/singleplayer')
 if (-not $SkipModuleList) { $argList += $mods }
 $argList += 'no_watchdog'
 
-Write-Host ("launching: " + $exe)
-if ($SkipModuleList) { Write-Host "WARNING: -SkipModuleList given; the game will start WITHOUT community mods" }
-$p = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory (Split-Path $exe -Parent) -PassThru
-Write-Host ("launcher pid = " + $p.Id)
+$p = $null
+if ($answerOnly) {
+    Write-Host ("ANSWER-ONLY MODE: answering dialogs for " + $AnswerSec + "s (no launch)")
+}
+else {
+    Write-Host ("launching: " + $exe)
+    if ($SkipModuleList) { Write-Host "WARNING: -SkipModuleList given; the game will start WITHOUT community mods" }
+    $p = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory (Split-Path $exe -Parent) -PassThru
+    Write-Host ("launcher pid = " + $p.Id)
+}
 
 $lastTry = @{}                                   # hwnd -> DateTime of the last answer attempt
 $logged = @{}                                    # hwnd -> already printed a "window:" line
 $window = [IntPtr]::Zero
 $windowSeenAt = $null
-$deadline = (Get-Date).AddSeconds($TimeoutSec)
+$deadline = (Get-Date).AddSeconds($(if ($answerOnly) { $AnswerSec } else { $TimeoutSec }))
 
 # How long to keep answering dialogs AFTER the game window shows up.  This is the actual fix for
 # the flaky launches of 2026-09-25 (user report: the first dialog got answered fast, the second one
@@ -215,7 +296,10 @@ $quietAfterWindowSec = 4
 
 # OK-button captions, built from char codes so this file stays ASCII-only (AGENTS.md section 1:
 # PowerShell 5.1 reads a BOM-less UTF-8 .ps1 as ANSI, so a literal would be corrupted).
-$okTexts = @('OK', 'Ok', '&OK', [string][char]0x786E + [string][char]0x5B9A)
+# 'Yes' / 0x662F added in v0.8.36: the load-time "module mismatch" dialog's confirm button is
+# labelled exactly that (observed by the user on 2026-09-27: two buttons, qu xiao | shi).
+$okTexts = @('OK', 'Ok', '&OK', 'Yes', [string][char]0x662F,
+             [string][char]0x786E + [string][char]0x5B9A)
 
 # Answer one dialog WITHOUT relying on foreground/focus.  Logs the button inventory, because
 # "which button is actually there" is the fact we were missing before.
@@ -230,8 +314,13 @@ function Resolve-Dialog([IntPtr]$h) {
         $parts = $b.Split('|')
         if ($parts.Count -lt 4 -or $parts[2] -ne 'True') { continue }
         $text = $parts[3].Trim()
+        # Strip the keyboard mnemonic: a real dialog's confirm button reads 'shi(&Y)' (observed
+        # 2026-09-27 in the answer-only control experiment; the bare 'shi' entry did NOT match and
+        # the run fell through to VK_RETURN -- which hits the DEFAULT button, and on the real
+        # load-confirmation dialog that default may well be "cancel".  Never bet on the default.)
+        $plain = ($text -replace '\(&[A-Za-z0-9]\)', '') -replace '&', ''
         foreach ($ok in $okTexts) {
-            if ($text -eq $ok) {
+            if ($plain -eq $ok) {
                 [BlLaunch]::ClickButton([IntPtr][int64]$parts[0])
                 Write-Host ("        BM_CLICK -> [" + $text + "]")
                 return
@@ -258,14 +347,16 @@ while ((Get-Date) -lt $deadline) {
         $parts = $w.Split('|')
         if ($parts.Count -lt 3) { continue }
         $h = $parts[0]; $title = $parts[2]
-        if ($title -eq '') { continue }
+        # Empty title is NOT skipped blindly any more (v0.8.36): native MessageBox-style dialogs can
+        # have an empty caption, and the load-time module-mismatch one is exactly that shape. The
+        # skip below happens AFTER $cls is known, so only non-dialog empty-title windows go away.
 
         # Do NOT blacklist windows by title here.  The game window's own title contains the BLSE
         # install path, which on this machine lives under Vortex, so a title blacklist containing
         # 'Vortex' skipped the very window we were waiting for.
         $owner = 0
         [void][int]::TryParse($parts[1], [ref]$owner)
-        $isOurs = ($owner -eq $p.Id)
+        $isOurs = (($null -ne $p) -and ($owner -eq $p.Id))
         $cls = [BlLaunch]::ClassOf([IntPtr][int64]$h)
 
         # The GAME window must be recognised BEFORE the generic dialog branch.
@@ -281,6 +372,9 @@ while ((Get-Date) -lt $deadline) {
         # when its title does not match either of the two known ones.
         $isDialog = ($title -match 'Safe Mode') -or ($title -match 'Mod change') -or ($cls -eq '#32770') -or ($isOurs -and -not $looksLikeGame)
         if (-not $isDialog -and -not $looksLikeGame) { continue }
+        # v0.8.36: empty-title windows are only interesting when they ARE dialogs (see the comment
+        # above the loop); everything else with no caption stays ignored.
+        if (($title -eq '') -and ($cls -ne '#32770')) { continue }
 
         if (-not $logged.ContainsKey($h)) {
             $logged[$h] = $true

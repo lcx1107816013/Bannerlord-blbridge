@@ -10,7 +10,7 @@ namespace BlBridge
     /// </summary>
     internal static class BridgeConfig
     {
-        public const string Version = "0.8.32";
+        public const string Version = "0.8.45";
         public const string ModuleId = "BlBridge";
 
         /// <summary>
@@ -42,6 +42,19 @@ namespace BlBridge
         /// 防止 400v400 那种规模把日志撑爆（默认 40 ≈ 20v20 全覆盖）。
         /// </summary>
         public static int StateMaxAgents = 40;
+
+        /// <summary>
+        /// v0.8.42：动作账本（`commands/actions.jsonl`）的轮转阈值（字节）。**0 = 不轮转（默认）**。
+        ///
+        /// 默认 0 是刻意的：账本是过程记录，但**默认删除用户磁盘上的文件是另一回事**。
+        /// 想让它自动瘦身，在 `blbridge_game.json` 里显式写 `maxActionLogBytes`。
+        /// 对照：Bannerlord.GameMaster 的 `CommandLogger` 是**无条件**只留 5 个日志文件 ——
+        /// 那是它的产品语境（控制台日志），不是我们的（实验数据）。
+        /// </summary>
+        public static int MaxActionLogBytes = 0;
+
+        /// <summary>v0.8.42：轮转时保留的归档个数（只在 `MaxActionLogBytes &gt; 0` 时生效）。</summary>
+        public static int ActionLogKeepFiles = 5;
 
         private static string _logDir;
 

@@ -1,0 +1,360 @@
+{
+  "_about": "BlBridge 的 GABP 命名对齐表（L1）。这是**唯一真相源**：docs/gabp-naming.md 的表由 tools/bl_check_gabp_names.py --markdown 生成，不手写。",
+  "_what_it_is_not": "这不是一次传输层迁移。BlBridge 的控制通道仍然是文件 IPC（commands/pending ⇄ done）；本表只回答一个问题：**如果**这些能力将来要以 GABP 工具的形式暴露，它们该叫什么名字。",
+  "spec": "gabp/1",
+  "upstream": {
+    "protocol": "https://github.com/pardeike/GABP",
+    "reference_host": "https://github.com/BUTR/Bannerlord.GABS",
+    "reference_host_note": "同宿主（net472 Bannerlord 模组）的现成 GABP 服务端，命名以它的 <category>/<verb> 口径为准",
+    "taken_at": "2026-09-27"
+  },
+  "reserved_prefixes": [
+    "session",
+    "tools",
+    "events",
+    "resources",
+    "attention",
+    "notifications",
+    "lifecycle"
+  ],
+  "categories": {
+    "bridge": "BlBridge 自己的基建（会话状态 / 构建身份 / 有效配置），不碰游戏",
+    "core": "与上游同义：游戏进程生命周期与通用开关",
+    "battle": "战斗内动作与 AI 推演控制",
+    "ui": "进入 / 退出 / 读取官方游戏界面",
+    "camera": "相机与观战",
+    "telemetry": "读我们自己的产物（战斗日志与逐击事件）",
+    "config": "读写模组配置文件",
+    "experiment": "跑批与 A/B 对比（本项目特有，上游没有对应物）",
+    "troop": "兵种查询（本项目特有）",
+    "campaign": "战役生命周期与只读战役盘面：存档列表 / 按名直载 / 全局概览 / 王国·家族·封地·队伍清单 / 战役日志",
+    "inventory": "战役侧读取：队伍库存 / 金币（装备栏、市场将来也挂这）",
+    "desktop": "桌面级窗口 / 输入自动化"
+  },
+  "naming_rules": [
+    "形状固定为 <category>/<snake_case>，全小写，只用 [a-z0-9_]",
+    "category 必须取自本文件 categories 的键；前缀不得落在 reserved_prefixes 里（那些是 GABP 协议自留的）",
+    "单一用途的动作 method 用动词（battle/start、ui/open）；同时承载读与写的 method 用名词短语，读写靠参数区分（camera/speed、camera/ghost_mode、core/cheat_mode、core/skip_video）",
+    "读与写不共用一个名字：能分开的必须分开（battle/get_state vs battle/start；config/read_warbandlord vs config/write_warbandlord）",
+    "名字里的动词尽量复用上游词表：ping / get_state / wait_for_state / start / abort / list / open / close"
+  ],
+  "methods": {
+    "ping": {
+      "gabp": "core/ping",
+      "kind": "read",
+      "needs": "any",
+      "note": "与上游 Bannerlord.GABS 的 core/ping 同名同义，直接对齐"
+    },
+    "status": {
+      "gabp": "battle/get_state",
+      "kind": "read",
+      "needs": "any",
+      "note": "回的是推演状态机 + 双方存活数 + 战果"
+    },
+    "start_battle": {
+      "gabp": "battle/start",
+      "kind": "write",
+      "needs": "CustomBattleState",
+      "note": "必须在官方自定义战斗界面；参数校验（兵种 / 场景 / 组 DSL）在开 mission 之前做"
+    },
+    "abort": {
+      "gabp": "battle/abort",
+      "kind": "write",
+      "needs": "any"
+    },
+    "fast_forward": {
+      "gabp": "battle/set_speed",
+      "kind": "write",
+      "needs": "mission",
+      "note": "布尔开关（10 倍速）。与上游 core/set_time_speed 不同：那是战役时间，这是 mission 内快进"
+    },
+    "speed": {
+      "gabp": "battle/get_speed",
+      "kind": "read",
+      "needs": "any",
+      "note": "诊断读数：isFastForward / sceneTimeSpeed / missionMode"
+    },
+    "list_ui": {
+      "gabp": "ui/list",
+      "kind": "read",
+      "needs": "any"
+    },
+    "open_ui": {
+      "gabp": "ui/open",
+      "kind": "write",
+      "needs": "main_menu",
+      "note": "走官方 ExecuteInitialStateOptionWithId；只在主菜单可用（有闸门）"
+    },
+    "close_ui": {
+      "gabp": "ui/close",
+      "kind": "write",
+      "needs": "CustomBattleState",
+      "note": "白名单只含官方自定义战斗界面"
+    },
+    "get_screen": {
+      "gabp": "ui/get_screen",
+      "kind": "read",
+      "needs": "any",
+      "note": "脱壳抄 BUTR/Bannerlord.GABS 的 ui/get_screen（只读；L2 探针 P17/P18/P19/P20 通过）"
+    },
+    "get_viewmodel_property": {
+      "gabp": "ui/get_viewmodel_property",
+      "kind": "read",
+      "needs": "any",
+      "note": "脱壳抄上游 ui/get_viewmodel_property（只读；点号路径遍历 ViewModel；L2 探针 P21 通过）"
+    },
+    "get_inventory": {
+      "gabp": "inventory/get_inventory",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "脱壳抄上游 InventoryTools.cs 的 inventory/get_inventory（只读；Campaign 上下文前置，否则如实报 no_campaign）"
+    },
+    "list_saves": {
+      "gabp": "campaign/list_saves",
+      "kind": "read",
+      "needs": "any",
+      "note": "脱壳抄上游 CoreTools.cs 的 core/list_saves（MBSaveLoad.GetSaveFiles；meta 含模组/版本键值）"
+    },
+    "load_save": {
+      "gabp": "campaign/load_save",
+      "kind": "write",
+      "needs": "main_menu",
+      "note": "脱壳抄上游 core/load_save：LoadSaveGameData + StartNewGame 直载，不经过存档选择界面；战役中拒 in_campaign"
+    },
+    "campaign_time": {
+      "gabp": "campaign/time",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "只读诊断：mode=status（保活已于 v0.8.39 移除）；回档位/菜单上下文/战役天数/暂停菜单是否开着"
+    },
+    "ghost_camera": {
+      "gabp": "camera/ghost_mode",
+      "kind": "write",
+      "needs": "mission",
+      "note": "mode = status/on/off/toggle ⇒ 名词短语命名，读写靠参数"
+    },
+    "camera_speed": {
+      "gabp": "camera/speed",
+      "kind": "write",
+      "needs": "mission",
+      "note": "mode = status/shift/base/rts/boost/probe ⇒ 名词短语命名；三条腿各自写完回读，probe 是测速探针（读）"
+    },
+    "skip_video": {
+      "gabp": "core/skip_video",
+      "kind": "write",
+      "needs": "any",
+      "note": "做法抄自上游 Bannerlord.GABS 的 core/skip_video（脱壳抄：不引 Lib.GAB）"
+    },
+    "cheat_mode": {
+      "gabp": "core/cheat_mode",
+      "kind": "write",
+      "needs": "any",
+      "note": "开关 + 回读；等于打开开发者通道，工具不做任何自动开启"
+    },
+    "order": {
+      "gabp": "battle/order",
+      "kind": "write",
+      "needs": "mission",
+      "note": "movement / position / target / targetAgent 四者互斥 + arrangement / firing / riding"
+    },
+    "control_agent": {
+      "gabp": "battle/control_agent",
+      "kind": "write",
+      "needs": "mission",
+      "note": "mode = take/release/status；AI 场次里 controller 回读仍是 AI，工具如实报 ok=false"
+    },
+    "campaign_overview": {
+      "gabp": "campaign/campaign_overview",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读全局概览：家族/王国/封地/队伍计数 + 玩家金币·影响力·战役天数；字段一律走反射（属性优先、public 字段兜底），随版本漂移时降级为 null 而不是炸游戏"
+    },
+    "list_kingdoms": {
+      "gabp": "campaign/list_kingdoms",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读：所有王国（rulingClan / clanCount / gold / isKingdom）"
+    },
+    "list_clans": {
+      "gabp": "campaign/list_clans",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读：所有家族（tier / gold / influence / kingdom / leader / isMinor / isEliminated）"
+    },
+    "list_settlements": {
+      "gabp": "campaign/list_settlements",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读：所有封地（town/castle/village/hideout + 繁荣度·忠诚·治安·食物·炉火）；⚠️ 1.4.8 里 Town/Village/Hideout 是 **public 字段**不是属性（只查 GetProperty 会整体 miss）"
+    },
+    "list_parties": {
+      "gabp": "campaign/list_parties",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读：地图上所有队伍（strength / morale / aiBehavior / targetSettlement；真机 400 条）"
+    },
+    "campaign_log": {
+      "gabp": "campaign/campaign_log",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "控制面 A 阶段 · 只读：战役日志快照（最近 N 条 LogEntry，默认 20 / 上限 200）"
+    }
+  },
+  "tools": {
+    "bl_status": {
+      "gabp": "bridge/get_status",
+      "note": "模块 / 日志 / 会话身份，含崩溃判定"
+    },
+    "bl_list_battles": {
+      "gabp": "telemetry/list_battles"
+    },
+    "bl_analyze": {
+      "gabp": "telemetry/analyze_battle",
+      "note": "血量校验 / 伤害分布 / 挨打成本"
+    },
+    "bl_read_events": {
+      "gabp": "telemetry/read_events",
+      "note": "按类型过滤 + 分页"
+    },
+    "bl_read_config": {
+      "gabp": "config/read_warbandlord"
+    },
+    "bl_apply_config": {
+      "gabp": "config/write_warbandlord",
+      "note": "自动备份 + XML 校验；改完需重启游戏才生效"
+    },
+    "bl_rts_config": {
+      "gabp": "config/read_rts"
+    },
+    "bl_apply_rts_config": {
+      "gabp": "config/write_rts",
+      "note": "含预设 siege-god / free-always / elevated-always / god-full"
+    },
+    "bl_ghost_camera": {
+      "gabp": "camera/ghost_mode"
+    },
+    "bl_camera_speed": {
+      "gabp": "camera/speed"
+    },
+    "bl_control_agent": {
+      "gabp": "battle/control_agent"
+    },
+    "bl_order": {
+      "gabp": "battle/order"
+    },
+    "bl_skip_video": {
+      "gabp": "core/skip_video"
+    },
+    "bl_cheat_mode": {
+      "gabp": "core/cheat_mode"
+    },
+    "bl_battle_status": {
+      "gabp": "battle/get_state"
+    },
+    "bl_start_battle": {
+      "gabp": "battle/start"
+    },
+    "bl_wait_for_state": {
+      "gabp": "battle/wait_for_state",
+      "note": "上游同名词（core/wait_for_state / party/wait_for_arrival / conversation/wait_for_state）的同一约定：动作工具立即返回，等待器阻塞"
+    },
+    "bl_abort": {
+      "gabp": "battle/abort"
+    },
+    "bl_list_ui": {
+      "gabp": "ui/list"
+    },
+    "bl_open_ui": {
+      "gabp": "ui/open"
+    },
+    "bl_close_ui": {
+      "gabp": "ui/close"
+    },
+    "bl_get_screen": {
+      "gabp": "ui/get_screen",
+      "note": "脱壳抄 BUTR/Bannerlord.GABS 的 ui/get_screen（只读；L2 探针 P17/P18/P19/P20 通过）"
+    },
+    "bl_get_viewmodel_property": {
+      "gabp": "ui/get_viewmodel_property",
+      "note": "脱壳抄上游 ui/get_viewmodel_property（只读；L2 探针 P21 通过）"
+    },
+    "bl_get_inventory": {
+      "gabp": "inventory/get_inventory",
+      "note": "脱壳抄上游 InventoryTools.cs 的 inventory/get_inventory（只读；needs=campaign）"
+    },
+    "bl_list_saves": {
+      "gabp": "campaign/list_saves"
+    },
+    "bl_load_save": {
+      "gabp": "campaign/load_save",
+      "note": "按名直载；needs=main_menu（战役中拒 in_campaign）"
+    },
+    "bl_campaign_time": {
+      "gabp": "campaign/time",
+      "note": "只读诊断（v0.8.39 起 mode 只接受 status）；暂停菜单/天数是判「切窗口会不会被暂停」的判据"
+    },
+    "bl_fast_forward": {
+      "gabp": "battle/set_speed"
+    },
+    "bl_build_check": {
+      "gabp": "bridge/check_build",
+      "note": "源码 / 构建产物 / 部署文件 / 进程内 DLL 四段哈希链"
+    },
+    "bl_config": {
+      "gabp": "bridge/get_config",
+      "note": "有效配置 + 来历（env / 文件 / 默认）"
+    },
+    "bl_run_batch": {
+      "gabp": "experiment/run_batch",
+      "note": "本项目特有：按计划跑 N 场（支持换边双跑、dryRun）"
+    },
+    "bl_batch_report": {
+      "gabp": "experiment/compare",
+      "note": "本项目特有：A/B 对比，强制 95%CI，样本 < 3 局拒绝下结论"
+    },
+    "bl_lookup_troop": {
+      "gabp": "troop/lookup"
+    },
+    "bl_launch_game": {
+      "gabp": "core/launch_game",
+      "note": "BLSE 无人值守启动 + 模态弹窗应答；excludeModules 是 A/B 对照的支点"
+    },
+    "bl_desktop_windows": {
+      "gabp": "desktop/list_windows"
+    },
+    "bl_desktop_screenshot": {
+      "gabp": "desktop/screenshot"
+    },
+    "bl_desktop_click": {
+      "gabp": "desktop/click"
+    },
+    "bl_desktop_key": {
+      "gabp": "desktop/press_key",
+      "note": "keys 走组合键、text 走文本输入，一个工具两用 ⇒ 名词短语 + 参数区分"
+    },
+    "bl_campaign_overview": {
+      "gabp": "campaign/overview",
+      "note": "只读全局概览（needs=campaign；主菜单/自定义战斗如实报 no_campaign）"
+    },
+    "bl_list_kingdoms": {
+      "gabp": "campaign/list_kingdoms"
+    },
+    "bl_list_clans": {
+      "gabp": "campaign/list_clans"
+    },
+    "bl_list_settlements": {
+      "gabp": "campaign/list_settlements"
+    },
+    "bl_list_parties": {
+      "gabp": "campaign/list_parties"
+    },
+    "bl_blockade": {
+      "gabp": "config/blockade",
+      "note": "MapBlockade 关隘面片候选（离线只读计算 + action=emit 落盘 map_blockades.xml）；读写靠 action 区分，故用名词短语"
+    },
+    "bl_campaign_log": {
+      "gabp": "campaign/log",
+      "note": "只读日志快照；count 默认 20 / 上限 200"
+    }
+  }
+}

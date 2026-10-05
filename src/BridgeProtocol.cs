@@ -95,5 +95,43 @@ namespace BlBridge
         {
             return "\"" + Jw.Esc(s ?? "") + "\"";
         }
+
+        /// <summary>
+        /// v0.8.45：把"从已组装好的响应里反读账本所需字段"这件事**集中到一处**。
+        ///
+        /// 为什么要有它（缺口 B 的修法，2026-10-05）：`CommandPump.RecordLedger` 原来直接
+        /// `Jmini.Bool(response,"ok",false)` —— 兜底是 **false**，于是一个**成功**的请求只要
+        /// 响应读不出来（截断/写坏/无 `ok` 键），就会被账本记成**失败**，且与真失败**无法区分**。
+        ///
+        /// 抽到这里还有个**测试上的理由**：`CommandPump` 依赖 TaleWorlds，**离线编不进来**，
+        /// 所以离线断言若自己抄一份判定逻辑，就成了"验副本不验出货代码"（违反项目纪律）。
+        /// 本类是**纯 BCL**、已被 `tools/jsontest` 编入 ⇒ 出货代码与断言**调同一个方法**。
+        /// </summary>
+        /// <param name="readable">响应里**存在** `ok` 键（= Jmini 反读的前提成立）</param>
+        /// <param name="ok">`ok` 的值（`readable==false` 时无意义，恒 false）</param>
+        /// <param name="code">失败码；`readable==false` 时是哨兵 `ledger_unreadable`</param>
+        /// <param name="uncertain">`outcomeUncertain`（不可读时恒 false —— 不能凭空说"不确定"）</param>
+        /// <param name="note">一句话摘要（不可读时说明"只表示读不出来"）</param>
+        public static void ReadResponseOutcome(string response, out bool readable, out bool ok,
+            out string code, out bool uncertain, out string note)
+        {
+            readable = Jmini.Has(response, "ok");
+            ok = Jmini.Bool(response, "ok", false);
+            if (!readable)
+            {
+                // 刻意**不**复用 ok=false 的语义：读不出来 ≠ 请求失败。给一个专属哨兵码，
+                // 让下游能一眼把"账本读不到响应"与"真的失败了"分开。
+                code = "ledger_unreadable";
+                uncertain = false;
+                note = "响应无法反读（长度 " + (response == null ? 0 : response.Length)
+                       + "）；该行 ok=false 只表示「读不出来」，不代表请求失败";
+                return;
+            }
+            code = ok ? "" : Jmini.Str(response, "code", "");
+            uncertain = Jmini.Bool(response, "outcomeUncertain", false);
+            note = ok
+                ? ("state=" + Jmini.Str(response, "state", ""))
+                : Jmini.Str(response, "message", "");
+        }
     }
 }

@@ -55,6 +55,15 @@ def main(argv):
     eb.add_argument("--menu-timeout", type=float, default=120.0, help="等主菜单就绪的上限秒数")
     eb.add_argument("--entry-timeout", type=float, default=60.0, help="open_ui 后等状态落地的上限秒数")
     eb.add_argument("--no-esc", action="store_true", help="不按 ESC 跳过场动画")
+    # v0.8.44：补上 MCP 侧早已存在的 auto_open（`bl_launch_game` 的 autoOpen）。
+    # 为什么需要：不加它时 `enter-battle` **永远**返回 `await_confirm`（"主菜单就绪即返回，
+    # 不自动 fire open_ui"）⇒ **无人值守跑批会在这一步断掉**，只能调用方自己轮询 + 自己 open-ui。
+    # 默认 False 是**刻意保留的安全门**（2026-09-25 启动动画期间 fire open_ui → 21 s 后崩溃，
+    # 见本文件 `_enter_custom_battle` 的注释），不是缺陷；本次只是把已存在的参数暴露到 CLI。
+    eb.add_argument("--auto-open", action="store_true",
+                    help="无人值守：主菜单就绪后自动 fire open_ui（默认关闭；开启会套 --min-startup-sec 安全下限）")
+    eb.add_argument("--min-startup-sec", type=float, default=20.0,
+                    help="--auto-open 的安全下限秒数（默认 20）；仅 --auto-open 路径生效")
     sub.add_parser("status", help="推演状态机")
     sub.add_parser("abort", help="中止当前推演")
 
@@ -173,7 +182,9 @@ def main(argv):
                    help="开战前套用 RTSCamera 预设（siege-god / free-always / elevated-always / god-full）。"
                         "实测改配置无需重启、对本场立即生效；会先备份配置文件")
     p.add_argument("--allow-any-state", action="store_true",
-                   help="跳过「必须停在自定义战斗界面」检查（用于从主菜单直接开战）")
+                   help="跳过「必须停在自定义战斗界面」检查。⚠️ 不能用来从主菜单开战"
+                        "（裸主菜单下兵种数据未加载 ⇒ unknown_troop）；也无需再用来绕 wrong_state"
+                        "（v0.8.44 起带 NavalDLC 的 NavalCustomBattleState 已被正常接受）")
     p.add_argument("--dummy-side", choices=("none", "attacker", "defender"), default="none",
                    help="不朽靶场：把该方设为永不倒下的靶子（阶段 2①）")
     p.add_argument("--freeze-dummies", action="store_true",
@@ -211,6 +222,28 @@ def main(argv):
                    help="随机种子（同种子两次跑可逐值复现；不给就用引擎默认随机）")
     p.add_argument("--skip-troop-check", dest="skip_troop_check", action="store_true",
                    help="跳过兵种 id 校验（索引只覆盖官方 XML；用第三方模组兵种时加它）")
+    # ── v0.8.41：战术档位 + 环境旋钮（零 Harmony）──────────────────────
+    p.add_argument("--attacker-tactic-level", dest="attacker_tactic_level", type=int, default=None,
+                   help=("-1（不覆盖，默认）或 0..100。引擎按 20/50 分档决定该方挂哪些 TacticOption；"
+                         "⚠️ 默认 orders=charge 会清空战术菜单，要看效果要配 --orders default"))
+    p.add_argument("--defender-tactic-level", dest="defender_tactic_level", type=int, default=None,
+                   help="守方战术档位，语义同上")
+    p.add_argument("--terrain", default=None,
+                   help="地形覆盖（默认不设=引擎按场景决定）。可选：" + " | ".join(bl_common.TERRAINS))
+    p.add_argument("--random-terrain-seed", dest="random_terrain_seed", type=int, default=None,
+                   help="随机地形种子（设了会同时打开 NeedsRandomTerrain）")
+    p.add_argument("--ai-friendly-fire", dest="ai_friendly_fire", type=float, default=None,
+                   help=("设「打到玩家方身上」的伤害倍率 0..1（默认不设=引擎默认 1）。"
+                         "**不是同队误伤开关** —— 引擎判据的「朋友」= 受害者属于玩家一方"
+                         "（本靶场玩家方 = Attacker）。实测设 0 时该侧命中零伤害占比从 20 升到 72（个百分点），"
+                         "显著但非全部归零"))
+    p.add_argument("--keep-corpses", dest="keep_corpses", action="store_true",
+                   help=("关掉尸体淡出（长跑/多轮时尸体量稳定）。"
+                         "可用 sample 事件的 corpses 字段验证：对照会回落到 0，开了则从不回落"))
+    p.add_argument("--scene-level", dest="scene_level", type=int, default=None,
+                   help="攻城场景升级等级 1..3（默认 3 = 改动前的写死值）")
+    p.add_argument("--time-of-day", dest="time_of_day", type=float, default=None,
+                   help="攻城开战时刻 0..24 小时（默认 6 = 改动前的写死值）")
     p.add_argument("--timeout", type=float, default=60.0)
 
     w = sub.add_parser("wait", help="等待状态")
@@ -223,6 +256,12 @@ def main(argv):
     ff.add_argument("--off", action="store_true", help="关闭")
     sub.add_parser("speed", help="查看加速状态（是否生效/Scene.TimeSpeed/Mission.Mode）")
     sub.add_parser("buildcheck", help="核对 源码/构建产物/部署文件/进程内 DLL 是否一致")
+    # ── v0.8.42：动作账本（commands/actions.jsonl）────────────────────────
+    ac = sub.add_parser("actions", help="读控制通道动作账本：每个请求一行（含被拒的）")
+    ac.add_argument("--limit", type=int, default=30, help="只显示最后 N 条（0 = 全显示），默认 30")
+    ac.add_argument("--fail-only", dest="fail_only", action="store_true", help="只看失败项")
+    ac.add_argument("--json", action="store_true", help="原样吐 JSON 行，便于二次处理")
+    ac.add_argument("--path", default=None, help="直接指定 actions.jsonl 路径（默认按日志目录推导）")
 
     # ── 阶段 2④：批量跑批 + A/B 对比报告 ────────────────────────────────
     b = sub.add_parser("batch", help="按计划批量跑 N 场（一条命令跑 N 场）")
@@ -257,7 +296,9 @@ def main(argv):
     if args.cmd == "enter-battle":
         out = bl_mcp._enter_custom_battle(ui_id=args.ui_id, menu_timeout=args.menu_timeout,
                                           entry_timeout=args.entry_timeout,
-                                          skip_intro=not args.no_esc)
+                                          skip_intro=not args.no_esc,
+                                          auto_open=args.auto_open,
+                                          min_startup_sec=args.min_startup_sec)
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return 0 if out.get("ok") else 1
 
@@ -401,6 +442,47 @@ def main(argv):
             params["dummyBodyItem"] = args.dummy_body_item
         if getattr(args, "random_seed", None) is not None:
             params["randomSeed"] = int(args.random_seed)
+        # ── v0.8.41：战术档位 + 环境旋钮 ─────────────────────────────────
+        # 数值参数发**裸数字**（C# 侧 Jmini.Num 只吃数字字符，字符串会被判成"读不到"）；
+        # 枚举/范围在本地先校验（GC3）：游戏端读不到就是静默落 fallback ⇒ "参数没生效"。
+        for attr, key in (("attacker_tactic_level", "attackerTacticLevel"),
+                          ("defender_tactic_level", "defenderTacticLevel")):
+            val = getattr(args, attr, None)
+            if val is None:
+                continue
+            try:
+                params[key] = bl_common.check_tactic_level(val, "--" + attr.replace("_", "-"))
+            except ValueError as e:
+                print("错误: %s" % e)
+                return 2
+        if getattr(args, "terrain", None):
+            try:
+                params["terrain"] = bl_common.parse_terrain(args.terrain)
+            except ValueError as e:
+                print("错误: %s" % e)
+                return 2
+        if getattr(args, "random_terrain_seed", None) is not None:
+            params["randomTerrainSeed"] = int(args.random_terrain_seed)
+        if getattr(args, "ai_friendly_fire", None) is not None:
+            ff = float(args.ai_friendly_fire)
+            if ff < 0.0 or ff > 1.0:
+                print("错误: --ai-friendly-fire 只接受 0..1（引擎默认 1），收到 %s" % ff)
+                return 2
+            params["aiFriendlyFireMultiplier"] = ff
+        if getattr(args, "keep_corpses", False):
+            params["keepCorpses"] = "true"
+        if getattr(args, "scene_level", None) is not None:
+            lv = int(args.scene_level)
+            if lv < 1 or lv > 3:
+                print("错误: --scene-level 只接受 1..3（攻城场景升级等级），收到 %d" % lv)
+                return 2
+            params["sceneLevel"] = lv
+        if getattr(args, "time_of_day", None) is not None:
+            tod = float(args.time_of_day)
+            if tod < 0.0 or tod > 24.0:
+                print("错误: --time-of-day 只接受 0..24（小时），收到 %s" % tod)
+                return 2
+            params["timeOfDay"] = tod
         for attr, key in (("attacker_groups", "attackerGroups"),
                           ("defender_groups", "defenderGroups")):
             raw = getattr(args, attr, None)
@@ -502,6 +584,35 @@ def main(argv):
                 print("%-7s: %s" % (k, r.get(k)))
         # game_offline 不是失败（游戏本来就可能没开）：文件链条已核对通过，只差进程内身份
         return 0 if r.get("code") in ("ok", "game_offline") else 1
+
+    if args.cmd == "actions":
+        limit = None if int(args.limit) <= 0 else int(args.limit)
+        entries, stats = bl_common.load_actions(args.path, limit=limit,
+                                               fail_only=bool(args.fail_only))
+        if stats.get("missing"):
+            print("账本还不存在：%s" % stats["path"])
+            print("（v0.8.42 起，游戏每次处理一个请求就追加一行；先跑一条命令再看）")
+            return 0
+        if args.json:
+            for ev in entries:
+                print(json.dumps(ev, ensure_ascii=False))
+        else:
+            print("账本: %s" % stats["path"])
+            print("非空行 %d ／ 解析失败 %d ／ 本次显示 %d 条 ／ 会话 %s"
+                  % (stats["lines"], stats["bad"], len(entries),
+                     ", ".join(stats["runs"]) if stats["runs"] else "-"))
+            # ⚠️ 坏行**必须显式报出来**：load_events 那种"静默跳过"正是 v0.8.4 非法 JSON
+            #    能活下来的原因（分析器不报错、只是少一段数据）。审计数据不接受这种静默。
+            for s in stats["badSamples"]:
+                print("  [坏行] %s" % s)
+            print("%-23s %-4s %-24s %-22s %7s  %s"
+                  % ("t(UTC)", "ok", "method", "code", "ms", "note"))
+            for ev in entries:
+                print("%-23s %-4s %-24s %-22s %7s  %s"
+                      % (str(ev.get("t", ""))[:23], "OK" if ev.get("ok") else "FAIL",
+                         str(ev.get("method", ""))[:24], str(ev.get("code", ""))[:22],
+                         ev.get("ms", ""), str(ev.get("note", ""))[:60]))
+        return 0
 
     if args.cmd in ("batch", "compare"):
         # 转发到对应脚本的子进程：两者本来就是独立可执行的 CLI，

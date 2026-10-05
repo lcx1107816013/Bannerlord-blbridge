@@ -2991,4 +2991,1392 @@ t=+36.0s activeState='CustomBattleState'   ⇒ ok:true / in_custom_battle
   ③ 开战 DSL 的 `formation` 仍是**仅回显**（只是不再静默），"硬拒 / 删字段"两档**留给用户拍板**；
   ④ 收尾：游戏留在**自定义战斗界面**（v0.8.32 进程内），计划任务 `BlBridgeDevLaunch` 已注销，临时探针脚本已删。
 
+## [2026-09-27] §三十 MCP 工具「描述 / 诊断输出」误导性审计与修复（v0.8.34）
 
+> 完整记录见 `docs/mcp-tool-desc-audit-2026-09-27.md`。这里只放结论与数字。
+
+### 1. 起因
+换用新的 MCP 调用方式（列工具 → 取描述 → **真的 call 一次**），顺带检验它会不会把 AI 带偏。
+当场抓到 2 个"名不副实"的缺陷 —— 都不是文案问题，而是**输出看着正常、实际误导**。
+
+### 2. 缺陷与修复
+| # | 现象 | 真实情况 | 处置 |
+|---|---|---|---|
+| D1 | `bl_get_screen` / `bl_get_viewmodel_property` 列得出、一调就 `unknown tool` | 只加了 `TOOLS` 表 + 命名表，漏了 `call_tool()` 派发分支 | 补派发；新增 `tools/bl_check_dispatch.py`（C1 声明⇒派发 / C2 派发⇒声明 / C3 声明⇒分组，含 3 类注入故障自测）；`bl_selftest.py` ④ 加真派发判据 + 不存在工具名对照组 |
+| D2 | `bl_status` 报 `verdict: running` / 游戏进程存活 | **pid 复用**：pid 6040 = `MSI_Central_Service.exe`，游戏没开 | 新增 `_pid_image_name` / `_pid_is_game`（验映像名 `bannerlord|mountandblade|taleworlds`），4 个调用点全换；诊断结果新增 `pidImageName` |
+
+**D1 的负向实验（证明判据不恒绿）**：把 `if name == "bl_get_screen":` 改名 ⇒ 自测立刻 2 条 FAIL / EXIT=1，还原后回绿。
+**D2 的真机判据（本机实测）**：`_pid_alive(6040)=True`（旧，误报 running）vs `_pid_is_game(6040)=False`（新）⇒ `verdict=clean_exit`，并给出 `pidImageName=MSI_Central_Service.exe`。
+
+### 3. 规则升格（AGENTS.md §三）
+- 新增工具 = **同步四处**（C# `Dispatch` 分支 / `TOOLS` 表 / `call_tool()` 派发分支 / `gabp_names.json`）。
+- 新增「工具描述与诊断输出的硬规则」：描述要写清前置条件（游戏在跑？要哪版 DLL？哪个状态？）；
+  出处/署名搬进 `docs/`；"有没有"不等于"是不是"；探测不出就返回未知，不冒充结论。
+- 描述改法落地：`bl_get_screen` / `bl_get_viewmodel_property` 写明"游戏在跑 + 已部署 v0.8.34+ DLL"；
+  `bl_status` 补上它还会返回构建一致性与会话诊断。
+
+### 4. 数字
+- Python 断言 **306 → 316**（`bl_selftest.py` 全绿 EXIT=0）。
+- `bl_check_dispatch.py`：声明 34 / 派发 34 / 分组 34；`--selftest` 3 类故障全抓到。
+- `bl_check_gabp_names.py`：C# 17 method ↔ 表 17 条；MCP 34 tool ↔ 表 34 条；8 类故障全抓到。
+- 编码体检：96 个跟踪文本文件全合规（UTF-8 无 BOM + LF）。
+- `build.ps1` 编译 OK → `out/BlBridge.dll`（0.8.34，169 KB，33 源文件）；**未部署**。
+
+### 5. 仍待办
+1. **真机判据未做**：v0.8.34 的 C# 侧（`UiInspector`）未部署、游戏当前也未运行 ⇒ 真机一行证据都没有。
+   需要 `build.ps1 -Deploy` + 启游戏 + 在主菜单/自定义战斗界面各抓一次。
+2. **MCP 服务进程仍跑旧代码**：需重启 blbridge 这个 MCP server，`bl_status` 才会带 `pidImageName`、
+   `bl_get_screen` 才调得动。
+3. 短名单 #2（`inventory` / `get_inventory`）未开工。
+4. `~/.codebuddy/mcp.json` 里 blbridge 的 description 仍写"（20 工具）"（实际 core+config 组 22 个）—— 用户本机配置，未改。
+
+
+### 6. 真机判据（2026-09-27 20:33–20:47，部署并跑到 v0.8.35，进程内 sha `720e350db84b76e4`）
+
+> `bl_status.buildCheck = 四段一致（源码 = 构建 = 部署 = 进程内，0.8.35）`。完整记录见
+> `docs/mcp-tool-desc-audit-2026-09-27.md` §7。为部署 DLL 强制关过一次游戏，之后重开（pid 40848）。
+
+**`bl_get_screen`（只读读界面）**
+
+| 场景 | screenType | 层 / dataSource | 按钮 |
+|---|---|---|---|
+| 主菜单 | `GauntletInitialScreen` | `MainMenu` / `InitialMenuVM` | 11 个（载入游戏…退出游戏 + 1 个 disabled 的 AnnouncementButton） |
+| 自定义战斗界面（`open_ui` 后） | `CustomBattleScreen` | `CustomBattle` / `CustomBattleVM` | 16 个（开始 / 返回 / 随机 / 取消 / 完成 / 切换 + DropdownButton×2 + AddTroopButton×8） |
+
+**`bl_get_viewmodel_property`（只读读 VM）**
+
+| 用例 | 结果 |
+|---|---|
+| `CurrentLanguageString` @ MainMenu | `"简体中文"` |
+| `MenuOptions` + `subProperties=NameText,IsDisabled` | `count=10`，10 项，`IsDisabled` 全 False |
+| 层名写错 `NoSuchLayer` | `no_data_source`：层 NoSuchLayer 没有可读取的 ViewModel |
+
+**真机新暴露 2 个问题（都是"会误导调用方"，已修/已标注）**
+
+1. **按钮 id 不能当主键**：主菜单 11 个按钮只有 1 个有 id；自定义战斗界面 16 个里 `AddTroopButton` 重复 8 次。
+   ⇒ 描述改成"优先用 text 定位，id 常空且不唯一"（写入实测数字）。引擎侧形态，未改行为（不偏离上游 GABS）。
+2. **"属性不存在"与"值为 null"原来都返回 `ok:true / value:null`** ⇒ 调用方分不清写错属性名和真的空值。
+   ⇒ v0.8.35 改为：不存在 = `ok:false` / `property_not_found` + **反射列出真实可用属性名**
+   （实测：`属性 IsMultiplayer 在 InitialMenuVM 上不存在（可用的属性：Announcement, CurrentLanguageString, …）`）；
+   子属性写错 = `missingSubProperties: ["NotAField"]`。
+   改法：`TraversePropertyPath` → `TryTraversePropertyPath` + `SuggestProperties`。
+   ⚠️ 这块**只有真机判据、没有离线单测**（`UiInspector` 依赖引擎类型，离线跑不起来）—— 以后改它必须重跑本节。
+
+**pid 身份校验的对照（同一台机器、同一个字段）**
+
+| 时刻 | pid | `pidImageName` | `verdict` |
+|---|---|---|---|
+| 审计前（游戏没开，pid 被复用） | 6040 | `MSI_Central_Service.exe` | `clean_exit` ✅（改前是 running ❌） |
+| 真机（游戏真的在跑） | 40848 | `Bannerlord.BLSE.Standalone.exe` | `running` ✅ |
+
+### 7. 本轮数字与状态
+- 版本 **0.8.34 → 0.8.35**；部署 dll sha `720E350DB84B76E4`；旧 DLL 备份 `BlBridge.dll.bak_20260927_204125`。
+- Python 断言 306 → **316**；`bl_check_dispatch.py` 34/34/34；`bl_check_gabp_names.py` 17/34 双向对齐；
+  编码体检 97 文件全合规；`build.ps1 -Deploy` OK。
+- 游戏当前**停在主菜单**（pid 40848）。短名单 #2（`inventory` / `get_inventory`）未开工。
+
+
+### 8. 启动链路提速（2026-09-27 晚，用户指出"进菜单/进选兵界面检测慢"；对照上游 GABS 后收紧）
+
+**上游对照**（读了 GABS 的 `CoreTools.cs` / `MenuTools.cs` / `launch-bannerlord.ps1`，已记入 lessons §五）：
+它**没有**任何"快速进游戏"的魔法 —— 无启动下限、`wait_for_state` 用 **500ms** 轮询（钳 100–5000ms）
++ topScreen 不含 Loading 的二次验证（我们 v0.8.20 已抄）、`skip_video`（我们已抄）、
+进界面与我们同一条路（`GetInitialStateOptions → DoAction` ≈ 我们的 `ExecuteInitialStateOptionWithId`）。
+⇒ 差距不在游戏侧，在我们自己的等待策略。
+
+**改了三处（全在 `tools/bl_mcp.py`，不动 C#）**
+
+| # | 改动 | 依据 |
+|---|---|---|
+| 1 | **await_confirm 路径砍掉 45s 下限**：菜单就绪即返回。下限本来防的是"自动 fire open_ui"，而这条路径根本不 fire（只截图），等下限没有保护对象 | 实测：菜单 7.8s 就绪却拖到 45.0s 才返回（白等 35s） |
+| 2 | auto_open 的安全下限 45s → **20s**（可配 `minStartupSec`）：45s 是 v0.8.18 定的，早于 v0.8.20 的主菜单硬判据（topScreen=GauntletInitialScreen + CustomBattle 入口 enabled，正是为那次启动期崩溃加的）；硬判据已在，下限退居兜底 | 真机 A/B ×2：20s fire open_ui 两次都没崩 |
+| 3 | 轮询收紧：主菜单 2s→1s；落地确认 5s→**1s 且 list_ui 超时 15s→6s**（真机发现 open_ui 后 ~30s 官方状态在主线程加载、控制通道不应答，15s 超时 ×2 就吃掉 30s，"1s 轮询"名存实亡）；失败只记第 1 条 + 每 10 条报数；`bl_wait_for_state` 轮询 2s→1s | 同一轮 B 组时间线 |
+
+**真机 A/B（同一台机器、同一天）**
+
+| 路径 | 旧（v0.8.34 等价行为） | 新（本轮） |
+|---|---|---|
+| 默认（await_confirm） | 菜单 9.9s 就绪 → **45.0s** 才返回 | 菜单 7.8s 就绪 → **19.1s** 返回（含启动第一步窗口等待） |
+| autoOpen 一路到底 | 45s 下限 + 5s 轮询 + 15s 超时 ≈ 80s 量级 | **60.2s** 进到 CustomBattleState（n=2，均不崩） |
+| 落地确认 | 两次 no_response 各干等 15s | +7.7s 即记"加载期不应答"，+29.5s 见 CustomBattleState |
+
+**没做的（诚实留档）**：CustomBattleState 本身 ~30s 才落地是**官方状态**的成本（open_ui 后主线程忙、
+连控制通道都不应答，轮询再快也测不到更早）—— 这个没动，也动不了（除非 patch 官方加载，违背零依赖原则）。
+另外上游 `launch-bannerlord.ps1` 有个值得抄的小技巧：启动前把 `engine_config.txt` 的
+`safely_exited=0` 改回 1，从源头少一个 Safe Mode 弹窗（我们现在靠自动应答，没出过事，先记账不抄）。
+
+
+## [2026-09-27] §三十一 L2 #2：inventory/get_inventory（v0.8.36，真机闭环）
+
+> 同 §三十 的"脱壳抄"模板做短名单 #2 第一条。上游 = BUTR/Bannerlord.GABS `Tools/InventoryTools.cs`
+> 的 `inventory/get_inventory`（本轮已读源码本体，记账见 lessons §四）。
+
+### 1. 落地了什么（三处同步 + 必跑校验全绿）
+
+| 层 | 新增 |
+|---|---|
+| 游戏侧 | `src/InventoryProbe.cs`（新文件）：`MainParty.ItemRoster` + `Hero.MainHero.Gold` 只读；`Campaign.Current == null` ⇒ 如实报 `no_campaign`；`limit` 默认 50 |
+| 调度 | `CommandPump.Dispatch` 加 `get_inventory` 分支 |
+| 构建 | `build.ps1` 引用清单加 `TaleWorlds.CampaignSystem.dll`（库存读取需要；34 源文件，172 KB） |
+| MCP | `bl_get_inventory`（TOOLS + call_tool 派发 + core 组）；工具 34 → **35** |
+| 命名表 | categories 加 `inventory`；methods 加 `inventory/get_inventory`（kind=read，**needs=campaign**——`bl_check_gabp_names.py` 的 NEEDS_ALLOWED 同步登记）；tools 加 `bl_get_inventory` |
+| 自测 | 假游戏端 get_inventory 应答 + 真派发判据 + limit 透传判据；计数 34→35 |
+
+编译即取证：`ItemRoster` 索引访问 / `IsEmpty` / `EquipmentElement.Item` / `Amount` /
+`ItemObject.Name/StringId/ItemType/Value/Weight/Tier` 全部对 1.4.8 引用程序集可解析。
+（实现注：roster 类型用 `var` + 索引访问，不写类型名 —— ItemRoster 的命名空间随版本搬过，少一个会断的编译点；
+`MobileParty` 在 1.4.8 在 `TaleWorlds.CampaignSystem.Party`，首轮编译 CS0246 已修正。）
+
+### 2. 真机判据（负向 + 正向都拿到）
+
+| 用例 | 结果 |
+|---|---|
+| 主菜单调 `bl_get_inventory` | `ok=false / no_campaign`：「没有战役上下文 —— 主菜单 / 自定义战斗里读不了库存」✅ |
+| `bl_list_ui` 主菜单入口 | 9 项：`CampaignResumeGame` / `ContinueCampaign` / `StoryModeNewGame` / `SandBoxNewGame` / `CustomBattle` / `Options` / `WarbandlordConfigMenu` / `Credits` / `Exit` |
+| `open_ui(ContinueCampaign)` → 进战役 → `bl_get_inventory(limit=8)` | `ok=true`，**gold=43752**，`totalElements=58`，按 limit 返回 8 条真实物品（谷物 x44 / 巴旦尼亚马驹 x2 / 通用马 x6 / 驮马 x11 / 骡子 x10 / 大陆骑乘马 x5 / 小鱼 x18 / 奶酪 x5），name（中文）/ id / quantity / type / value / weight / tier（-1/Tier1/Tier2）逐项正确 ✅ |
+
+过程小坑（记一笔）：进战役的等待判据第一版用"topScreen 不含 Loading/Initial"，被 `PreloadScreen` 骗过
+（3.5s 就误判进图，拿到的还是 no_campaign）；改成等 `MapScreen` 才对。顺带实测：ContinueCampaign 从主菜单
+到地图 ~165s（中间出现 `GauntletSaveLoadScreen` 一闪），比自定义战斗慢一个量级 —— 真机判据脚本以后都要按这个量级给 timeout。
+另：本机战役地图 topScreen 是 `NavalMapScreen`（海战 mod 的地图替换），activeState 仍是 `MapState`。
+
+### 3. 状态与待办
+
+- 版本 **0.8.35 → 0.8.36**；部署 dll sha `8271A370B9C52092`；旧 DLL 备份 `BlBridge.dll.bak_20260927_211652`。
+- 验收：`bl_check_gabp_names.py`（7 判据 + 8 类故障注入）✅、`bl_check_dispatch.py` 35/35/35 ✅、
+  `bl_selftest.py` 全绿 ✅、编码体检 98 文件 ✅。
+- 游戏当前**停在用户战役地图**（读取操作，无任何写行为）。
+- 短名单后续：menu / barter / conversation / party（上游对应实现体已定位，逐条照此模板 + 单独真机判据）。
+  ⚠️ 这些也全是 needs=campaign —— 每条都要过一遍"进战役"这道慢门（~165s），考虑把"ContinueCampaign 进战役"
+  固化成 `bl_launch_game` 的 `uiId` 路径（open_ui 已天然支持任意入口 id）。
+
+
+### 4. §三十一补：存档工具端到端真机 + 弹窗取证 + 一处被用户纠正的错误归因（2026-09-27 深夜）
+
+**被用户纠正的归因（记下来防再犯）**：此前写"ContinueCampaign ~165s、比自定义战斗慢一个量级"是**错的**。
+真因：读旧档弹"模组不匹配"确认框（这些模组已被移除：BattleSizeResized / RBMAILite…取消|是），
+**没有人点** ⇒ 游戏停在 GauntletSaveLoadScreen 等人，被误当成加载慢。正常换档不比自定义战斗慢
+（本轮实测见下）。教训：等待循环只盯 list_ui，把"被模态弹窗挡住"当成了"在加载"——
+超时归因里该多一个"有弹窗没应答"的形态。
+
+**新增（v0.8.36）：campaign/list_saves + campaign/load_save（脱壳抄上游 core/list_saves / core/load_save）**
+
+- `MBSaveLoad.GetSaveFiles()` → name/isCorrupted/**meta 全键值**（meta 里 `Module_*` 键就是每个模组的启停
+  状态 —— "模组不匹配"弹窗的数据源就在这，将来可在 load 前做本地预检）；`LoadSaveGameData(name)` +
+  `MBGameManager.StartNewGame(new SandBoxGameManager(result))` **按名直载，不经过存档选择界面**。
+- 引用新增：`TaleWorlds.SaveSystem.dll`（SaveGameFileInfo/LoadResult 在这，不在 SaveLoad.dll）+ Sandbox 模块的
+  `SandBox.dll`。坑：`LoadResult` 在 `TaleWorlds.SaveSystem.Load` 子命名空间；`MobileParty` 在
+  `TaleWorlds.CampaignSystem.Party`。
+- MCP：`bl_list_saves` / `bl_load_save`（needs=main_menu；战役中拒 in_campaign；名字不存在 ⇒
+  save_not_found 并列出可用档）。工具 35 → **37**。
+- 自测抓到一个新误导：C# 把失败装在 `result.ok=false` 里而信封 ok=true ⇒ MCP 层曾把"没启动"报成
+  "启动成功"，已修（看第二层）。
+
+**读档期弹窗取证（复现路径 = 读旧档，用户指点）**
+
+- 弹窗窗口 title=`no_active_wnd`、**没有 Win32 Button 子窗口** ⇒ 引擎自绘对话框，词表点按钮无效，
+  **VK_RETURN（回车=确认=『是』）就是正确动作**；实测两次换旧档（saveauto1/saveauto2）都在回车后正常进图。
+- `_answer_late_dialogs()`（bl_launch.ps1 -AnswerSec 独立应答模式 + bl_mcp 等待循环 15s 节流调用）已接进
+  load_save 等待路径；词表另补了 是/Yes 并剥 `(&X)` 助记符（对照实验：WinForms 真弹窗，裸"是"匹配不上
+  `是(&Y)`，会走默认键 —— 不能赌默认键）。
+- `list_ui` 的 options 顺带取证：主菜单 9 项含 `ContinueCampaign`（继续战役）——open_ui 本来就能进任意入口。
+
+**端到端真机判据（无人值守，全程无人工）**
+
+| 步骤 | 结果 |
+|---|---|
+| 启动→主菜单 | 19.4s（await_confirm 即刻返回生效） |
+| `bl_list_saves` | 4 个存档，meta 带 `Module_*` 全键 |
+| `bl_load_save('saveauto1')`（模组不一致旧档）→ 弹窗自动应答 → MapScreen | **49.9s** |
+| 启动→换档→进图全程 | **71.3s**；第二跑（saveauto2）**27.8s**（启动后）进图 |
+
+**遗留**：① display_mode=0（用户的无边框设置）在 `engine_config.txt`，运行中改文件会被游戏覆盖 ⇒
+让用户游戏内改或退出游戏后改，工具不碰；② "失焦不暂停"（用户想挂机）→ 战役侧时间保活，下一项做。
+
+
+### 5. §三十一补：失焦保活 bl_campaign_time（用户挂机需求，A/B 对照真机通过）
+
+需求原话：'AI 操纵游戏时切换窗口游戏不出暂停……一边玩单机一边打 lol'。
+机制：战役地图失焦时引擎把 Campaign.Current.TimeControlMode 改成 Stop。
+做法（每帧重申，与 fast_forward 同一先例）：CampaignProbe.Tick() 挂 OnApplicationTick，
+保活开着时发现 Stop 就恢复到失焦前档位；对话/菜单中（CurrentMenuContext != null）**不干预**
+（剧情强制暂停不能被破坏，这是安全阀）。
+
+- MCP：l_campaign_time（mode=status/on/off；status 回 keepAwake/timeControlMode/restores；
+  restores>0 = 发生过失焦暂停且被救回）。工具 37 → **38**。
+- 真机 A/B 对照（最小化窗口 15s 制造失焦）：
+  - A 组（off）：恢复后 	imeControlMode=Stop ✅（引擎确实失焦暂停）
+  - B 组（on）：StoppablePlay 保持、restores=1 ✅（第一帧救回，后台期间一直保持）
+- ⚠️ 语义：开着时**手动暂停也会被立刻解除**（这就是保活的本意）；对话/菜单暂停不干预。
+
+## [2026-09-27] §三十二 失焦"暂停菜单"的真凶：原版 StopGameOnFocusLost（v0.8.38，真机闭环）
+
+### 1. 需求收窄（用户原话纠正）
+用户 2026-09-27 深夜："我要的功能已经做出来了，我只要我切换窗口不出这个暂停界面就好了，游戏时间暂停不用改。"
+⇒ 需求 = **切窗口不弹暂停菜单**；时间档位/推进不用动。§三十一 的"时间保活"因此不是本题的解。
+
+### 2. 根因（三层，全部有反编译源码 + 真机读数）
+1. `MapScreen.OnFocusChangeOnGameWindow(false)`（SandBox.View 13964）：失焦且
+   `BannerlordConfig.StopGameOnFocusLost` 为真 ⇒ 自动 `OnEscapeMenuToggled(true)` ⇒ **暂停菜单被打开**。
+2. `OnEscapeMenuToggled(true)`（14885）里 `Game.Current.GameStateManager.RegisterActiveStateDisableRequest(this)`
+   ⇒ **MapState 不再 Tick ⇒ 战役整体冻结**（campaignDays 一动不动就是这条的指纹）。
+3. 这条路径**不改 TimeControlMode**（全程 StoppablePlay）⇒ §三十一 保活的判据
+   （"看到 Stop 就恢复"）**结构上看不见它** ⇒ 这就是"保活开着还是被暂停"的真正原因。
+
+### 3. 判据补全（v0.8.37 / v0.8.38：少一个都会误判）
+- `campaignDays`（v0.8.37）= `CampaignTime.Now.ToDays`。**TimeControlMode 不为 Stop 不等于时间在走**：
+  `Campaign.TickMapTime` 的 StoppablePlay 分支要 `!IsMainPartyWaiting` 才推进（Campaign.cs 848-853）。
+- `pauseMenuOpen`（v0.8.38）= `ScreenManager.TopScreen as SandBox.View.Map.MapScreen` → `IsEscapeMenuOpened`。
+  构建脚本为此显式加 `Modules\SandBox\bin\Win64_Shipping_Client\SandBox.View.dll` 引用
+  （它不以 `TaleWorlds.` 开头，原来的 glob 抓不到）。
+
+### 4. 真机 A/B（同一脚本 dayrate.py、同一台机、同一档 save001）
+改 `StopGameOnFocusLost` 之前（每天数都是 26044.6791 = 冻结）：
+
+| 步骤 | 前台 | timeControlMode | pauseMenuOpen |
+|---|---|---|---|
+| 有焦点 12s | 游戏 | StoppablePlay | False |
+| **失焦 12s** | 别的前台窗口 | StoppablePlay | **True** ← 失焦把它打开了 |
+| 有焦点 12s | 游戏 | StoppablePlay | **True** ← 切回来不会自动关 |
+| **失焦 25s** | 别的前台窗口 | StoppablePlay | **True** |
+| 有焦点 12s | 游戏 | StoppablePlay | **True** |
+
+关掉之后（同脚本重跑）：
+
+| 步骤 | 前台 | timeControlMode | pauseMenuOpen | campaignDays |
+|---|---|---|---|---|
+| 有焦点 12s | 游戏 | StoppablePlay | False | 26044.6791 |
+| **失焦 12s** | 别的前台窗口 | StoppablePlay | **False** | 26044.6791 |
+| 有焦点 12s | 游戏 | StoppablePlay | False | 26044.6791 |
+| **失焦 25s** | 别的前台窗口 | StoppablePlay | **False** | → **26044.7046（在走）** |
+| 有焦点 12s | 游戏 | StoppablePlay | False | 26044.7046 |
+
+判据两边都验过：同一脚本改前 B 段 +21.8s 就 `True`，改后 4 次失焦全程 `False`。
+
+### 5. 修法（零代码根治）
+`C:\Users\<你>\Documents\Mount and Blade II Bannerlord\Configs\BannerlordConfig.txt`：
+`StopGameOnFocusLost=False`（改前已备份 `BannerlordConfig.txt.bak_before_focus_20260927`）。
+- 游戏内同一选项：「当游戏窗口失去焦点时停止当前游戏」（`str_options_type.StopGameOnFocusLost`）。
+- ⚠️ 游戏退出时会按内存值重写该文件 ⇒ 运行中改无效，必须"退出游戏后改"或"游戏内改"。
+- 关掉后原版不再于失焦时打开暂停菜单，并且**不依赖** BlBridge 的任何保活。
+
+### 6. 本轮被纠正的两个错误归因（防再犯）
+- "保活已解决时间层、只差战役层" ⇒ 错：当时判据里没有 pauseMenuOpen，暂停菜单在判据里是隐形的。
+  教训与 §三十一补第 4 节同源：**判据不全时，"测不到"会被误读成"问题不存在"**。
+- "最小化不触发、必须真人 alt-tab" ⇒ 错：失焦事件确实在投递（rgl_log 有
+  `OnGameWindowFocusChange: False` + `TopScreen: NavalMapScreen`），当时只是判据看不见。
+
+### 7. 状态与数字
+- v0.8.38 已部署，dll sha256 `CB2F281175BF1B1D`；`build.ps1 -Deploy` 自动备份了旧 DLL。
+- 自测全绿；`check_repo_encoding.py` 99 个跟踪文件合规。
+- MCP 工具数不变（**38**）：本轮只给 `bl_campaign_time status` 加了 `campaignDays` / `pauseMenuOpen` 两个返回字段。
+- `bl_campaign_time mode=on`（时间保活）当前**关闭**：本修复不依赖它，且它会把"手动暂停"也顶掉。
+
+### 8. 遗留（用户明确不需要改，留档备查）
+失焦时战役时间的推进速率明显低于前台（实测失焦 25s 涨 0.0255 天、91s 涨 0.0274 天；主队"等待中"时
+StoppablePlay 本就不推进）。用户 2026-09-27 明确"游戏时间暂停不用改" ⇒ 不改。
+
+## [2026-09-27] §三十三 按用户要求移除"时间保活"（v0.8.39，真机双向判据）
+
+### 1. 用户要什么
+"你把那个时间暂停的修改改回来昂 那个我不需要"（承接 §三十二 用户原话："我只要我切换窗口不出这个
+暂停界面就好了，游戏时间暂停不用改"）⇒ 撤掉 BlBridge 对游戏时间档位的**任何写操作**，只留只读诊断。
+
+### 2. 撤掉了什么
+- `src/CampaignProbe.cs`：删除 `_keepAwake` / `_lastMode` / `_restores` 与 `Tick()`
+  （§三十一 那套"每帧把 Stop 恢复回原档位"）。
+- `src/SubModule.cs`：`OnApplicationTick` 不再调用 `CampaignProbe.Tick()`（其余命令泵/看门狗不动）。
+- `campaign_time` 从 **write 变 read**：`CommandPump.cs` 注释、`bl_mcp.py` 描述+入参（enum 只剩 `status`）、
+  `gabp_names.json`（kind=read）、`README.md` 工具表同步。
+- 传 `mode=on/off` **显式失败**：MCP 层 code=`keep_awake_removed`；直接走控制通道由 C# 同样拒绝（不静默失效）。
+- 返回字段去掉 `keepAwake` / `restores`，保留 `inCampaign` / `timeControlMode` / `inMenuContext` /
+  `campaignDays`（v0.8.37）/ `pauseMenuOpen`（v0.8.38）。
+
+### 3. 真机双向判据（v0.8.39 部署后）
+
+| 入口 | 输入 | 结果 |
+|---|---|---|
+| MCP 层 | `status` | `{"ok":true,"inCampaign":true,"pauseMenuOpen":false,"timeControlMode":"Stop","inMenuContext":false,"campaignDays":26044.6791}` ✅ |
+| MCP 层 | `mode=on` | `ok=false / code=keep_awake_removed` ✅ |
+| MCP 层 | `mode=off` | 同上 ✅ |
+| 直连控制通道 | `campaign_time {mode:on}` | 信封 ok=false、里层 code=`keep_awake_removed` ✅（绕过 MCP 层也被拒） |
+| 直连控制通道 | `campaign_time {}` | 与 status 同形 ✅ |
+
+### 4. 保留了什么 / 为什么
+只读字段 `campaignDays` + `pauseMenuOpen` 保留：它们是 §三十二 定位"暂停菜单"的判据，删掉就会退回
+"测不到 = 问题不存在"的老坑。若用户连只读诊断也要去掉，只需删 CampaignProbe 里那两行 JSON 拼接。
+
+### 5. 状态
+- v0.8.39 已部署，dll sha256 `6C05C6E101BE2A99`；旧 DLL 由 `build.ps1 -Deploy` 自动备份。
+- 四道校验全绿：自测 / 命名表（7 条判据，`campaign/time` 已是 kind=read）/ 派发表 38=38=38 / 编码 99 文件合规。
+- ⚠️ 与 §三十二 的关系：本次回退**没有触碰**治"切窗口弹暂停菜单"的那一项
+  （`Configs\BannerlordConfig.txt` 的 `StopGameOnFocusLost=false`），那是用户真正要的修复，仍在生效。
+
+
+---
+
+## [2026-10-05] §三十四 EBT 拆件：装备修饰符遥测 + 战术档位 + 环境旋钮（v0.8.41）
+
+> 起点不是"想加功能"，而是一次外部评估：`G:/mods/EnhancedBattleTest`（EBT v4.2.1，
+> 上游 `github.com/lzh-mb-mod/EnhancedBattleTest` HEAD `20d27cb`）**能不能加强 BlBridge**。
+> 结论：**不能当运行时后端**（EBT 整套开战链建在 campaign 上：`PartyBase`/`MapEvent`/临时 `MobileParty`/
+> 英雄身份替换/`SaveGuard` 禁存档；而 BlBridge 建在 CustomBattle 无战役分支上），
+> 但**能拆件**。本节点落地了其中三项**零 Harmony** 的部分。
+> 完整评估（含逐条取证与证据强度）见工作区 `EBT-to-BlBridge-评估-2026-10-05.md`。
+
+### 1. `equip` 事件 —— 先把 §十五 那个悬案结账
+
+**要纠正的既有结论**：§十五 写「`armorBody` 是确定性的（3/3 逐场一致）⇒ **不是随机 modifier**」。
+**这条推断不成立**：`AgentBuildData.AgentEquipmentSeed` 来自 `IAgentOriginBase.Seed` / `UniqueSeed`，
+种子若每场确定，则由它抽出的随机 modifier **同样每场一致** ⇒ "3/3 一致"分辨不了
+「没有 modifier」与「**种子确定的** modifier」，而后者是随 **agent 序号**漂移的隐藏变量。
+
+**做法（零 Harmony）**：新增 `t="equip"` 事件，每个 agent 一条，落 `Agent.SpawnEquipment` 的逐槽
+`{i, slot, item, mod, modName, modArmor, modDamage, modSpeed, modHitPoints}`。
+
+- **为什么不塞进 `ai` 事件**：`ai` 的字段集合已被既有分析脚本按 key 消费，加 12 个槽位会把它撑成两种东西。
+  新开一个事件类型 ⇒ 旧事件逐字节不变（GC2）。
+- **判别判据**（拿到数据一眼可判，不用改代码）：同一 `troop`、同一场、**不同 agent 的 `mod` 是否各不相同**。
+  不同 ⇒ 随机 modifier 成立；全 `""` ⇒ 该路径确实不加，换装路线可继续。
+- **`modArmor` 就是能解释"同一件 XML 甲、运行时护甲值不同"的那个数**：反编译取证
+  `ItemModifier.ModifyArmor(int armorValue) => Math.Max(armorValue + Armor, 1)`
+  ⇒ **修饰符对护甲的贡献是纯加法**。`ItemModifier` 的 `Armor` 是 `int`（不是 float，别被名字骗）。
+- 槽位上限用 `EquipmentIndex.NumEquipmentSetSlots`（= 12，反编译取证），只写有物品的槽。
+- 数据源是 `Agent.SpawnEquipment`（入场静态装备），**不是** `Equipment`（`MissionEquipment`，带耐久/装弹）。
+
+### 2. 战术档位：`attackerTacticLevel` / `defenderTacticLevel`
+
+**引擎真身（反编译取证）**：`CustomBattleCombatant.GetTacticsSkillAmount()`
+`= _characters.Max(h => h.GetSkillValue(DefaultSkills.Tactics))`；
+`MissionCombatantsLogic.EarlyStart` 拿它**分 20 / 50 两档**决定给该方挂哪些 `TacticOption`：
+`<20` 只有 `TacticCharge`；`>=20` 追加 `TacticFullScaleAttack`（守方另 `TacticDefensiveEngagement`/`TacticDefensiveLine`；
+攻方另 `TacticRangedHarrassmentOffensive`）；`>=50` 再追加 `TacticFrontalCavalryCharge`
+（守方另 `TacticDefensiveRing`/`TacticHoldChokePoint`；攻方另 `TacticCoordinatedRetreat`）。
+⇒ 这就是 EBT README 所说"战术等级 0-20 / 20-50 / 50+"的**引擎真身**。
+
+**为什么以前没发现这条维度**：`ScenarioProbe.ApplyCharge()` 会 `ClearTacticOptions()` 只留 `TacticCharge`
+（v0.7.3 为消除"攻方冲、守方站"的方向偏差而做）⇒ 整条"战术随战术技能分档"被抹掉。
+**所以：默认 `orders=charge` 时档位看不出效果，要看效果必须配 `orders=default`**（已写进工具描述与 README）。
+
+**实现 `src/TacticsCombatant.cs`**：一个只读包装（`IBattleCombatant`），只在请求了档位时才包。
+取证两条：① `CustomBattleCombatant` 非 sealed，但 `GetTacticsSkillAmount` 是 **virtual final**（子类无法覆盖）；
+② `MissionCombatantsLogic` 的 4 个 ctor 参数**声明类型全是 `IBattleCombatant`**，全类**无下转型** ⇒ 包装不会 InvalidCast。
+`CustomBattleMissionSpawnHandler` 仍拿**未包装**的 `CustomBattleCombatant`（它的参数类型是具体类）。
+
+**档位域**：`-1`（不覆盖）或 `0..100`；越界**显式报 `bad_tactic_level`**（静默接受 999 会做出"看起来设了、其实等于 100"的实验）。
+`status`/响应/`meta` 同时给**请求值**与**引擎原生值**（`aNative`/`dNative`），否则覆盖值无法与原生值对照。
+
+### 3. 环境旋钮（只做**已核标量字段**）
+
+| 参数 | 落到 | 未传时 |
+|---|---|---|
+| `terrain` | `MissionInitializerRecord.TerrainType` | **-1**（引擎按场景决定，= 改动前的值） |
+| `randomTerrainSeed` | `RandomTerrainSeed` + **同时开** `NeedsRandomTerrain` | 0 / false |
+| `aiFriendlyFireMultiplier` | `DamageToFriendsMultiplier`（默认 1f） | 不写 |
+| `keepCorpses` | `DisableCorpseFadeOut` | 不写 |
+| `sceneLevel` | 攻城 `sceneUpgradeLevel`（原本写死 3） | 3 |
+| `timeOfDay` | 攻城 `timeOfDay`（原本写死 6f） | 6f |
+
+- 地形名取 `TaleWorlds.Core.TerrainType` **全表 23 项**（小写）；非法名**显式报 `bad_terrain` + 候选清单**，
+  不静默兜底成 plain。**`bl_common.TERRAINS` ↔ `src/BattleEnv.cs` 的 `TerrainTable` 由自测 ⑭ 双向对账**（防两表漂移）。
+- ⚠️ **攻城路径不支持前四项**（走官方 `OpenSiegeMissionWithDeployment`，它自建 record）⇒
+  传了会被**显式忽略**并进 `envNotes`（响应与 `status` 都有）。**不静默是刻意的** ——
+  "参数写了没生效"是本项目最贵的一类坑（2026-09-24 曾因此废掉 9 场实验）。
+- ⚠️ **时刻/天气/雾没做**：`AtmosphereInfo` 是 `TaleWorlds.Library` 的 ValueType，含
+  Sun/Rain/Snow/Ambient/Fog/Sky/Nautical/Time/Area/PostPro **十个子结构 + `IsValid`**；
+  手搓一份要把子结构全部核清，核错就是黑屏或原生崩溃（EBT 是自己写了 100 行 `AtmosphereModel` 才做到的）。
+  ⇒ 留待专门取证，**本轮不猜**。
+- `IntOrQuoted()`：新参数**同时接受**裸数字与带引号字符串 —— 与 `Jmini.Bool` 收两种形态同源
+  （v0.8.14 真机踩到 `spectate` 被静默丢弃）。**不动 `Jmini` 本体**，只给新参数用。
+
+### 4. 顺带修掉的两处**既有红灯**（不是本次引入，但挡着绿灯）
+
+1. `bl_selftest` 的 `len(tools) == 44`：源码 `TOOLS` 已是 **45**（v0.8.34 的 5 个 + v0.8.40 的 7 个 + 现状），
+   断言没跟上；而生产配置 `BLBRIDGE_TOOLSET=core+config+lab` 下只有 41 个 ⇒ **这条判据两头都不符，等于谁也没在守**。
+   ⇒ 改为**与源码 `TOOLS` 对账**（AST 取字面量，与 `bl_check_dispatch.py` 同一套做法），数字不再手工维护。
+2. `bl_check_gabp_names` C1 缺 `bl_blockade`：补 `config/blockade`
+   （离线只读计算 + `action=emit` 落盘 `map_blockades.xml`，读写靠 action 区分 ⇒ 用名词短语）。
+
+另外：`bl_mcp.py` 的 `TOOLS` 里 **`terrain` 的说明必须是纯字面量** ——
+`bl_check_dispatch.py` 用 `ast.literal_eval(TOOLS)` 做静态核对，任何表达式（`+` / `.join()`）
+都会让它当场报 `malformed node or string`（**本次实测踩到并已修正**）。
+
+### 5. 验证（全部离线可复现）
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 编译 | `build.ps1 -Deploy` | EXIT=0，**0 警告**，`out\BlBridge.dll` 194.5 KB；dll sha256 `C8896DD41E58E836…`；旧 DLL 备份 `BlBridge.dll.bak_20261005_035732` |
+| C# 单测 | `tools\jsontest\build_and_run.ps1` | **全部通过**（仅既有的 `SquadSpec.cs` 三处 CS0649 警告） |
+| Python 自测 | `tools\bl_selftest.py` | **全部通过**（含新增 ⑭：terrain/档位校验器 + C#↔Python 表对账） |
+| 命名表 | `tools\bl_check_gabp_names.py` | 7 条判据全过（27 method / 45 tool / 12 category） |
+| 派发表 | `tools\bl_check_dispatch.py` | 声明 45 / 派发 45 / 分组 45，全过 |
+| 链条 | `bl_cmd.py buildcheck` | `code=game_offline`、`builtVersion=0.8.41`、`deployedSha256=c8896dd41e58e836`、文件链条一致 |
+
+### 6. 待真机验证（**未做，不许写成已验证**）
+
+1. **包 `TacticsCombatant` 后 `MissionCombatantsLogic` 是否真的接受** —— 静态取证（参数声明类型 + 全类无下转型）
+   支持它安全，但**没在真机跑过**。一次 `start` 就能判：若抛 `InvalidCastException`，`Start` 的 try/catch
+   会返回 `open_failed` + 异常名。**不传该参数时行为逐字节不变**（风险被 opt-in 框住）。
+2. **档位 0 vs 60 是否真的分岔**：配 `orders=default` 跑两场，看 `AIStateFlags` / 接战时刻分布 /
+   `order` 事件里的 tactic 名是否出现 `TacticFullScaleAttack` 等。
+3. **`equip` 事件在真机是否落得下来**（`OnAgentBuild` 之后 `SpawnEquipment` 是否已填好）——
+   当前从状态采样处触发（首见 agent 时），理论上已就绪，但**要一次真机确认**。
+4. `terrain=snow` 是否真的改变可观测行为（移动/命中）—— **别直接断言，跑 A/B**。
+
+### 7. 未做 / 明确不做
+
+- **不装 EBT 当后端**：理由见开头四条的任一条；EBT 一开战**禁存档**，与"删模块即完全回退"的性质冲突。
+- **不碰 `Mission.SpawnAgent` patch**：EBT 用它强制 `ItemModifier = null`，能彻底消掉装备随机，
+  但会破 BlBridge「**不 patch 任何方法**」的设计承诺 ⇒ 这是项目级决策。
+  **闸门**：先看 `equip` 事件的判别结果，**只有证明混杂源真的存在**才值得动这一刀。
+- 攻城机械清单 / 破墙数：EBT 有，我们暂不加 —— 攻城当前仍是已知崩溃区（`SiegeTrace` 那条线），
+  **先修崩再加旋钮**。
+
+---
+
+## [2026-10-05] §三十五 动作账本（v0.8.42）—— 学 Bannerlord.GameMaster 的 `CommandLogger`
+
+### 0. 这一节的来源
+
+§三十四 的评估里给 GameMaster 打了两条"值得学"，本节落地第一条：
+**每条命令一行、追加写、可轮转的动作流水**。
+两个**互相独立**的项目收敛到同一件事 ⇒ 这不是口味问题：
+- `Bannerlord.GameMaster/Console/Common/Execution/CommandLogger.cs`：`Timestamp / Command / Status SUCCESS|FAILED / output`，
+  落 `Documents\...\Configs\GameMaster\command_log_<ts>.txt`，**只留最近 5 个文件**（`MAX_LOG_FILES = 5`），
+  缓冲队列 + 1 秒 Timer 刷盘 + `ForceFlush()`；异常**无条件**写 RGL、自定义文件按开关。
+- `TAOM_CheatPanel.Runtime.RecentActionsLog` + `RecentActionEntry`：模组自己的动作流水，且**对用户可见**
+  （字符串实证：`"Cheat settings changed for this session, but could not be saved. See Action History."`）。
+
+### 1. 缺口（取证，不是感觉）
+
+`CommandPump.HandleOne` 把 `id` / `method` / 错误码 / 异常全算出来了，然后：
+
+```csharp
+WriteResponse(id, response);   // → done/<id>.json（同 id 再来会 File.Delete 覆盖）
+SafeDelete(path);              // → 把 pending 请求本身删掉
+```
+
+⇒ **一次请求处理完，磁盘上什么都不剩**。同 id 覆写、pending 被删、done 由外部消费。
+"我到底下过什么命令 / 哪条被拒了 / 花了多久" 全靠 battle 日志反推。
+另有 `Pump()` 的 `catch { }` **完全静默** —— 巡目录失败的表现只是"命令没反应"。
+
+### 2. 实现
+
+**新增 `src/ActionLedger.cs`**（约 190 行含注释），落 `<LogDir>\commands\actions.jsonl`，一行一请求：
+
+| 字段 | 含义 |
+|---|---|
+| `t` / `seq` | UTC 时间戳 / **进程内单调序号**（判丢行与写者交错，比时间戳可靠） |
+| `runToken` | 游戏进程会话（`Protocol.RunToken`）⇒ 账本能按会话分组 |
+| `id` / `method` | 请求 id / 方法名（拒绝路径上 method 可能为空） |
+| `ok` / `code` | 成功与否 / 失败码 |
+| `ms` / `bytes` | 处理耗时 / 请求文件大小（读不到 -1） |
+| `uncertain` | 协议里的 `outcomeUncertain`（true ⇒ 外部绝不盲目重试） |
+| `note` | 成功时 `state=<状态>`；失败时错误消息（截断 300） |
+| `args` | 请求参数片段（截断 600；账本是**索引**不是副本） |
+
+**接线在 `CommandPump`**，关键取舍：**一个判定分支都不改**（GC2）。做法是在 `HandleOne` 末尾
+用 `Jmini` **从已组装好的响应里反读** `ok` / `code` / `message` / `state`：
+
+```csharp
+bool ok = Jmini.Bool(response, "ok", false);
+string code = ok ? "" : Jmini.Str(response, "code", "");
+string note = ok ? ("state=" + Jmini.Str(response, "state", "")) : Jmini.Str(response, "message", "");
+ActionLedger.Record(id, method, ok, code, ms, bytes, uncertain, note, ArgsSnippet(raw));
+```
+
+⇒ 拒绝路径（过大/id 非法/版本不符/过期/未知方法/处理器异常）**全都自动进账本**，不需要逐个分支加代码。
+唯一的结构改动：把 `string method` 从内层 `else` 提到 `HandleOne` 顶部（原来是块内声明），
+因为账本要把它带出来。
+
+**两条"故意不抄"**（写清楚，免得下个会话以为漏了）：
+1. **不抄缓冲队列**：GameMaster 用 `ConcurrentQueue` + 1s Timer，那是它控制台 UI 线程的高频写决定的。
+   我们的写入上限是**泵的 4 Hz**（`PollInterval` = 250ms）⇒ 每条 `File.AppendAllText` 直接落盘，
+   反而让"崩溃前最后几条请求"更容易保住 —— 那恰恰是账本最该保住的部分。
+2. **轮转默认关闭**：`maxActionLogBytes` 默认 **0 = 不轮转**。GameMaster 是无条件只留 5 个文件；
+   但 `battles/` 是**实验数据**（60+ 场历史要留着做对比），账本是**过程记录**。
+   ⇒ 两者默认策略**故意相反**：battle 日志永不自动删（没实现），账本"你显式开了才删"。
+   开了之后只留 `actionLogKeepFiles`（默认 5）个归档。
+
+**异常第二出口**：外层 catch 与 `Pump()` 的静默 catch 都改成
+`ActionLedger.ExceptionToRgl(...)` → 引擎的 `TaleWorlds.Library.Debug.Print`。
+理由：走到那里说明连读文件/判大小都失败了，而那时 `<LogDir>` 很可能本身不可写
+⇒ 自定义账本写不进去，`rgl_log_<pid>.txt` 是唯一还能留痕的地方。
+
+**配置新增**：`maxActionLogBytes`（0 或 1024~1GiB；0~1024 之间**显式拒绝**，否则每几行轮转一次等于垃圾场）、
+`actionLogKeepFiles`（1~100）。`EffectiveJson()` 同步加这两个键。
+
+**读侧**：`bl_common.load_actions()` + `bl_cmd.py actions [--limit N] [--fail-only] [--json] [--path …]`。
+`load_actions` 的口径**故意与 `load_events` 相反**：坏行**计数 + 带出原文**，不静默跳过 ——
+v0.8.4 的非法 JSON 正是靠静默活下来的。
+
+### 3. 顺带修掉的两个真问题
+
+1. **`bl_common.default_log_dir()` 不读 `BLBRIDGE_LOG_DIR`**：`bl_mcp.py:69` 一直在读它，
+   而 `bl_common` 不读 ⇒ "设了变量跑 MCP/自测"与"跑 CLI 子命令"看到**两个不同目录**。
+   自测里本来就有几处 `os.environ["BLBRIDGE_LOG_DIR"] = ...`（合成战斗那段），
+   在 `bl_common` 不读它的时候那些设置只对 MCP 生效。已统一到一处口径。
+2. **`load_actions` 自己被抓到的崩溃**：自测 ⑮ 用合成的 `[1,2,3]` 行（**合法 JSON 但不是对象**）
+   当场把 `ev.get()` 打成 `AttributeError` —— 一个"读审计日志"的动作变成崩溃。
+   已加 `isinstance(ev, dict)` 守卫并计入坏行。**这条是测试抓出来的，不是想出来的。**
+
+### 4. 验证（六道门全绿）
+
+| 门 | 结果 |
+|---|---|
+| `build.ps1 -Deploy` | EXIT=0，**0 警告**，198 KB；dll sha256 `A3A9DCB578E93899…`；旧 DLL 备份 `BlBridge.dll.bak_20261005_041355` |
+| `tools\jsontest\build_and_run.ps1` | **全部通过**（仅既有 `SquadSpec.cs` 三处 CS0649） |
+| `bl_selftest.py` | **全部通过**（新增 ⑮：账本读侧口径 + **`src/ActionLedger.cs` 写侧 12 字段与读侧期望集双向对账**） |
+| `bl_check_gabp_names.py` | 7 条判据全过（27 method / 45 tool / 12 category） |
+| `bl_check_dispatch.py` | 声明 45 / 派发 45 / 分组 45 |
+| `check_repo_encoding.py` | 106 文件合规（UTF-8 无 BOM + LF） |
+| `bl_cmd.py buildcheck` | `builtVersion=0.8.42`、文件链条一致、`code=game_offline` |
+
+### 5. 待真机验证（**未做**）
+
+1. 重启游戏后，跑一条 `bl_cmd.py ping` / `status`，核对 `commands\actions.jsonl` 是否落行、
+   字段是否齐全（`ok/code/ms/bytes/note`）。
+2. 故意发一次**必然失败**的请求（如 `bl_cmd.py start --attacker nosuch_troop --defender nosuch_troop`），
+   核对账本里出现 `ok=false` + `code=unknown_troop`，且 `ms`/`args` 合理。
+3. `bl_cmd.py actions --fail-only` 与 `--limit` 的实际输出形状。
+4. 配 `maxActionLogBytes` 后轮转是否发生、归档是否按 `actionLogKeepFiles` 裁剪（可离线造假文件验）。
+
+### 6. 未做（下一步候选，仍是 §三十四 里列的）
+
+- **响应信封构造器**（学 `CommandResult : ResultBase<>`）：把 `StatusJson` / `*Json()` 的手拼字符串
+  收敛到一个构造器。本节点**没有动**它 —— 它是大范围重构，风险与收益都要单独评估。
+  ⚠️ 但本次顺手暴露了一个更便宜的洞：**自测并不校验"每个响应都是合法 JSON"**。
+  加这条断言成本极低，且正好能替 §三十四 里那个 P0 兜底。
+- `EntityFinderResult` 式统一查找结果、`*Safety`/compat 垫片命名约定、发布流水 —— 均未动。
+
+---
+
+## [2026-10-05] §三十六 真机验证 T1–T5 + 修掉「错的客户端」+ 一处既有缺陷（v0.8.42）
+
+> 执行者：dsh-agent。游戏 v1.4.8.119303，会话 pid 19416（`runToken=44230207dd02`），
+> 完整报告：`C:\Users\LCGX\WorkBuddy\2026-10-05-03-35-59\T1-T5-真机验证报告-2026-10-05.md`。
+
+### 1. ★ 先决修复：`bl_launch.ps1` 给的是「错的客户端」
+
+**§三十五 §5 那 4 条待验之所以一直做不完，根因是启动器根本没加载对模块。**
+
+`tools/bl_launch.ps1` 的模块清单是**硬编码**的，与用户 `Configs\LauncherData.xml` 的实际勾选失配 **6 项**：
+缺 `RBM` / `RBM_WS` / `BattleSizeResized`；多出**磁盘上已不存在**的 `Warbandlord`
+（`Modules\Warbandlord` 只剩 `config.xml`、无 `SubModule.xml` ⇒ 引擎**静默跳过**）。
+
+**唯一可靠判据 = rgl 日志的 `Loading assembly:` 行**：改前连续 5 次启动**每次都只有 `BlBridge.dll`、
+从未出现 `RBM.dll`**；官方启动器那次（pid 35852）载入了 `RBM.dll` 并存活 21 min。
+
+**修复**：`$mods` 改为**从 `LauncherData.xml` 现场派生**；exe **保持 `Standalone.exe`**
+（无须界面 ⇒ 保住无人值守）；另加「清单点名但磁盘上没有」的显式 WARNING。
+**验证**：派生清单与官方那次 `Command Args` 经 `Compare-Object -SyncWindow 0` → **44/44 逐项同序零差异**；
+修后 pid 19416 立即载入 `RBM.dll`。
+
+**两条勘误**（都影响后续排查方向）：
+- `BLSE_lasterror.log` 的 `Modules directory not found!` **不是病因**（mtime 早近一个月，且同批启动里
+  `BlBridge.dll` 等都成功载入）。
+- **不要改用 `Bannerlord.BLSE.Launcher.exe`** —— 那个 exe **就是官方启动器 UI 本身**
+  （反编译 `Program.BLSE.Shared.Program.Main`：自己前缀 `args[0]="launcher"` 再转发），
+  换来"清单对了但要人按 PLAY"，且合成点击到不了 Gauntlet。
+
+> 已入知识库：`[[blse]]`（`E:\ObsidianDocument\entities\blse.md`）+ 快照
+> `raw/transcripts/dsh-agent-blse-launch-modes-2026-10-05.md`。
+
+### 2. T1–T5 结果
+
+| # | 项 | 结果 |
+|---|---|---|
+| T1 | 账本失败路径 | ✅ `unknown_scene` 落账本（`FAIL start_battle unknown_scene 3.0014`）；`--fail-only`/`--limit` 实形核对通过；解析失败 0。⚠️ 配方**须补 `allowAnyState=true`**，否则先被 `wrong_state` 拦（官方入口落到 `NavalCustomBattleState`） |
+| T2 | `equip` + §十五 | ⚠️ 事件落得下来（20 agent × 9 槽，`bodySeed` 逐人不同）；**180/180 槽 `mod` 全空**且 `modName`/`modArmor` 键**一个都没出现** ⇒ `ItemModifier` 真为 `null`（接线正确，`:700-708` 读的就是它）。**样本仅 1 场**，未定论 |
+| T3① | 档位被引擎接受 | ✅ **通过**：`aRequested=60/dRequested=0`、`accepted`、**无 InvalidCast** ⇒ v0.8.41 唯一风险点解除 |
+| T3② | 档位是否分岔 | ❌ **不足以区分**（A 组 n=4 均 336.0/sd 175.6 vs B 组 n=4 均 376.0/sd 241.9，**t=0.268**） |
+| T4 | 环境旋钮 | ✅ `terrain=snow`/`terrainSeed=7`/`friendlyFire=0`/`keepCorpses` 全落 meta；⚠️ **行为效应未测** |
+| T5 | 账本轮转 | ✅ **17/17**，且驱动的是**真实 `ActionLedger.cs`** |
+
+### 3. ★ 本轮唯一真实缺陷发现：`order` 事件的 `tactic` 恒为 `"none"`
+
+`ScenarioRunner.cs:2330` 写的是 `string tactic = "none";`，**此后从未重新赋值**，
+第 2369 行原样写进事件 ⇒ **所有 `order` 事件的 `tactic` 字段无意义（占位）**。
+
+另有一处**结构性不可达**（同一条判据的第二重障碍）：`order` 事件**只在 groups 路径写**
+（`:2312-2314`），而 groups 路径的 `ApplyOrders` 无条件 `ClearTacticOptions()` +
+`AddTacticOption(TacticCharge)`（`:1792-1793`）⇒ 档位效果被自己抹掉，
+`order` 里**永不可能**出现 `TacticFullScaleAttack`。
+
+⇒ 所以交接 §6 的 T3② 判据（"看 `order` 的 tactic 名"）**从一开始就测不出东西**，两个独立原因各自足够致命。
+**这是既有缺陷（`order` 事件 v0.8.13 引入时就存在），非 v0.8.41/42 引入。**
+`order` 的 movement order 字段不受影响。**未修**（修法见 §4）。
+
+### 4. T5 的做法（值得照抄）与两条环境注记
+
+**不重写轮转逻辑来测**（那验的是副本）—— 直接编译**真实的** `src/ActionLedger.cs` + `BridgeConfig.cs`
++ `BridgeProtocol.cs` + `BuildInfo.cs` + `JsonlWriter.cs` + `Jmini.cs` + `BridgeConfigFile.cs`
+（全部纯 BCL），只把 `BridgeConfig._logDir` 这个**缓存字段**用反射指向临时目录。
+harness：`E:\Document\t5-ledger-rotation\{LedgerRotationTest.cs, Shims.cs, build_and_run.ps1}`
+（`Shims.cs` 只补 `TaleWorlds.Library.Debug.Print` 与 `CommandPump` 的两个路径助手，
+轮转/裁剪/格式化**全走出货代码**）。
+
+**环境注记**：① 本机**新编译的 `.exe` 会被拒绝执行并被 Defender 隔离**，而 `Assembly.LoadFrom` 加载 DLL 正常
+⇒ harness 编译成 **DLL** 在进程内跑。② `BridgeConfigFile.Apply` 只在 **SubModule 加载时**读一次
+（`SubModule.cs:54`）、**不热重载** ⇒ 真机改 `blbridge_game.json` 必须重启游戏。
+
+### 5. 下一步（未做，按优先级）
+
+1. **给 `order` 事件补真实 tactic 读取**（顺带清掉 §3 的占位缺陷）—— 这是解锁 T3② 的唯一路径。
+2. **T4 的行为效应**：`terrain=snow` vs 默认 做 A/B，看移动/命中是否变（不要直接断言）；
+   攻城路径另验 `envNotes` 应显式报出"前四项被忽略" + `sceneLevel`/`timeOfDay` 生效。
+3. **T2 补样本**：不同兵种（含重甲）各 2–3 场，看 `mod` 是否仍然全空。
+4. 计划任务 vs `Start-Process` 的**同源因果对照实验**（现象一致但未做对照）。
+5. §三十五 §6 那条便宜的洞仍在：**自测不校验"每个响应都是合法 JSON"**，值得补。
+
+---
+
+## [2026-10-05] §三十七 T3②/T4/T2 补测（v0.8.43）：修两处既有缺陷，挖出「RBM 下档位是空操作」
+
+> 执行者 dsh-agent。游戏 v1.4.8.119303，会话 pid 30164 / 36324。完整报告见工作区 `T1-T5-真机验证报告-2026-10-05.md` §8–§12。
+
+### 1. 修掉两处**既有**缺陷（都为"能观测"服务）
+
+| # | 缺陷 | 修法 |
+|---|---|---|
+| 1 | **`order` 事件的 `tactic` 恒为 `"none"`** —— `ScenarioRunner.cs` 的 `string tactic = "none";` 此后从未重新赋值，原样落盘 ⇒ 该字段是**占位**，交接里"看 order 的 tactic 名判断档位分岔"那条判据**永远测不出东西**（自 `order` 事件 v0.8.13 引入时就在） | 反射读 `TeamAIComponent._availableTactics` / `_currentTactic`（本仓库既有反射先例）。**三态可分辨**：`(unknown)` 读不到 / `(none)` 确实没有 / 真实名 |
+| 2 | **攻城场次 meta 谎报未应用的 env 参数** —— 同一场里 `envNotes` 说"terrain 已被忽略"、`meta` 却写 `terrain:"snow"`，**两处对同一事实相反**（`BattleEnv` 状态在攻城路径未复位） | 攻城路径记 `envNotes` 的同时 `BattleEnv.Reset()`，meta 如实写 `""/-1/-1`。真机验证：回包 `env` 由 `{"terrain":"snow"}` → `null`；落盘 meta 由 `'snow'` → `''` |
+
+另新增 **`tactics` 事件**（每 5s 每方一行，`requested` + `actual`）：因为 `orders=default` 且**不带 groups** 时
+`order` 事件一条都不写（它只在 groups 路径产生，而 groups 路径会 `ClearTacticOptions()` 只留 `TacticCharge`）
+⇒ 档位 A/B **整场没有任何观测出口**。触发条件限定为「请求过档位」（v0.8.41 才有的参数、默认 -1）
+⇒ **GC2 实测成立**（不传档位时 0 条事件）。
+
+**版本 v0.8.42 → v0.8.43**，已 build + deploy（`4209af2dda2ccd9a`），五道门全绿。
+
+### 2. ★ 决定性发现：**装了 RBM 时，战术档位是空操作**（归属 RBM，非本仓库缺陷）
+
+**换边自对照**（强于统计）：
+
+| 场次 | 攻方 requested | 守方 requested | 攻方 `actual` |
+|---|---|---|---|
+| 实验 | **60** | 0 | `RBMTacticEmbolon`+`TacticFullScaleAttack`+`TacticCoordinatedRetreat` |
+| **换边** | **0** | **60** | **逐字相同** |
+
+攻方档位 60→0，战术集**一字未变**。
+
+**根因（反编译确证）**：
+- 引擎 `MissionCombatantsLogic.EarlyStart` **确实**按 `GetTacticsSkillAmount()` 分 20/50 两档 —— 而 `TacticsCombatant` 覆盖的正是这个值 ⇒ **纯原版下档位生效**。
+- RBM `RBMAIPatcher.cs:26-28` 对**同一方法**挂**纯 Postfix**；该 Postfix（`Tactics/Lifecycle.cs:62-111`）**无条件 `team.ClearTacticOptions()`**，再**只按 `BasicCulture.StringId` + `team.Side`** 重建。
+- 全 RBM 上游 grep `GetTacticsSkillAmount` → **零命中** ⇒ 档位这个自变量**没有任何代码路径会读它**。
+
+⇒ 也解释了上一轮 **T3② t=0.268**：当时判"样本不足"只对了一半，更根本的是**自变量没接上**。
+**RBM 侧已由项目负责人接手。**
+
+### 3. T4 补测
+
+- **T4a `terrain` 行为效应**：A/B 各 3 轮，**无可测差异**（胜负同为 58:0，命中/伤害/速度同分布）。
+  **机制（唯一消费者）**：`SandboxAgentStatCalculateModel.cs:1556-1566` —— `Mission.TerrainType`
+  **只决定队长是否吃到 `Tactics.ExtendedSkirmish`(Snow/Steppe) 或 `DecisiveBattle`(Plain/…)**，
+  进而只改 `MaxSpeedMultiplier`。被测兵种不带这些 Perk ⇒ 分支恒不触发 ⇒ **本来就该没差异**。
+  ⚠️ 所以 `terrain` **不是无效参数**，是"只在特定队长 Perk 组合下才影响数值"。
+- **T4b/c 攻城 `envNotes`**：✅ 明确列出被忽略的四项 + 原因（官方 `OpenSiegeMissionWithDeployment` 自建 record）。
+  ⚠️ **`sceneLevel`/`timeOfDay` 是否生效未验**。
+- **⚠️ 一次不可复现崩溃**：旧构建跑攻城时 `0xC0000005`（`rgl_log_errors_14804.txt`）。**做了隔离**：
+  同场景不传 env ✅ 正常；**传同一组 env 复跑也 ✅ 正常** ⇒ **不可复现**。
+  是否与本轮改动有关**未定**，按纪律**不写成"已排除"**。
+
+### 4. T2 补样本 —— 结论显著加强
+
+**12 场 / 461 个 `equip` 事件 / 4149 个槽位 / 3 兵种 / 71 个不同 `bodySeed`**：
+**非空 `mod` 仍为 0**，且 `modName`/`modArmor`/`modDamage`/`modSpeed`/`modHitPoints` 键**一次都没出现**
+（`TelemetryBehavior.cs:709` 仅在 `mod != null` 时写）⇒ `EquipmentElement.ItemModifier` 恒为 `null`，**跨兵种成立**。
+§三十六 §2 的样本量保留意见**已解除**。
+
+### 5. 下一步（未做，按优先级）
+
+1. **纯原版（`excludeModules` 排除 RBM）下复测档位** —— 坐实"引擎那条链本身是好的"。
+2. **`sceneLevel` / `timeOfDay` 是否生效**（攻城路径）。
+3. `randomTerrainSeed` / `aiFriendlyFireMultiplier` / `keepCorpses` 的**行为效应**（本轮只验落盘）。
+4. 那次 `0xC0000005` 的定性（需更多复现尝试或更长跑批）。
+5. 计划任务 vs `Start-Process` 的同源因果对照；§三十五 §6 的"响应 JSON 合法性"断言。
+
+---
+
+## [2026-10-05] §三十八 纯原版对照：档位确实生效 ⇒ 锁定 RBM 侧 + 一条影响面更大的方法论
+
+> 执行者 dsh-agent。环境 `bl_launch_game(excludeModules=["RBM","RBM_WS"])`，pid 33364，v0.8.43。
+> **零代码改动、零 patch**，纯取证。完整数据见工作区报告 §13–§17。
+
+### 1. ★ 纯原版换边自对照：`attackerTacticLevel`/`defenderTacticLevel` **完全生效**
+
+三场 `orders=default` 20v20（`imperial_legionary` vs `sturgian_spearman`）：
+
+| 场次 | 攻 req | 守 req | 攻方实际战术集 | 守方实际战术集 |
+|---|---|---|---|---|
+| 对照 | -1 | -1 | *(0 条 `tactics` 事件 ⇒ GC2)* | — |
+| 实验 | **60** | 0 | **5 个**：`Charge`+`FullScaleAttack`+`RangedHarrassmentOffensive`+`FrontalCavalryCharge`+`CoordinatedRetreat` | **仅 `TacticCharge`** |
+| **换边** | **0** | **60** | **仅 `TacticCharge`** | **7 个**：`Charge`+`FullScaleAttack`+`DefensiveEngagement`+`DefensiveLine`+`FrontalCavalryCharge`+`DefensiveRing`+`HoldChokePoint` |
+
+**与引擎 `MissionCombatantsLogic.EarlyStart` 的 `<20` / `>=20` / `>=50` 三档逻辑逐项吻合**
+（`<20` 只有 Charge；`>=20` 追加 FullScaleAttack，攻方另加 RangedHarrassmentOffensive、
+守方另加 DefensiveEngagement/DefensiveLine；`>=50` 追加 FrontalCavalryCharge，
+攻方另加 CoordinatedRetreat、守方另加 DefensiveRing/HoldChokePoint）。
+
+**攻方 60→0：战术集 5 个 → 1 个。守方 0→60：1 个 → 7 个。** ⇒ 换边自对照成立。
+
+⇒ **结论**：纯原版下档位生效，`TacticsCombatant` 包装被引擎正常接受（无 InvalidCast）。
+**与 §三十七 §2 的 RBM 环境形成干净对照 ⇒「档位在装了 RBM 后失效」的因果只在 RBM 的 Postfix**，
+不必怀疑引擎那条链或本仓库的包装。**（这条是给 RBM 侧的硬对照。）**
+
+顺带实证：`excludeModules` 回路本身可用 —— 42 模块（44−2）、`Command Args` 无 RBM/RBM_WS、
+**RBM assembly 零载入**、`BlBridge.dll` 正常载入。
+
+### 2. ⚠️ 新发现（**可复现**）：`orders=default` + 守方高防御档位 ⇒ **永不接战**
+
+守方 req=60 那场跑到 **2700 游戏秒、0 命中、双方满血 20/20**；**复跑同样复现**（516 s 仍 0 命中，已 `bl_abort`）。
+
+**它是"战术僵持"不是"卡死"**：两军最终相距 **271.3 m**（对照两场为 1.8 / 4.1 m），双方速度归零。
+
+**隔离对照（唯一变量 `orders`）**：同配置换 `orders=charge` ⇒ **239 命中 / 83.5 s 打完 20:0**。
+
+**根因**：`orders=default` 保留引擎战术菜单 ⇒ 守方选中
+`DefensiveEngagement`/`DefensiveLine`/`DefensiveRing`/`HoldChokePoint`；
+反编译这些类的 `Defend()`：**只挂防御行为**（`BehaviorDefend`/`BehaviorDefensiveRing`/
+`BehaviorProtectFlank`/`BehaviorFireFromInfantryCover`），**没有任何"向前推进"**；
+且 `GetTacticWeight()` 含 `CalculateNotEngagingTacticalAdvantage` / `IsDefenseApplicable`
+⇒ **愈不接战愈优**。攻方仅原生 `TacticCharge`，**未接敌时不主动拉近 271 m** ⇒ 互等。
+**原版战术设计使然（真实战役里守方本就在城/阵地上等），非本仓库缺陷。**
+
+> ⚠️ **操作含义**：`orders=default` 是为"让档位可见"而用，但它**放弃了 v0.7.3 的对称化**
+> （`orders=charge` 强制双方冲锋、消除"攻方进攻/守方原地"的偏差）。
+> ⇒ **档位 A/B 只看胜负或命中数会被这个僵持污染**：换边那场 0 命中 **不是"档位无效"，
+> 而是"两军没打起来"**。用档位做 A/B 必须**避开"`default` + 高防御档位"**，
+> 或把"不接战"显式当成一个结果类别记录。
+
+### 3. ★★ 方法论（**影响面大于 T3② 本身，务必往下传**）
+
+> **RBM 在场时，任何"技能值驱动"的 AI 行为都被换成"文化驱动"。**
+> **因此用 RBM 环境做的 AI 战术基准，测的是参战兵种的文化，不是技能。**
+
+依据即 §三十七 §2 的反编译取证：RBM 的 `EarlyStart` Postfix **无条件 `ClearTacticOptions()`**，
+再**只按 `BasicCulture.StringId` + `team.Side`** 挂自己的战术
+（`empire`→`RBMTacticEmbolon`、`battania`→`RBMTacticAttackSplitArchers`、
+`sturgia`/`nord`→`RBMTacticAttackSplitInfantry`…），
+且全 RBM 上游 grep `GetTacticsSkillAmount` **零命中**。
+
+⇒ **对过去所有在 RBM 环境下跑的"战术/AI"类基准都成立**：那些结论的自变量是**兵种文化**。
+**这比"档位没接上"这一个自变量影响更大 —— 它关系到"我们以为在测什么"。**
+
+> **操作建议**：涉及战术/AI 的 A/B，**要么在纯原版环境跑**
+> （`excludeModules=["RBM","RBM_WS"]`，已验证零改动可行），
+> **要么在结论里显式声明自变量是文化**。
+
+### 4. 附带观察
+`bl_open_ui(CustomBattle)` 在**纯原版**下落到 `CustomBattleState`；**带 RBM** 时落到
+`NavalCustomBattleState`（即 §三十七 §6 那条"T1 必须补 `allowAnyState`"的成因）。
+
+### 5. `overriddenBy` 标签 —— 把「档位没接上」变成一眼可读
+
+**目的**：调用方不必靠统计猜"档位有没有生效"。**只读、不 patch、不干预**（不触碰"不 patch 任何方法"的承诺）。
+实现在 `tactics` 事件上加 `overriddenBy` 字段（恒在；空串 = 未检测到覆盖）。
+
+**⚠️ 第一版判据有假阴性（已修，教训值得记）**：原先用「可用集里是否出现 `RBMTactic*` 类名」判定，
+真机**漏报守方** —— 守方 req=0 明显已被 RBM 覆盖（应只有 `TacticCharge`，实际 4 个），
+但它那支**没有 `RBMTactic*` 类名**（RBM 的守卫分支按**文化条件**追加，`sturgian_spearman` 未命中）
+⇒ **只看类名必漏**。
+
+**现判据（不依赖文化知识）**：按引擎 `MissionCombatantsLogic.EarlyStart` 的 FieldBattle 三档逻辑
+算出**应有集**，与观测集做**集合相等**比较；不等即判被覆盖。RBM 模块同时激活才写成因 `"RBM"`，
+否则 `"(unknown)"`（两条独立证据能对上才写成因）。
+
+**双向真机验证（完整对照组）**：
+
+| 环境 | 方 | req | `overriddenBy` | 实际战术集 |
+|---|---|---|---|---|
+| 带 RBM | 攻 | 60 | **`RBM`** ✅ | `RBMTacticEmbolon`+… |
+| 带 RBM | 守 | 0 | **`RBM`** ✅（修好后） | `DefensiveEngagement`+…（4 个） |
+| 纯原版 | 攻 | 60 | **`''`** ✅ | 5 个，与应有集完全一致 |
+| 纯原版 | 守 | 0 | **`''`** ✅ | 仅 `TacticCharge`，与应有集一致 |
+
+⇒ 正例报 `RBM`、反例报空 ⇒ **不是恒真噪声**。
+
+### 6. 顺带纠正一条**立论不成立**的"P0"（避免后人按错前提动手）
+
+交接 §8 的 P0 之一写着「让 `Protocol.Failure` 自己入账（现在只在两处 catch 显式调）」。
+**实测前提不成立**，账本**早已 100% 覆盖**：
+
+| 判据 | 实测 |
+|---|---|
+| `ActionLedger.Record`（账本行）调用处 | **恰好 1 处**（`CommandPump.cs`），在 try/catch **之外**、**无条件**执行 |
+| `HandleOne` 内有无提前 `return` | **0 处** ⇒ 无法跳过入账 |
+| `HandleOne` 的 7 处 `Protocol.Failure` | 全是 `response = …` **赋值**，汇到那一处入账 |
+| 各 handler 的 `return Protocol.Failure(…)` | 返回到 `Dispatch`，其返回值赋给 `response` ⇒ 照样入账 |
+| 「两处 catch」实际调用的是 | `ActionLedger.ExceptionToRgl`（**RGL 第二出口**），**不是** ledger |
+
+真机佐证：账本 203 行 / 解析失败 0 / `runToken` 分组正常；`done/` 里 **10896 个真实响应
+用 `json.loads` 全通过**（ok=true 9269 / ok=false 1627）。
+
+⇒ **"让失败自己入账"解决的是一个已经解决的问题。** 真正剩下的两个缺口是
+**账本写失败静默**（磁盘满/权限错时少行而无人知）与**非法响应会让账本静默记错**
+（坏 JSON ⇒ `Jmini.Bool(...,false)` 把成功记成失败），二者都在 §三十五 §6 的"响应 JSON 合法性"那条上，
+**不该按原描述去加"构造即入账"**（那会让纯字符串构造器反向依赖 `CommandPump`，
+并可能让同一请求记两行、破坏"每请求一行"的不变式）。
+
+---
+
+## [2026-10-05] §三十九 「自定义战斗界面」写死单状态名的连带缺陷（v0.8.44，三处 + 两条断言）
+
+> 执行者 dsh-agent。起因：给 `bl_cmd.py enter-battle` 补 `--auto-open` 之后，真机验证**又**失败 ——
+> 顺藤摸出一个**同一族缺陷在三处各有一份**的问题。全部已修并真机闭环。
+
+### 1. 缺陷族：把「自定义战斗界面」写死成单个状态名 `CustomBattleState`
+
+装了 **NavalDLC** 时，从主菜单 `open_ui(CustomBattle)` 落的是 **`NavalCustomBattleState`**
+（官方把自定义战斗入口劫持到海战选兵界面）。而三处判据都只认前者：
+
+| # | 位置 | 症状（真机实测） |
+|---|---|---|
+| 1 | `bl_mcp._enter_custom_battle` 的等待条件 | `--auto-open` fire 成功后**永远等不到**，140 s 超时报 `wait_custom_battle` |
+| 2 | `ScenarioRunner.IsBattleSetupState`（开战守卫） | `bl_start_battle` 报 `wrong_state`，**要调用方手动传 `allowAnyState=true` 才绕过** —— 那是把缺陷推给调用方 |
+| 3 | `UiEntry.HandleCloseUi` / `RequestClose`（出口） | `close_ui` 报 `not_open` ⇒ **进去了出不来**（而进去那扇门正是本模块开的） |
+
+**为什么潜伏这么久**：`--auto-open` 与 `close_ui` 之前**没人从带 NavalDLC 的状态走过**；
+而 ② 被 `allowAnyState` 这个"绕过开关"掩盖了（调用方以为那是正常用法）。
+我先前手写跑批脚本用 `-match 'CustomBattleState'`（子串匹配）也**侥幸绕开**了 ①。
+
+### 2. 修法：一族的后缀匹配，而不是放宽成任意状态
+
+判据统一为 **`state.EndsWith("CustomBattleState")`**（C# 侧 `ScenarioRunner.IsBattleSetupState`
+为唯一真相源，`UiEntry` 复用它；Python 侧 `_CUSTOM_BATTLE_STATE_SUFFIX`）：
+
+- ✅ 接受 `CustomBattleState` 与 `NavalCustomBattleState`
+- ❌ 仍拒绝 `MapState` / `CampaignState` / `InitialState` / `VideoPlaybackState` / `""` / `CustomBattleStateX`
+  （它们**不以 `CustomBattleState` 结尾**）—— 集合外一律拒绝，不靠 catch 兜底
+
+### 3. 顺带补的 CLI 能力对等
+
+`bl_cmd.py enter-battle` **漏传 `auto_open`**（MCP 侧 `bl_launch_game` 早就支持 `autoOpen`）
+⇒ CLI **永远**返回 `await_confirm`，无人值守在一步断链。已补 `--auto-open` / `--min-startup-sec`
+（默认关闭，套 20 s 安全下限 —— 默认关是刻意的安全门，不是缺陷）。
+
+### 4. ★ 两条新断言（⑰⑲），且**都做了注入验证**
+
+**⑰** CLI↔MCP 参数对等：静态（源码级）+ **动态（走真 `bl_cmd.main()` 派发 + 探针）** +
+**负对照（不传 `--auto-open` 时必须仍是 `False`）**。
+
+**⑲** 落地判据后缀匹配：正例 2 个、反例 7 个，外加**用 AST 判"代码里不许再有写死比较"**。
+
+> ⚠️ **⑲ 那条断言我改了四版才成立，是本节点最值得记的教训**（**"恒绿的断言 = 零守护"**）：
+> ① 裸 substring → 把**注释里对旧写法的引用**判成缺陷（假阳性）；
+> ② 只按 `#` 剥注释 → docstring 里也引用了旧写法，仍假阳性；
+> ③ token 流用空格 join 后 substring → `==` 与字符串之间的空白形式对不上，
+>    **注入真缺陷后仍然全绿**（恒绿！）；
+> ④ 用 `tokenize` 剔 COMMENT+STRING → **把字符串字面量本身也剔掉了**，而
+>    `"CustomBattleState"` 就是字符串 ⇒ 仍然恒绿。
+> ⇒ 最终用 **AST 只看 `ast.Compare` 节点**（注释/docstring 天然不在其中）。
+> **并且每一版都跑了注入验证**才判定它有效 —— 只有最后一版做到"注入 → 变红并点名 line 2005"。
+> 这与 §三十八 的纪律一致：**没有对照组的验证不是验证**。
+
+### 5. 真机闭环（**三条腿全部验过**，不是只跑单测）
+
+| # | 项 | 结果 |
+|---|---|---|
+| ① | `bl_cmd.py enter-battle --auto-open` | ✅ `ok=true / phase=in_custom_battle / state=NavalCustomBattleState`（同命令修前 140 s 超时失败） |
+| ② | `bl_start_battle` **不传 `allowAnyState`**，停在 `NavalCustomBattleState` | ✅ **`accepted:true`**（修前必报 `wrong_state`，要调用方绕过）；战斗正常打完 `defenderWiped` |
+| ③ | `bl_cmd.py close-ui` | ✅ `ok=true / closeRequested=true`，**且真的回到主菜单**（`activeState=InitialState`、`topScreen=GauntletInitialScreen`） |
+| — | 四段哈希链 | ✅ `builtVersion=0.8.44`、`deployedSha256 == loadedSha256 == f3f8319ef8b04b43` |
+
+**六道门全绿**：encoding(106 文件) / jsontest / bl_selftest(新增⑰⑲) / gabp 7 判据 / dispatch 45=45=45 / buildcheck。
+
+> ② 的对照最有力：**同一个调用、只少了那个"绕过开关"**，修前 `wrong_state`、修后 `accepted`。
+> 这正是"把缺陷推给调用方"的典型形态 —— 调用方（我）先前还把 `allowAnyState=true`
+> 当成正常用法写进了交接文档。
+
+### 6. 下一步（未做）
+
+- `allowAnyState` 这个开关**是否还需要保留**：修完 ② 之后它可能只剩"从**主菜单**直接开战"
+  这一个合法用途（真机实测：主菜单时 `open_ui` 之外直接 start 确实需要它）。
+  值得复核文档，**别再把"绕过 `wrong_state`"写成它的用途**（那会把缺陷当特性固化）。
+- 交接日志 §6 的 T1 配方里那句"必须补 `allowAnyState=true`，否则先被 `wrong_state` 拦"
+  **已被 v0.8.44 推翻**，需同步更正（本次未改交接日志）。
+
+---
+
+## [2026-10-05] §四十 响应信封断言（零覆盖的洞）+ 攻城 sceneLevel/timeOfDay 取证 + 一处**已记结论被反证**
+
+> 执行者 dsh-agent。本轮**零 C# 行为改动**（只加测试 + 修测试脚本编码），v0.8.44 四段链未变。
+> 起因：用户点名"① 补响应信封形状断言（唯一真正零覆盖的洞）"+"③ 攻城 sceneLevel/timeOfDay"。
+
+### 1. ★ 缺陷：`BridgeProtocol.cs` 从未进过任何测试（用户判断**完全正确**，已取证）
+
+三条写在 `BridgeProtocol.cs` 注释里的不变式，**一条守卫都没有**：
+
+| 不变式 | 本轮的取证（不是感觉） |
+|---|---|
+| `ok==true` ⇔ `error==null` | `tools/jsontest/build_and_run.ps1` 的编译清单里**没有 `BridgeProtocol.cs`** |
+| `process` 必填 | `GuardTest.cs` 提到 `Protocol` 的次数 = **1**，且那 1 次是 `Jmini.Int("{\"protocolVersion\":1}", …)` 的**字面量**，与真信封无关 |
+| `protocolVersion` 正确 | `bl_selftest.py` 的假游戏端**自己手写响应 dict** ⇒ `Protocol.Success/Failure` 从未被调用过 |
+
+⇒ 实测现状是好的（`commands\done\` 里 10896/10896 个真实响应能 `json.loads`），
+**但没人守 ⇒ 坏了也没人知道**。这正是"手拼 JSON"这个最大风险面上的空门。
+
+### 2. 新增 `tools/jsontest/EnvelopeTest.cs`（**24 条断言**，含 11 条注入对照组）
+
+> 计数口径：门禁绿时该节**实际执行并打印 `[OK]` 的断言数 = 24**
+> （正例 4 + 语义直断 5 + 敌意样本汇总 1 + Jmini 一致性 1 + 注入 11 + 反向对照 2）。
+> 敌意样本循环里那条"逐个样本失败才报"的 `Check` 在绿时**不打印**，故不计入 24。
+
+**★ 核心设计：不能用 `Jmini` 去验 `Jmini` 造的 JSON。** 那是自证，且**最容易恒绿**
+（§三十九 那条写了四版才成立的断言就是栽在这里）。所以引入**独立裁判**：
+`System.Web.Script.Serialization.JavaScriptSerializer` —— .NET 自带的**真** JSON 解析器，
+与 `Jmini` 无任何共同代码。判据 = 「真解析器能解析」+「真解析器的读数与 Jmini 一致」。
+
+| 组 | 内容 | 结果 |
+|---|---|---|
+| 正例 | `Protocol.Success/Failure` 的 4 种形状 | ✅ 全部 0 违规 |
+| 敌意样本 | **18 条**（引号/反斜杠/换行/制表/CJK/emoji/`"code":"FAKE"`/`{"ok":true}`/`outcomeUncertain":true`/孤立代理项/5000 字/空串/`null`/`{`/`]`/`"`/`\`） | ✅ 18/18 仍是合法信封 |
+| **独立裁判交叉验证** | Jmini 与真解析器的 `ok`/`code` 读数在 **36 个样本**上**完全一致** | ✅ 36/36 |
+| **注入对照组** | 11 条（删 `process`/改 `ok`/改版本/删 `pid`/删 `loadedSha256`/删 `outcomeUncertain`/空 `code`/截断 JSON/空串/顶层数组/删 `result`）**逐条必须点名** | ✅ 11/11 抓到 |
+| 反向对照 | 注入**之前**的那两份必须合法（证明断言不是恒红） | ✅ |
+
+> **为什么注入对照组是必须的**：校验器若写成恒返回空清单，正例全绿而缺陷全漏（恒绿 = 零守护）。
+> 11 条注入**逐条**要求点名具体违规串，才排除了这种写法。
+
+### 3. ⚠️ 顺带修掉一个**测试脚本**陷阱：BOM-less `.ps1` 里的中文注释会吃掉下一行
+
+给 `build_and_run.ps1` 加中文注释后，官方门禁开始报 **`compile failed`**，
+而**手工跑同一批 csc 参数却 exit=0**。根因（已证实）：
+
+- PowerShell **5.1** 对**无 BOM** 的 `.ps1` 按 **ANSI 代码页（本机 cp936）** 解码；
+- 我那句中文注释的 UTF-8 尾部字节按 cp936 解出来**吞掉了行尾换行**，
+  于是下一行 `& $csc …` 被并进注释 ⇒ **csc 根本没执行**，
+  而 `$LASTEXITCODE` 还是上一次（失败）的值 ⇒ 报出**假的** "compile failed"。
+
+**修法**：该脚本改为**纯 ASCII**（并把这条陷阱写进脚本注释）。
+判据：文件非 ASCII 字节数 = **0**，门禁 exit=0。
+
+> 这与 `AGENTS.md` 的编码纪律同源 —— 但既有的 `check_repo_encoding.py` 只管"UTF-8 无 BOM + LF"，
+> **管不到"PS 5.1 会把无 BOM 的 UTF-8 当 ANSI 读"** 这一层。**这条值得往下传。**
+
+### 4. ★★ 攻城 `sceneLevel` / `timeOfDay` —— **都有硬判据，已真机取证**
+
+`T1-T5 报告 §12.2` 记"未验证"。本轮找到**两个独立硬判据**，全部实测：
+
+#### 4.1 `sceneLevel`：引擎自己把值打进 rgl 日志（**判据 + 对照**）
+
+反编译确证：`MissionState.OpenNew` 第一行就是
+`Debug.Print("Opening new mission " + missionName + " " + rec.SceneLevels + ".\n")`，
+而 `BannerlordMissions.OpenSiegeMissionWithDeployment` 把它算成
+`sceneUpgradeLevel switch { 2=>"level_2", 1=>"level_1", _=>"level_3" } + " siege"`。
+
+| 请求 | rgl_log_31576.txt 实测原文 |
+|---|---|
+| `sceneLevel=1` | `[15:16:36.204] Opening new mission CustomSiegeBattle level_1 siege.` |
+| **不传（默认 3）** | `[15:22:57.683] Opening new mission CustomSiegeBattle level_3 siege.` |
+
+⇒ **逐字对上**，且**有对照**（默认走 `level_3`）。`sceneLevel` 生效，**硬**。
+（两场的 `siege_debug.log` 也都记了 `enter scene=empire_town_c a=10 d=5`，同场景不同 level。）
+
+#### 4.2 `timeOfDay`：**截图判据**（引擎不写日志，只能看画面）
+
+反编译链：`CreateAtmosphereInfoForMission(seasonString, (int)timeOfDay)` 用
+**字典**映射 `{6→TOD_06_00_SemiCloudy, 12→TOD_12_00_SemiCloudy, 15→TOD_04_00_SemiCloudy,
+18→TOD_03_00_SemiCloudy, 22→TOD_01_00_SemiCloudy}`，只在 `tryGetValue` 命中时才有名字；
+未命中 ⇒ `AtmosphereName = null` ⇒ `IsValid == false`。而**这五个文件实测都存在**。
+
+同场景 `empire_town_c` 的三场（40v40）截图：
+
+| `timeOfDay` | 截图 | 画面 |
+|---|---|---|
+| **22** | `night_tod22.png` | **黑夜**：暗蓝天、月光云、城墙火把**点着** |
+| **12** | `noon_tod12.png` | **正午**：明亮日光、蓝天、火把不显 |
+| 14（**不在表里**） | `outofset_tod14.png` | **回落到场景自带的夜晚氛围**（与 22 近似） |
+
+⇒ **`timeOfDay` 生效，硬**（判据 + 对照 + 边界）。
+⚠️ **一条必须写进文档的边界**：**只有 {6,12,15,18,22} 这五个值有别**；
+其它值（如 14）引擎查表落空 ⇒ **回落到场景自带氛围**。调用方传 14 会**看起来"没生效"**。
+另注意 `15→TOD_04_00_SemiCloudy`：**名字叫"下午"，取的却是凌晨 4 点的氛围**（表本身如此，
+不是我们的缺陷，但传 15 = 传一个 4 点的天空）。
+
+### 5. ★★★ 反证一处**已归档结论**：`terrain` 的消费者说明**在自定义战斗里不成立**
+
+`T1-T5 报告 §9.1`（与交接 §6.3）结论是：
+> `Mission.TerrainType` 的**唯一消费者**是 `SandboxAgentStatCalculateModel.cs:1556-1566`（只影响队长 Perk）
+
+**代码事实本身没错，但"消费者"挑错了模型** —— 那个模型**在自定义战斗里根本没被注册**：
+
+- `SandBoxSubModule.cs:37-41`：`SandboxAgentStatCalculateModel` 的注册**整个包在
+  `if (game.GameType is Campaign)` 里** ⇒ **只有战役**才用它；
+- `CustomGame.cs:95`：自定义战斗注册的是 **`CustomBattleAgentStatCalculateModel`**；
+- 而 `CustomBattleAgentStatCalculateModel.cs` 全文 **`Terrain` / `Perk` / `PerkHelper` / `Captain`
+  命中数 = 0**（已用 filePattern 定向搜索复核，非只看摘要）。
+
+⇒ **在自定义战斗里，`MissionInitializerRecord.TerrainType` 没有任何托管消费者**
+（它随 struct 进 native `MBAPI.IMBMission.InitializeMission`，托管侧到此为止）。
+
+**这不改变 §9.1 的实测结论**（"默认 vs snow 无可测差异"仍成立，且现在有了**更强的理由**），
+但**改变了理由**：不是"被测兵种不带那个 Perk"，而是**那段代码在自定义战斗里压根不参与**。
+⚠️ **推论**：`terrain` 在**战役**里才可能经由队长 Perk 影响 `MaxSpeedMultiplier`；
+在 BlBridge 的自定义战斗靶场里，它**托管侧无任何影响路径**（native 侧影响未排除）。
+
+> 方法论同上：**"某字段的唯一消费者是 X" 这类结论，必须连"X 在本环境里是否被注册"一起验**。
+
+### 6. ★ `aiFriendlyFireMultiplier` 的行为效应 —— **观测到方向一致的效应，但作用面与名字不符；n 小，不下定量结论**
+
+> ⚠️ **本节我先写错过一版，如实记录**：我按"野战路径不设 `MainAgent` ⇒ 该模型恒返回 1f"
+> 推理，写下"几乎必然无效"。**真机一测就翻了**（下面前两条）。
+> 教训与 §四十.5 同源：**否证性结论（"没有消费者/不会生效"）尤其不能只靠读码。**
+
+#### 6.1 先纠正一个事实：野战场次**确实有 `MainAgent`**（硬）
+
+`bl_control_agent(status)` 在 20v20 野战**进行中**实测：
+
+```
+mainAgent: { index:29, troop:"imperial_legionary", controller:"AI", health:100 }
+playerTeam: "player"   mainAgentIsPlayerController: false   aliveCandidatesOnPlayerTeam: 20
+```
+
+⇒ 它**不是我设的**（野战 `CreateBehaviors` 里没有设 `MainAgent` 的代码），
+是 CustomBattle 路径/引擎自己给的（`Agent.Controller` setter 会顺带写 `Mission.MainAgent`，见 `ControlAgent.cs` 的既有考证）。
+**后果**：`DefaultMissionDifficultyModel` 里那道 `MainAgent != null` 的门是**开着的** ⇒ 该旋钮**有机会生效**。
+
+#### 6.2 语义（读码）：它管的是"**受害者属于玩家方**"，不是"同队互殴"
+
+`DefaultMissionDifficultyModel.cs:18-22` 的判据是 `victimAgent.IsFriendOf(mainAgent)`：
+
+```csharp
+Agent agent = Mission.Current?.MainAgent;
+if (agent != null && victimAgent.IsFriendOf(agent))
+    result = ((attackerAgent == null || attackerAgent != agent)
+        ? Mission.Current.DamageToFriendsMultiplier
+        : Mission.Current.DamageFromPlayerToFriendsMultiplier);
+```
+
+`Agent.IsFriendOf` → `MBAPI.IMBAgent.IsFriend(...)`（native，`IMBAgent.cs:74-75`）
+；托管侧同族实现 `Team.IsFriendOf`（`Team.cs:634`）明确是"**同一方**"。
+⚠️ **`MBAPI.IMBAgent.IsFriend` 是 native 边界**，我没能证明它逐字等于"同 team"——
+但下面 6.3 的观测量与该读法**一致**，故按"受害者属于玩家一方"理解。
+
+⇒ **它不是通常意义的"误伤"（加害者与受害者同队）**。真同队误伤在本引擎里本来就近乎无害：
+12 场 / **418131** 次命中里 `Attacker→Attacker` 仅 **5814（1.39%）**，其中 **99.0% `blocked`/0 伤害**，
+**全部同队误伤伤害合计仅 31 点**。
+
+#### 6.3 真机 A/B：**匹配集**上效应明确（**硬**，t=5.20）
+
+> ⚠️ **我第一次统计时把不同配置的场次混在一起了**（10v5 军团/长矛、40v40 军团/长矛、
+> 20v20 军团/长矛、20v20 芬恩/军团 —— 全当成一个对照池），**那是无效对照**。
+> 如实记下来：**"同一配置"这件事必须逐场核，不能按"都是今天跑的第 1 轮"就合并。**
+> 下面只用**唯一既有 `ff=-1` 又有 `ff=0`、且时间交错**的配置。
+
+**匹配集（`round==1`）**：`battanian_fian_champion`×20（Attacker）vs `imperial_legionary`×20（Defender），
+场景 `battle_terrain_a`，`orders=charge`，**唯一变量 = `aiFriendlyFireMultiplier`**。
+观测量 = **打到 Attacker（= 玩家方）的命中里"零伤害"（`damagedHp == 0`）的占比**。
+
+| 场次 | `ff` | 打到玩家方命中 | **零伤害占比** |
+|---|---|---|---|
+| 15:36:34 | -1 | 204 | 21.6% |
+| 15:37:11 | **0** | 623 | **83.0%** |
+| 15:39:26 | -1 | 182 | 18.1% |
+| 15:40:08 | **0** | 439 | **82.0%** |
+| 15:45:34 | -1 | 201 | 16.4% |
+| 15:45:56 | **0** | 328 | **42.4%** |
+| 15:47:21 | -1 | 220 | 19.5% |
+| 15:51:57 | -1 | 226 | 25.2% |
+| 15:52:19 | **0** | 550 | **79.3%** |
+
+**统计（Welch t，按匹配集）**：
+
+| 组 | n | 均值 | sd |
+|---|---|---|---|
+| `ff=-1`（对照） | **5** | **20.2%** | **3.4** |
+| `ff=0`（实验） | **4** | **71.7%** | 19.6 |
+
+**t = 5.20**；两组**取值范围不重叠**（对照 max 25.2% < 实验 min 42.4%）。
+⇒ 按本项目判据（"CI 不重叠或 t>2"）**结论成立**：**`aiFriendlyFireMultiplier=0` 显著提高
+"打到玩家方的命中被打空"的比例**（~20% → ~72%）。**硬**。
+
+⚠️ **两点保守边界（不许省）**：
+1. **实验组 sd 大**（19.6，有一场只有 42.4%）⇒ **效应不是"全部归零"**，
+   即 `ff=0` **没有**把伤害彻底消掉。**n 仍小（4/5）**，效应量的 CI 会很宽，本报告**不给出点估计的区间**。
+2. 观测量 `toA_dmg`（累计伤害）**会顶到 2000**（20×100 HP 的池子被打穿）⇒ **饱和，不可作线性比较**。
+   这正是 6.3 改用"零伤害占比"的原因。
+3. **结局不构成判据**：实验组 4 场里 2 场 `defenderWiped`、对照 5 场里 1 场 `attackerWiped` ——
+   **方向提示存在但样本太少**，不作为结论。
+
+#### 6.3.1 ★★ 补样本到 **n=10 vs 10**（2026-10-05 晚）—— 效应量定下来了，t=17.91
+
+**动机**：6.3 的 n=4/5 让"效应量的 CI 很宽"成了未结项。本轮用**逐场交错**编排器把样本补到 10 对。
+
+**工具**：`E:\Document\blbridge-ff-ci\ff_interleave.py`（**不在仓库里**，刻意如此）。
+- 为什么不用 `bl_batch.py`：① 它**不转发** `aiFriendlyFireMultiplier`；
+  ② 它是"A 跑 N 场、再 B 跑 N 场"—— 正是本项目已量化的**批次效应**形态（交接 §6.5：两批「关」差 11~13%，组内仅 1.4%）。
+- 本编排器**逐场 A/B 交替**，且**每对内部还换一次先后**（`-1,0` / `0,-1` / `-1,0` …），
+  让任何时间趋势**均等地**落到两组，而不是落到组间。
+
+**配方**（与 6.3 的匹配集完全一致）：`battanian_fian_champion`×20（Attacker）vs
+`imperial_legionary`×20（Defender），`battle_terrain_a`，`orders=charge`，cap 300s，
+**唯一变量 = `aiFriendlyFireMultiplier`**。20/20 场全部成功落盘。
+
+| 组 | n | 均值 | sd | 95% CI（Welch, t*=2.086） | 范围 |
+|---|---|---|---|---|---|
+| `ff=-1`（对照） | **10** | **19.06%** | 3.13 | ±2.06 | [14.7, 24.2] |
+| `ff=0`（实验） | **10** | **77.85%** | 9.90 | ±6.53 | [51.2, 85.8] |
+
+**差值 = +58.79 个百分点（4.08×）；t = 17.91；两组范围不重叠。**
+⇒ 按本项目判据（"CI 不重叠或 t>2"）**结论成立且量级明确**。**硬**。
+
+> ⚠️ **附：本会话还有 2 场"误跑"的样本**（16:46:12 / 16:46:31）。
+> 来历：我给编排器做**负对照**（`--tools` 传一个不存在的路径，期望它报错退出）时，
+> **第一版脚本会静默回退到默认仓库路径** ⇒ 它**真的跑了 2 场**。
+> 这两场是**同配置 / 同会话 / 交错在先**的合法数据，但**必须分开报**（不能算进"计划 20 场"）：
+> 计入后为 **n=11 vs 11**：对照 **18.79%±3.10**、实验 **78.76%±9.86**，**t=19.24**，
+> 结论与上面**一致**（差值 59.97 个百分点 / 4.19×）。
+> ✅ 该脚本的静默回退**已修**（`--tools` 显式给了但不存在 ⇒ **直接报错退出，不回退**；
+> 且"一场都没成功"现在是**非零退出码**，不再是 exit 0）。
+> ⚠️ 我第一版还踩了第二个同类坑：**20 场全失败仍然 exit 0** —— 调度方根本看不出跑批什么都没做。
+> 这条与 §四十二.3 的 `ledger` 缺口是**同一类**（"坏掉而无人知"），一并记下。
+
+#### 6.4 结论与文档口径更正建议（**本轮未改 README**）
+
+- `aiFriendlyFireMultiplier` **不是无效参数**（我先前那版推理错误），它有可观测效应。
+- 但**该改名/改描述**：它设定的是"**打到玩家方身上的伤害**"倍率
+  （`DamageToFriendsMultiplier`），**本靶场玩家方 = Attacker**；
+  **它不是"消掉 AI 同队误伤"** —— 同队误伤在此引擎里本来就几乎不造成伤害（6.2 的 418131 扫描）。
+- **更正后的描述建议**（留给下一轮改 `README.md` / `bl_mcp.py` / `bl_cmd.py` 三处）：
+  > `aiFriendlyFireMultiplier`：设定**打到「玩家方」身上**的伤害倍率（引擎 `DamageToFriendsMultiplier`，
+  > 默认 1）。本靶场玩家方 = Attacker（可用 `playerSide` 改）。设 0 ⇒ 打到玩家方的伤害**大幅下降**
+  > （实测零伤害占比 ~19% → ~42–83%，**非绝对**）。**注意它不管"加害者与受害者同队"的误伤** ——
+  > 那种误伤在引擎里本就几乎不掉血。
+
+### 7. 本轮验证状态（不写成通过的部分见 §四十.8）
+
+| # | 项 | 结果 | 强度 |
+|---|---|---|---|
+| ① | 响应信封断言（**24 条** + 11 注入对照组） | ✅ 新增并全绿 | **硬** |
+| ② | v0.8.44 四段链 + 三条腿真机复验 | ✅ `buildcheck=ok`；`enter-battle --auto-open`→`NavalCustomBattleState`；`start_battle` **不传 `allowAnyState`** `accepted`；`close-ui` **真的回主菜单**（`GauntletInitialScreen`） | **硬** |
+| ③ | 攻城 `sceneLevel` | ✅ 生效（rgl 日志 + 对照） | **硬** |
+| ③ | 攻城 `timeOfDay` | ✅ 生效（截图 + 对照 + 边界） | **硬** |
+| — | `terrain` 消费者说明被反证 | ✅ 更正理由（自定义战斗无托管消费者） | **硬** |
+| — | `aiFriendlyFireMultiplier` 行为效应 | ✅ **显著**（零伤害占比 **19.06%±2.06 → 77.85%**，n=10/10，**t=17.91**，范围不重叠）；且**名字/描述与作用面不符** | **硬** |
+| ④ | 计划任务 vs `Start-Process` | 未做 | — |
+| ⑤ | `Mission.SpawnAgent` patch | **不做**（T2 已证该路径不加 modifier） | — |
+| ⑥ | 知识库第 23 条归属 | **未裁定**（技术侧无输入，属用户决策） | — |
+
+### 8. 本轮未做 / 仍未定
+
+1. `aiFriendlyFireMultiplier` 的**文档口径更正** ⇒ **✅ 已完成**（README / `bl_mcp.py` / `bl_cmd.py`
+   三处描述 + `BattleEnv.cs` / `ScenarioRunner.cs` 两处注释，2026-10-05 晚）。
+2. ~~`aiFriendlyFireMultiplier` 的**效应量区间**~~ ⇒ **✅ 已完成**（§四十.6.3.1：n=10/10，**t=17.91**，
+   对照 19.06%±2.06 / 实验 77.85%±6.53）。
+3. `randomTerrainSeed` / `keepCorpses` 的**行为效应** ⇒ **两者均已取证**（§四十二）。
+4. `terrain` 的 **native 侧**影响未排除（托管侧已确认无路径）。
+5. 那次 `0xC0000005` 仍**未定性**（§9.3）。
+6. 没有把 EnvelopeTest 的**同一套判据**接到 `bl_selftest.py`（Python 侧仍只验账本）；
+   即"真机响应"与"构造器产物"之间仍缺一条端到端断言。
+7. **`bl_mcp.py` 侧 `aiFriendlyFireMultiplier` 的范围校验（0..1）没测**：
+   传 0.5 等中间值是否有线性效应，本轮只测了 0 与不传。
+
+---
+
+## [2026-10-05] §四十一 账本剩余的两个真缺口（v0.8.45）—— 都补上，**都做了注入验证**
+
+> 执行者 dsh-agent。这是交接日志 §8 里"真正剩下的两个缺口"：
+> **① 账本写失败静默 ② 非法响应让账本静默记错**。
+> 两条都是**审计日志类工具最危险的失效模式**：不是坏掉，而是**坏掉而无人知**。
+
+### 1. 缺口 B「非法响应让账本静默记错」—— 已修
+
+**缺口核实（改前）**：`CommandPump.RecordLedger` 直接
+`bool ok = Jmini.Bool(response, "ok", false);` —— `Jmini` 是**扁平只读器**、兜底 **false**。
+⇒ 一个**成功**的请求，只要响应文本读不出来（截断/写坏/根本没有 `ok` 键），
+账本就会记成 `ok=false`，**且与"真的失败"逐字段无法区分**（`code` 也会是 `""`）。
+后果：所有基于账本的失败率/失败码统计都被污染。
+
+**修法（刻意最小 + 一个测试上的理由）**：
+把判定抽成 **`Protocol.ReadResponseOutcome(...)`**（`src/BridgeProtocol.cs`），
+`CommandPump` 调它。这不只是"整理" —— **抽出来是为了能被离线断言**：
+`CommandPump` 依赖 TaleWorlds、**离线编不进来**，而 `BridgeProtocol` 是**纯 BCL、已在
+`tools/jsontest` 的编译清单里**。⇒ **出货代码与断言调的是同一个方法**，
+不是各抄一份判定逻辑（抄一份就是"验副本不验出货代码"，违反项目纪律）。
+
+判据：`readable = Jmini.Has(response, "ok")`。不可读时给**专属哨兵码 `ledger_unreadable`**
++ 非空说明（"该行 ok=false 只表示读不出来，不代表请求失败"），
+`uncertain` 强制 false（**不能凭空说"副作用不确定"**）。
+
+### 2. 缺口 A「账本写失败静默」—— 已修
+
+**缺口核实（改前）**：`ActionLedger.Record` 的收尾是裸 `catch { }`（源码里只有一行注释）。
+磁盘满 / 权限错 / `<LogDir>` 被清理 ⇒ **少行而无人知**。
+**一个会静默丢行的审计日志比没有审计日志更危险** —— 它让人**以为**有记录。
+
+**修法**：catch 改为三个可观测出口（**不改任何判定分支、不改行的字节格式**）：
+- `ActionLedger.WriteFailureCount`：进程内累计写失败次数；
+- `ActionLedger.LastWriteFailure`：最近一次失败的原因摘要（截断 200 字）；
+- 首次失败写 **RGL 第二出口**（`ExceptionToRgl`，那条路本来就有，只是**没被调用**）；
+  收敛成"只在首次"写 RGL，避免磁盘坏掉时每请求刷一条。
+
+**外部可见**：`bridge_status.json` 新增 `ledger:{writeFailures,lastWriteFailure}`。
+`bl_status` 是**整份读** `bridge_status.json`（`bl_mcp.py:2029`）⇒ 新字段**自动透出**，
+不必改 Python 侧。
+
+### 3. ★ 两条断言**都做了注入验证**（"我怎么证明它红了"）
+
+新增 `tools/jsontest/LedgerGapTest.cs`（14 条断言）+ `tools/jsontest/Shims.cs`
+（只为离线编译提供 `Debug.Print` 与 `CommandPump` 的两个路径助手）。
+
+| 注入的缺陷 | 期望 | 实测 |
+|---|---|---|
+| `BridgeProtocol`: `readable = true`（= 旧行为，不判可读性） | 断言变红 | ✅ **exit=1**，7 条 `[FAIL]` 点名（含 `0/6`） |
+| `ActionLedger`: catch 换回裸 `catch { }` | 断言变红 | ✅ **exit=1**，2 条 `[FAIL]`（`before=0 after=0`、原因为空） |
+
+两次注入**都按字节还原**（sha256 与注入前一致：`fcf78132…` / `017102b6…`），
+且全仓 grep `INJECTED|MUTANT` **零命中**。
+
+### 4. ⚠️ 顺带踩到并定位的一个**环境陷阱**（不是仓库缺陷，但会误导排查）
+
+`build.ps1` 一度报 `Get-FileHash : 不是 cmdlet`。**但 `Get-FileHash` 在每个 shell 里都可用**。
+根因：**我用 `cmd /c` / `Start-Process`（未加 `-UseNewEnvironment`）去调 `powershell.exe` 时，
+把 pwsh 7 的 `PSModulePath` 继承给了 PS 5.1** ⇒ PS 5.1 在自己的模块目录里找不到
+`Microsoft.PowerShell.Utility`，**自动加载模块失败**。
+
+| 调用方式 | `Get-FileHash` |
+|---|---|
+| `& powershell -File build.ps1`（直接调） | ✅ AVAILABLE |
+| `Start-Process powershell ...`（无 `-UseNewEnvironment`） | ❌ MISSING（模块自动加载失败） |
+| `cmd /c "powershell ..."` | ❌ MISSING |
+
+**判据**：脚本里 `Import-Module $WINDIR\system32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1` **显式导入即恢复**。
+⇒ **在本项目里跑 `build.ps1` / 任何 PS 5.1 脚本，用直接调用，别用 `cmd /c` 或裸 `Start-Process`。**
+（这与 §四十.1b 的 `.ps1` 编码陷阱是**两个独立**的环境坑。）
+
+### 5. 构建与门禁（v0.8.45）
+
+> ⚠️ **v0.8.45 构建过两次**（同版本号内追加了 `corpses` 字段，见 §四十二），下表是**最终**那次：
+> 第一次 `9a677a6ed57b47af…`（仅两个账本修复），第二次 **`34c6c3bb8abdb4ca…`**（+`corpses`）为**当前部署**。
+> 本项目**构建不可复现**（§三十三），所以两次哈希不同属正常，**以最终那次为准**。
+
+| 项 | 值（最终） |
+|---|---|
+| 版本 | `0.8.44` → **`0.8.45`**（`BridgeConfig.Version` + `module/SubModule.xml`） |
+| `out\BlBridge.dll` | 206 KB，`34c6c3bb8abdb4ca…` |
+| `deployedSha256` | **逐字等于** out 产物与 manifest |
+| 源码↔manifest | **0 处不一致**（38 个源文件） |
+| 门禁 | encoding 107 文件 / jsontest **181 检查 0 失败** / selftest / gabp 7 判据 / dispatch 45=45=45 / metrics **全绿** |
+
+> ✅ **进程内四段链已闭合**（2026-10-05 16:18 真机，pid **7080**，`runToken=933c21705883`）：
+> `buildCheck.code = **ok**`，`loadedSha256 = currentFileSha256 = deployedSha256 = **34c6c3bb8abdb4ca**`，
+> `loadedVersion = 0.8.45`，`fileChangedSinceLoad = false`。
+> 顺带证实 `rgl_log_7080.txt` 里 `BlBridge.dll` 载入正常（启动器派生清单仍然正确）。
+> （第一次闭合用的是 pid 38228 / `9a677a6ed57b47af`，那次尚未含 `corpses`。）
+
+### 5.1 ★ 缺口 A 的外部出口**已真机可见**
+
+`bl_status` 现在直接返回新块（`bl_mcp` 是整份读 `bridge_status.json`，无需改 Python 侧）：
+
+```json
+"ledger": { "writeFailures": 0, "lastWriteFailure": "" }
+```
+
+**判据 + 对照**（在**两次**构建上都核过）：同一时刻账本**确实在写**，而 `writeFailures` 仍为 **0**
+⇒ 这个计数器**不会误报**（它是"真出过错"的指标，不是"调用过"的指标）。
+
+| 构建 | pid | `writeFailures` | 账本文件 | 解析失败 |
+|---|---|---|---|---|
+| `9a677a6e…`（仅两个账本修复） | 38228 | **0** | 1530 行 | **0** |
+| `34c6c3bb…`（+`corpses`，**当前部署**） | 7080 | **0** | **1609 行** | **0** |
+
+> ⚠️ **一个观察（本轮未改，留待下轮定夺）**：`skip_video` 那条请求的**信封** `ok=true`
+> （协议层成功应答），但它 `result` 里是 `{"ok":false,"code":"not_video"}`
+> ⇒ 账本按**信封**记了 `ok=true`。这与 v0.8.42 的既定语义一致（"`ok` = 响应是否成功"），
+> **不是我本轮引入的**；但后果是 `actions --fail-only` **看不到** `not_video` 这类
+> "协议成功、操作失败"的请求。**要不要改口径是产品决策**，本轮只记录。
+
+### 6. 仍未做（不写成通过）
+
+1. ~~**真机验证新 `ledger` 字段**~~ ⇒ ✅ **已完成**（§四十一.5.1：`writeFailures:0` 且账本确实在写）。
+2. **真机验证 `ledger_unreadable` 路径**：需要人为制造一条读不出来的响应（当前没有可达入口）
+   ⇒ 本轮只在**离线**断言了判定语义 + **注入验证**过，**未在真机触发过**。
+3. `aiFriendlyFireMultiplier` 的文档口径更正（§四十.6.4 已给文案）与效应量 CI。
+4. **`randomTerrainSeed` 行为效应**：托管侧零读取消费者 ⇒ 只能靠 native，本轮仍未做。
+   （`keepCorpses` **已取证**，见 §四十二。）
+5. `0xC0000005` 定性；计划任务 vs `Start-Process` 同源因果对照。
+6. **账本 `ok` 口径**：是否要把"信封 ok 但 `result.ok=false`"（如 `not_video`）也算失败？
+   见 §四十一.5.1 末尾那条观察 —— 属产品决策，本轮未改。
+
+---
+
+## [2026-10-05] §四十二 补齐 `keepCorpses` 的行为判据（v0.8.45）—— T1-T5 报告 §12.5 的遗留项
+
+> 执行者 dsh-agent。`keepCorpses` 与 `randomTerrainSeed` 一直标着"只验了落盘、未验行为效应"。
+> 本轮给 **`keepCorpses`** 补上了**行为判据**（`randomTerrainSeed` 仍缺，理由见末尾）。
+
+### 1. 为什么它此前"验不了"
+
+`keepCorpses` 写的是 `MissionInitializerRecord.DisableCorpseFadeOut`，而该字段**托管侧零读取消费者**
+（2026-10-05 定向复核：全树只有**写者**与序列化，没有读者）⇒ 它随 struct 进 native
+`MBAPI.IMBMission.InitializeMission`。**要验它，唯一途径是找一个能观测"尸体还在不在"的量** ——
+而当时的遥测里**没有**这种量（`sample` 只有 aAlive/dAlive/aHp/dHp）。
+
+### 2. 修法：给 `sample` 事件加 `corpses`（**加字段，不动既有键**）
+
+`src/TelemetryBehavior.cs`：
+- 新增 `CorpseCount(Mission)`：数 `Mission.AllAgents` 里 `Agent.IsAddedAsCorpse()==true` 的个数；
+- ⚠️ **必须用 `AllAgents`（`_allAgents`）而不是 `Agents`（`_activeAgents`）** —— 后者是"活跃 agent"，
+  尸体不在其中（`Mission.cs` 的 `OnAgentDeleted` 才从 `AllAgents` 移除）；
+- 取不到一律 **-1**（与 `TeamAlive`/`TeamHp` 同一约定），绝不假装是 0；
+- 插在 `dHp` 之后 —— **既有键一个不删不改**（老分析脚本按 key 取，不受影响）。
+
+### 3. ★ 真机 A/B：**判据成立，效应明确**
+
+同一配方（`imperial_legionary`20 vs `sturgian_spearman`20，`orders=charge`，`battle_terrain_a`），
+**唯一变量 = `keepCorpses`**。`sample` 每 10 秒一条，`corpses` 序列：
+
+| 场次 | `keepCorpses` | 样本数 | `corpses` 时间序列 | max | **末值** |
+|---|---|---|---|---|---|
+| `162102` | **未传（对照）** | 50 | `0 0 0 0 0 0 0 2 2 5 9 12 13 7 5 1 1 0 0 …` (后 35 个全 0) | 13 | **0** |
+| `162214` | **`true`** | 13 | `0 0 0 0 0 0 0 1 5 10 12 15 19` | 19 | **19** |
+
+**读法**：
+- **对照组尸体数升到 13 后回落到 0**（= 引擎的**尸体淡出**在正常工作）；
+- **`keepCorpses=true` 时尸体数单调升到 19 并保持**（= 淡出被关掉了，与字段语义一致）；
+- ⚠️ 实验组只跑到 13 个样本（战斗 13.1 s 就 `defenderWiped` 结束了，而对照组打了 50.8 s）
+  ⇒ **两场的"末值"不能直接横比**。**真正的判据是"有没有回落"**：
+  对照在 13→7→5→1→0 **回落过**，实验组**从未回落**（且落在同一上升轨迹上）。
+  **这一条与采样长度无关**，所以结论成立。
+- `corpses` **从未返回 -1**（两场共 63 个样本）⇒ 这个观测量在该路径上**可用**，不是"取不到"。
+
+⇒ **`keepCorpses` 的行为效应成立**（`DisableCorpseFadeOut` 确实阻止尸体淡出）。**硬**。
+⚠️ **边界**：本判据只看"尸体是否残留"，**不涉及**尸体对性能/寻路的影响（未测）。
+
+### 4. 仍未做
+
+- ~~**`randomTerrainSeed` 的行为效应**~~ ⇒ **本轮已取证，见 §四十二.5**。
+- 尸体残留对**性能/寻路**的影响（本轮只看数量）。
+- 版本仍是 **0.8.45**（本轮在同一个版本号内追加 `corpses` 字段；四段链已重闭合，
+  `34c6c3bb8abdb4ca`，pid 7080）。
+
+### 5. ★ `randomTerrainSeed` 的行为效应 —— 找到判据，**实测"场景布局不变"**
+
+**判据的来源**（关键发现）：引擎在**每次加载场景**时都会往 rgl 日志打一份
+**植被指纹** —— `Placed tree count, <数量>, <种类>` / `Placed flora count, <数量>, <种类>`。
+这正好是"地形/植被布局有没有变"的**便宜且可靠**的观测量（不需要写任何代码）。
+
+**实验**：同场景 `battle_terrain_a`、同配方（`imperial_legionary`10 vs `sturgian_spearman`10，
+`orders=charge`），**唯一变量 = `randomTerrainSeed`**（不传 / `7` / `12345`）。
+
+| 场次 | `terrainSeed` | 场景加载时刻 | 指纹（7 类，按数量） |
+|---|---|---|---|
+| `162102` | **-1（不传）** | 16:21:02 | poplar=830, mix=1225, pine_sprout=1306, pine=2893, grass_b=19433, plant=23443, grass_a=23565 |
+| `162214` | **-1（不传）** | 16:22:14 | **逐字相同** |
+| `162404` | **7** | 16:24:04 | **逐字相同** |
+| `162433` | **12345** | 16:24:33 | **逐字相同** |
+
+⇒ **4 次加载的指纹完全一致（去重后仅 1 种）**。
+
+**结论（刻意保守）**：
+- `randomTerrainSeed`（它同时把 `NeedsRandomTerrain` 置 true）**没有改变该场景的树木/植被布局**。
+- ⚠️ **这不足以断言"该参数完全无效"**：指纹只覆盖**植被/tree 实例数**；
+  `RandomTerrainSeed` 可能影响的是**别的东西**（例如战斗地形索引图
+  `MapScene._battleTerrainIndexMap`、地表材质分布等），那些**本判据看不到**。
+- ⚠️ 也**不能**据此判断"引擎的随机地形功能坏了" —— 只说明**在 `battle_terrain_a` 这个场景上、
+  用这三个种子，植被布局没变**。**跨场景未测。**
+⇒ 故本条记为：**"该判据下无可测差异"（中）**，**不写成"该参数无效"**。
+
+> 与 §四十.5（`terrain`）的区别：`terrain` 是**托管侧确认无消费者**；
+> `randomTerrainSeed` 是**托管侧同样零消费者 + 实测指纹不变**，但 native 侧仍有未知面。

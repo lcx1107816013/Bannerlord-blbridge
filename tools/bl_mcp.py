@@ -37,6 +37,16 @@ import bl_common  # noqa: E402
 import bl_rts  # noqa: E402
 import bl_sage  # noqa: E402
 
+# bl_blockade 是**软依赖**：它自己只用标准库，但拓扑/通路文件可能在别的机器上没有。
+# 导入失败不能让整个 MCP server 起不来 —— 所以失败时留 None，调用时如实报 unavailable。
+try:
+    import bl_blockade  # noqa: E402
+except Exception as _e:                                  # pragma: no cover
+    bl_blockade = None
+    _BLOCKADE_IMPORT_ERR = "%s: %s" % (type(_e).__name__, _e)
+else:
+    _BLOCKADE_IMPORT_ERR = ""
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "blbridge"
 SERVER_VERSION = "0.1.0"
@@ -103,6 +113,57 @@ def _pid_alive(pid):
     return ('"%d"' % n) in out
 
 
+def _pid_image_name(pid):
+    """取该 pid 的进程映像名（如 `Bannerlord.BLSE.Standalone.exe`）。
+
+    查不到这个 pid、或输出解析不出名字 ⇒ 返回 None（**未知**，绝不猜）。
+    """
+    try:
+        n = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    try:
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % n, "/NH", "/FO", "CSV"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=8).stdout.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.upper().startswith("INFO"):
+            continue
+        name = line.split(",")[0].strip().strip('"')
+        # 只认"确实查到了这一行"：CSV 首列就是映像名，空行/提示行一律不算
+        if name and name.lower() not in ("image name",):
+            return name
+    return None
+
+
+# 进程名的判据：官方启动器、BLSE 三个入口、原生辅助进程都带 bannerlord / taleworlds：
+#   Bannerlord.exe / Bannerlord.Native.exe / Bannerlord.BLSE.Launcher.exe /
+#   Bannerlord.BLSE.Standalone.exe / TaleWorlds.MountAndBlade.Launcher.exe
+GAME_IMAGE_RE = re.compile(r"bannerlord|mountandblade|taleworlds", re.I)
+
+
+def _pid_is_game(pid):
+    """判断"游戏进程在不在"。True / False / None（None = 未知）。
+
+    与 `_pid_alive`（只问"这个 pid 上有进程吗"）的区别是**要验身份**：
+    pid 会被系统回收再用 —— 2026-09-27 实测：状态文件里的 pid 6040 已经变成
+    `MSI_Central_Service.exe`，只查存在性的话 `bl_status` 会报
+    `verdict: running / 游戏进程存活`，而游戏根本没开 ⇒ 直接把调用方（AI）带偏。
+    """
+    exists = _pid_alive(pid)
+    if exists is not True:
+        return exists                       # False（pid 上没进程）/ None（探测失败）
+    name = _pid_image_name(pid)
+    if name is None:
+        return None                         # 存在但认不出名字 —— 未知，不冒充"是游戏"
+    return bool(GAME_IMAGE_RE.search(name))
+
+
 def _drop_pending(path):
     """作废一个还没被执行的请求文件。
 
@@ -129,7 +190,7 @@ def _diag_no_response(timeout, log_dir=None):
                                      % (timeout, st))
     sess = _game_session(st) or {}      # 与上面同一个路径，避免参数只生效一半
     pid = sess.get("pid")
-    alive = _pid_alive(pid)
+    alive = _pid_is_game(pid)           # 验身份：pid 被复用时不能说"游戏还在"
     if alive is False:
         return "process_exited", ("等待游戏响应超时（%.0fs）：游戏进程（pid %s）已退出 —— 该请求不会被执行"
                                   % (timeout, pid))
@@ -230,11 +291,13 @@ def _cfg(key, fallback):
 _TERMINAL_STATES = ("idle", "loaded", "ended", "stopped", "exited")
 
 
-def run_state_diagnosis(log_dir_path=None):
+def run_state_diagnosis(log_dir_path=None, pid_probe=None):
     """A9：判定"上次会话是正常结束、还活着，还是崩了/被强杀"。
 
+    `pid_probe` 只给测试用（注入一个"是不是游戏进程"的判定），缺省用真的 `_pid_is_game`。
+
     依据（缺一不可，缺了就诚实说"不知道"）：
-      • 进程是否存活（tasklist，探测失败 = 未知）；
+      • 进程是否存活且**确实是游戏**（tasklist + 映像名，探测失败 = 未知）；
       • 状态文件里的 `cleanExit`：只在引擎的 `OnSubModuleUnloaded` 里才会变成 true；
       • `missionInProgress` / 状态是否停在 battle：判断崩溃是否发生在战斗中（顺带指出战斗文件）。
     """
@@ -253,15 +316,21 @@ def run_state_diagnosis(log_dir_path=None):
     # 会让这个函数的 log_dir_path 参数只生效一半（曾因此在测试里给出错误结论）
     sess = _game_session(st_path) or {}
     pid, state = sess.get("pid"), sess.get("state")
-    alive = _pid_alive(pid)
+    alive = (pid_probe or _pid_is_game)(pid)   # 验身份：pid 被别的进程复用时不算游戏活着
     out.update({"pid": pid, "lastState": state, "alive": alive,
+                "pidImageName": _pid_image_name(pid),
                 "cleanExit": sess.get("cleanExit"),
                 "missionInProgress": sess.get("missionInProgress"),
                 "lastBattle": sess.get("lastBattle")})
 
     if alive is True:
         out["verdict"] = "running"
-        out["detail"] = "游戏进程存活（最后状态 %s）" % state
+        out["detail"] = "游戏进程存活（%s，最后状态 %s）" % (out.get("pidImageName"), state)
+        if (out.get("statusAgeSec") or 0) > 120:
+            # 不新增 verdict（`running` 的消费方按字面判等），只在文案里把"卡住"的可能性说出来
+            out["staleStatus"] = True
+            out["detail"] += ("；但状态文件已 %.0f 秒没更新 —— 进程在，可能已不在主循环"
+                              "（卡住/后台/崩溃后僵死）" % out["statusAgeSec"])
         return out
     if alive is None:
         out["verdict"] = "unknown"
@@ -411,7 +480,7 @@ def build_check(src_dir=None, mod_dir=None):
     # 先确认这个状态文件属于**当前**会话：它可能是上一局留下的。
     # 进程已经退出时，"进程里的 DLL"这个说法不成立，硬比只会给出误导结论
     # （首次部署 0.7.0 后本函数就误报过一次 game_running_other_build）。
-    alive = _pid_alive(sess.get("pid"))
+    alive = _pid_is_game(sess.get("pid"))
     loaded = (b.get("loadedSha256") or "").lower()
     mismatch = bool(b.get("fileChangedSinceLoad")) or (loaded and not deployed.lower().startswith(loaded))
     if alive is False:
@@ -493,7 +562,7 @@ def send_command(method, parameters=None, timeout=30.0, log_dir=None, poll=0.15)
         if _time.time() >= next_alive_check:
             next_alive_check = _time.time() + 1.0
             pid = (_game_session() or {}).get("pid")
-            if pid and _pid_alive(pid) is False:
+            if pid and _pid_is_game(pid) is False:
                 _drop_pending(final)
                 return None, "process_exited: 游戏进程（pid %s）在响应前退出，请求已作废" % pid
         _time.sleep(poll)
@@ -695,7 +764,8 @@ def apply_config(edits, dry_run=False, allow_missing=False):
 TOOLS = [
     {
         "name": "bl_status",
-        "description": "读取 BlBridge 遥测模块状态（模块是否加载、日志目录、会话内场次、最近一场战斗文件）",
+        "description": ("读取模块状态（是否加载、日志目录、会话内场次、最近一场战斗）"
+                        "+ 构建一致性（源码/构建/部署/进程内）+ 会话诊断（游戏是否真的在跑）。"),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
@@ -772,11 +842,10 @@ TOOLS = [
     },
     {
         "name": "bl_ghost_camera",
-        "description": ("开关**引擎自带**的自由观察相机（'幽灵模式'，v0.8.16）。"
+        "description": ("开关**引擎自带**的自由观察相机（幽灵模式）。"
                         "运行时生效、**对任何一场战斗都有效**（包含你自己打的），不像 spectate 只对 AI 场次。"
-                        "原理：设 `MissionScreen.IsCheatGhostMode`（官方自己就是这么开的）——"
-                        "相机模式变 Free、且命令 UI 开着也保持自由（能观战 + 能下令）；"
-                        "镜头的移动/缩放输入由引擎自己处理。"
+                        "做法：设 `MissionScreen.IsCheatGhostMode` —— 相机模式变 Free，"
+                        "且命令 UI 开着也保持自由（能观战 + 能下令）。"
                         "⚠️ 要能自己用 WASD 飞还需 engine_config.txt 的 cheat_mode=1（只读项，我们不改）。"
                         "装了 RTSCamera 的机器优先用它的配置（bl_apply_rts_config）。"),
         "inputSchema": {"type": "object", "properties": {
@@ -786,16 +855,14 @@ TOOLS = [
     },
     {
         "name": "bl_camera_speed",
-        "description": ("相机移动速度（v0.8.17）。速度是两套互不相干的公式，所以分三条腿，用 mode 指名："
-                        "`shift` = 引擎自由相机的 Shift 倍率（走官方控制台函数 `mission.set_shift_camera_speed`，"
-                        "**不需要作弊模式**，改完按住 Shift 飞就生效）；"
-                        "`base` = 引擎自由相机的基础倍率（反射；⚠️ 引擎把速度分量 clamp 在 ±20，"
+        "description": ("相机移动速度分三条互不相干的腿，用 mode 指名："
+                        "`shift` = 引擎自由相机的 Shift 倍率（**不需要作弊模式**，改完按住 Shift 飞就生效）；"
+                        "`base` = 引擎自由相机的基础倍率（⚠️ 引擎把速度分量 clamp 在 ±20，"
                         "调到某个量之后可能不再变快）；"
-                        "`rts` = RTSCamera 的相机速度系数（反射 `ICameraController.MovementSpeedFactor`，"
-                        "**最有效**：它的速度上限随基础速度一起放大，没有那个天花板）；"
-                        "`boost` = 把三条可用腿一次设成同一个值；`status` = 只读现状（默认）。"
+                        "`rts` = RTSCamera 的相机速度系数（**最有效**：上限随基础速度一起放大，没有那个天花板）；"
+                        "`boost` = 三条一次设成同一个值；`status` = 只读现状（默认）；`probe` = 测速探针。"
                         "每条腿都**写完回读**，失败会点名是哪条腿、为什么 —— 不静默。"
-                        "装了 RTSCamera 时优先用 rts（你现在看到的自由相机就是它那台）。"),
+                        "装了 RTSCamera 时优先用 rts。"),
         "inputSchema": {"type": "object", "properties": {
             "mode": {"type": "string", "enum": ["status", "shift", "base", "rts", "boost", "probe"],
                      "description": "默认 status（只查）；shift/base/rts/boost 需要 value；probe = 测速探针"},
@@ -807,19 +874,13 @@ TOOLS = [
     },
     {
         "name": "bl_control_agent",
-        "description": ("接管士兵（v0.8.25，**最小版**）：把 `Mission.MainAgent` 换成友方某个 agent，"
-                        "并把它交给玩家控制器（`Controller = Player`）。"
-                        "官方那条路（`Mission.CanTakeControlOfAgent`）**只在主角阵亡后**才允许、且**不改 MainAgent**；"
-                        "本工具补上「随时接管」，做法照 RTSCamera / MissionLibrary 的源码（MIT），"
-                        "包含四步：老主角色交回 AI（否则同编队两个 Controller=Player 会让编队逻辑栈溢出）→ "
-                        "改 MainAgent → 目标 Controller=Player + 清 AIStateFlags + 摘 VictoryComponent → "
-                        "复位 MissionScreen._isPlayerAgentAdded（反射，失败只降级并回传 screenReset=false）。"
-                        "v0.8.32：装了 RTSCamera 时还会走它自己的**平滑推镜**"
-                        "（反射 `Utility.BeforeSetMainAgent` → 赋值 → `AfterSetMainAgent`），"
-                        "结果在 `cameraFollow`（applied / shouldSmooth / lastFollowed / why）；"
-                        "没装则退回只复位 screen（行为同旧版）。"
+        "description": ("接管士兵（**最小版**）：把 `Mission.MainAgent` 换成友方某个 agent 并交给玩家控制器。"
+                        "官方那条路（`CanTakeControlOfAgent`）**只在主角阵亡后**才允许、且**不改 MainAgent**；"
+                        "本工具补上「随时接管」。"
                         "选目标：`agentIndex` > `troop` > `formation` > 该方第一个存活者；只允许玩家方（拒绝敌人）。"
                         "`mode=release` 换回接管前记录的那个主角色；`mode=status` 只看现状（不改任何东西）。"
+                        "装了 RTSCamera 时会走它自己的**平滑推镜**，结果在 `cameraFollow`；"
+                        "没装则退回只复位 screen。"
                         "⚠️ 与 RTSCamera 并存时它的 `ControlTroop` 键也会改 MainAgent，两边会互相覆盖。"
                         "未实现、传了就报 unsupported_param：agentId / slot / mount / weapon。"),
         "inputSchema": {"type": "object", "properties": {
@@ -839,94 +900,64 @@ TOOLS = [
         "name": "bl_order",
         "description": ("战斗中途改令：对**正在进行**的战斗里某一方的编队改 movement / 移动到指定点 / "
                         "冲锋到指定敌方编队 / 攻击指定敌方单位 / 阵列 / 射击纪律 / 骑乘令。"
-                        "与开战 DSL 走同一条下发路径"
-                        "（Formation.SetMovementOrder + 同一个映射器），区别只是可随时调用。"
                         "⚠️ 只在战斗内有意义：mission 之外碰 MovementOrder 会抛 TypeInitializationException"
-                        "并把该类型永久标记为不可用，所以没战斗时直接拒（no_mission），不做\"先试试看\"。"
-                        "默认 detachAI=true：连带 SetControlledByAI(false,false)；否则该方 team 级战术会周期性把令"
-                        "覆盖回去（开战路径实测：守方 stop 组被覆盖 59/115 次、位移 154 m）。"
-                        "判据是**当场回读**：三种 movement order（movement/position/target）都回传 "
-                        "orderBefore/orderAfter（引擎 MovementOrder.OrderEnum）；position 另回传 moveTarget"
-                        "（引擎按导航网格算出的落点，与请求值有偏差属引擎修正）+ formationCenter；"
-                        "target 另回传 targetAfter（回读到的目标编队）+ targetDistance（双方编队重心距离）。"
-                        "后两者是**行为**判据：隔几秒再调一次，重心应朝目标点挪 / 距离应缩小。"
-                        "要确认不被覆盖，隔几秒再调一次看 orderBefore / moveTarget / targetAfter 是否仍是上次的值。"
-                        "movement / position / target / targetAgent **四者互斥**"
-                        "（一个编队只能有一个 movement order）。"
-                        "⚠️ 回传的 `emptyFormations`（>0 时 applied 里对应条目带 `emptyFormation:true`、"
-                        "`count:0`）= **令写进去了但那个编队一个人都没有** ⇒ 没人会执行"
+                        "并把该类型永久标记为不可用，所以没战斗时直接拒（no_mission）。"
+                        "⚠️ movement / position / target / targetAgent **四者互斥**（一个编队只能有一个 movement order）；"
+                        "riding 与它们**正交**（只管骑不骑、不管去哪），不参与互斥。"
+                        "默认 detachAI=true（连带 SetControlledByAI(false,false)）；否则 team 级战术会周期性把令覆盖回去"
+                        "（实测守方 stop 组被覆盖 59/115 次、位移 154 m）。设 false 仅用于对照组。"
+                        "判据是**当场回读**：三种 movement order 都回传 orderBefore/orderAfter；"
+                        "position 另回传 moveTarget（引擎按导航网格算的落点，与请求值有偏差属引擎修正），"
+                        "target 另回传 targetAfter + targetDistance。要确认没被覆盖，隔几秒再调一次看是否仍是上次的值。"
+                        "⚠️ emptyFormations > 0 = 令写进去了但那个编队没人 ⇒ 没人执行"
                         "（编队按兵种自动分：弓手在 Ranged、近战步兵在 Infantry，先核对 formation 选对没）。"
-                        "riding（上下马，v0.8.32）走 `Formation.SetRidingOrder`，回传 ridingBefore/ridingAfter，"
-                        "与 movement order **正交**（管骑不骑、不管去哪）⇒ 不参与四者互斥。"
-                        "targetAgent（攻击指定敌方**单位**，v0.8.32）走 `MovementOrderAttackEntity`，"
-                        "回传 targetEntitySet / targetAgentAlive / targetDistance；"
-                        "⚠️ 目标会死：阵亡后重申会跳过并记 order error（不静默改成冲锋）。"),
+                        "⚠️ targetAgent 的目标会死：阵亡后重申会跳过并记 order error（不静默改成冲锋）。"),
         "inputSchema": {"type": "object", "properties": {
             "side": {"type": "string", "enum": ["player", "attacker", "defender"],
-                     "description": "哪一方，默认 player（mission 里玩家侧仍是攻/守之一）"},
+                     "description": "哪一方，默认 player"},
             "formation": {"type": "string",
                           "description": "编队：Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或下标 0~4；"
                                          "不传 = 该方所有有兵的编队"},
             "movement": {"type": "string", "enum": ["charge", "advance", "fallback", "stop", "retreat"],
-                         "description": "改 movement（hold 已移除：引擎层本就等同 stop）。"
-                                        "与开战 DSL 同一套拼写；会被组路径 0.5s 重申覆盖，"
-                                        "所以本工具会同步改“待重申的值”（回传 pendingSpecsUpdated）。"
-                                        "与 position / target 互斥"},
+                         "description": "改 movement（hold 已移除：引擎层等同 stop）。"
+                                        "会被组路径 0.5s 重申覆盖，本工具同步改「待重申的值」（回传 pendingSpecsUpdated）"},
             "position": {"type": "string",
-                         "description": "移动到指定点（v0.8.30）：\"x,y\" 或 \"x,y,z\"（英文逗号，单位米，"
-                                        "各分量 |值| ≤ 10000；z 省略 = 0，引擎按地面/导航网格补 Z）。"
-                                        "与 movement / target 互斥。组路径那 0.5s 重申只认 movement 名 ⇒ "
-                                        "本工具会把它标成“手动令优先”（回传 pendingSpecsUpdated），"
-                                        "重申时照原样重申同一个点，不会退回 charge"},
+                         "description": "移动到指定点：\"x,y\" 或 \"x,y,z\"（英文逗号，单位米，各分量 |值| ≤ 10000；"
+                                        "z 省略 = 0）。本工具会标成「手动令优先」（回传 pendingSpecsUpdated），"
+                                        "重申时照原样重申同一点，不会退回 charge"},
             "target": {"type": "string",
-                       "description": "冲锋到指定**敌方编队**（v0.8.31）：Infantry/Ranged/Cavalry/"
-                                      "HorseArcher/Skirmisher 或下标 0~4（敌方 = 与 side 相对的那一方）。"
-                                      "引擎侧是 MovementOrderChargeToTarget(Formation)。"
-                                      "与 movement / position 互斥。目标编队为空/不存在时直接拒"
-                                      "（target_formation_empty / no_target_formation），"
-                                      "不静默换成普通冲锋。另回传 targetAfter / targetDistance"},
+                       "description": "冲锋到指定**敌方编队**：Infantry/Ranged/Cavalry/HorseArcher/Skirmisher 或下标 0~4。"
+                                      "目标编队为空/不存在时直接拒，不静默换成普通冲锋。回传 targetAfter / targetDistance"},
             "arrangement": {"type": "string",
                             "enum": ["line", "shieldwall", "circle", "square", "skein", "column",
                                      "loose", "scatter"],
-                            "description": "改编队阵列（`ArrangementOrder`）"
-                                           "：**不在**组路径重申范围内（重申只管 movement）"},
+                            "description": "改编队阵列：**不在**组路径重申范围内"},
             "firing": {"type": "string", "enum": ["fireAtWill", "holdFire"],
-                       "description": "改射击纪律（`FiringOrder`）：引擎只有这两档"},
+                       "description": "改射击纪律：引擎只有这两档"},
             "targetAgent": {"type": "integer",
-                            "description": "攻击指定**敌方单位**（v0.8.32）：agent 下标（`Agent.Index`，"
-                                           "可从遥测或 bl_control_agent status 的 candidates 取）。"
-                                           "引擎侧是 MovementOrderAttackEntity（surround=true）。"
-                                           "与 movement / position / target 四者互斥。"
-                                           "回传 targetEntitySet / targetAgentAlive / targetDistance"
-                                           "（后者是编队重心↔该单位的距离，行为判据）。"
-                                           "⚠️ 目标会死：阵亡后重申会跳过并记 order error，不静默改成冲锋"},
+                            "description": "攻击指定**敌方单位**：agent 下标（可从遥测或 bl_control_agent status 的 "
+                                           "candidates 取）。回传 targetEntitySet / targetAgentAlive / targetDistance"},
             "riding": {"type": "string", "enum": ["free", "mount", "dismount"],
-                       "description": "改骑乘令（v0.8.32，`Formation.SetRidingOrder`）：引擎三档 —— "
-                                      "free 不干预 / mount 上马 / dismount 下马。与 movement order 正交"
-                                      "（只管骑不骑、不管去哪），所以**不参与** movement/position/target 的互斥。"
-                                      "回传 ridingBefore/ridingAfter（引擎 RidingOrder.RidingOrderEnum）；"
-                                      "只对**有坐骑**的单位有实际效果。**不在**组路径重申范围内"},
+                       "description": "改骑乘令：free 不干预 / mount 上马 / dismount 下马。"
+                                      "回传 ridingBefore/ridingAfter；只对**有坐骑**的单位有实际效果"},
             "detachAI": {"type": "boolean",
-                         "description": "是否连带 SetControlledByAI(false,false)，默认 true（建议保持 true；"
-                                        "设 false 只用于\"看它会不会被战术覆盖\"的对照）"}},
+                         "description": "是否连带 SetControlledByAI(false,false)，默认 true；"
+                                        "设 false 只用于「看它会不会被战术覆盖」的对照"}},
             "additionalProperties": False},
     },
     {
         "name": "bl_skip_video",
-        "description": ("跳过开场动画（v0.8.20）。做法学自 BUTR/Bannerlord.GABS 的 `core/skip_video`："
-                        "**不模拟 ESC**，而是先问「当前活动状态是不是 `VideoPlaybackState`」，"
-                        "是就直接调它的 `OnVideoFinished()`（引擎自己的视频屏也是这么收敛的）。"
-                        "判据硬、无副作用；不是视频时如实报 `not_video` 并回传当前状态名。"),
+        "description": ("跳过开场动画。**不模拟 ESC**，而是先问「当前活动状态是不是 `VideoPlaybackState`」，"
+                        "是就直接调它的 `OnVideoFinished()`。判据硬、无副作用；"
+                        "不是视频时如实报 `not_video` 并回传当前状态名。"),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "bl_cheat_mode",
-        "description": ("开关**作弊模式**（v0.8.20，带回读）。做法学自 BUTR/Bannerlord.GABS 的 `core/set_cheat_mode`："
-                        "写 `TaleWorlds.Engine.NativeConfig.CheatMode`（属性私有 setter → 后备字段两条路都试），"
-                        "再回读验证。"
+        "description": ("开关**作弊模式**（带回读：写 NativeConfig.CheatMode 再回读验证）。"
                         "**为什么需要它**：引擎自由相机的倍率热键（Ctrl+↑ ×1.5 / Ctrl+↓ ×2÷3 / Ctrl+中键重置）"
                         "与观察者 HUD 的「摄像机移动速度」读数都被 `Game.Current.CheatMode` 门控 ⇒ "
-                        "这是「相机太慢」的另一条正解，且不改我们的相机代码。"
+                        "这是「相机太慢」的另一条正解，不改我们的相机代码。"
                         "⚠️ 开了它 = 打开开发者/作弊通道（F2/F3/F4 杀敌杀友、Ctrl+K 幽灵相机、Ctrl+F5 换控制权等一并生效）；"
                         "本工具**不做任何自动开启**，只按显式请求执行。只作用于本次进程，重启回到 engine_config.txt 的设置。"),
         "inputSchema": {"type": "object", "properties": {
@@ -941,11 +972,20 @@ TOOLS = [
     },
     {
         "name": "bl_start_battle",
-        "description": ("让游戏开一场**无玩家**的 AI 对 AI 战斗（10 倍速）。"
-                        "前提：游戏需停在官方「自定义战斗」界面（v0.8.14 起只认它 —— 自建面板已删）；"
-                        "用 bl_open_ui（默认目标就是它）可让 agent 自己走进去，不必靠人点。"
-                        "模式由 scene 决定：城池场景自动走官方 siege mission（围攻）。"
-                        "返回 accepted 后请用 bl_wait_for_state 等 ended。"),
+        "description": ("⚡【Agent 调用纪律 · 必读】收到\"开一场战斗\"类需求时**直接调用本工具**，"
+                        "禁止先去列目录 / 读 XML / 查索引确认兵种 id：troop id 由引擎侧 MBObjectManager "
+                        "现场 Resolve，前置探索不产生任何新信息。缺参数就一次性问清（模式/人数/兵种/是否上帝视角）；"
+                        "参数齐了立刻开。"
+                        "第三方模组兵种（如 WarlordsBattlefield 的 empire_infantry5）不在官方索引里，"
+                        "必须带 skipTroopCheck=true；attackerTroop/defenderTroop 必填（即使给了 Groups）。"
+                        "攻城常用 scene=empire_town_c（Ortysia），要上帝视角带 rtsPreset=siege-god。"
+                        "开一场**无玩家**的 AI 对 AI 战斗（10 倍速）；游戏需停在官方自定义战斗界面"
+                        "（用 bl_open_ui 进入）。城池场景自动走攻城。返回 accepted 后用 bl_wait_for_state 等 ended。"
+                        "v0.8.41 新增：attackerTacticLevel/defenderTacticLevel（战术档位，需配 orders=default "
+                        "才看得出效果）、terrain/randomTerrainSeed（地形）、aiFriendlyFireMultiplier"
+                        "（**打到「玩家方」身上的伤害**倍率 —— 不是同队误伤，见该参数的说明）、"
+                        "keepCorpses、sceneLevel/timeOfDay（攻城）。"
+                        "被忽略的参数会在响应的 envNotes 里报出 —— 绝不静默。"),
         "inputSchema": {"type": "object", "properties": {
             "attackerTroop": {"type": "string", "description": "攻方兵种 id，如 imperial_legionary"},
             "attackerCount": {"type": "integer", "description": "攻方人数，默认 20"},
@@ -954,42 +994,42 @@ TOOLS = [
             "scene": {"type": "string", "description": "场景名，默认 battle_terrain_a"},
             "durationCapSec": {"type": "integer", "description": "单场时长上限（游戏内秒），默认 600"},
             "orders": {"type": "string", "enum": ["charge", "default"],
-                       "description": ("战术对称化。charge（默认）=双方都用 TacticCharge，"
-                                       "消除\"攻方进攻/守方原地防守\"带来的方向偏差（实测镜像对局会 13:0 一边倒）；"
-                                       "default=引擎默认战术，仅用于 A/B 对照")},
+                       "description": ("战术对称化。charge（默认）=双方都用 TacticCharge，消除攻守方向偏差"
+                                       "（实测镜像对局 13:0 一边倒）；default=引擎默认战术，仅作 A/B 对照")},
             "playerSide": {"type": "string", "enum": ["attacker", "defender"],
-                           "description": "谁被标记为玩家侧，仅用于排查该标记是否带来系统性偏差，默认 attacker"},
+                           "description": "谁被标记为玩家侧，仅排查该标记是否带来系统性偏差，默认 attacker"},
             "spectate": {"type": "boolean",
-                         "description": ("兜底观战镜头（v0.8.14，默认 false）。true = 挂官方 "
-                                         "ICameraModeLogic 让镜头走自由观察相机。"
-                                         "⚠️ 装了 RTSCamera 时野战会被它抢先（无效果），所以**优先用 rtsPreset**；"
-                                         "这个开关留给「没装 RTSCamera」的机器做兜底")},
+                         "description": ("兜底观战镜头（默认 false）。true = 挂官方 ICameraModeLogic 走自由观察相机。"
+                                         "⚠️ 装了 RTSCamera 时野战会被它抢先（无效果），**优先用 rtsPreset**")},
             "rtsPreset": {"type": "string",
-                          "description": ("开战前套用 RTSCamera 预设（B 方案）：siege-god = 攻城也抬升视角；"
-                                          "free-always / elevated-always / god-full。"
-                                          "实测改完无需重启即对本场生效；会先备份配置文件")},
+                          "description": ("开战前套用 RTSCamera 预设：siege-god=攻城也抬升视角；"
+                                          "free-always / elevated-always / god-full。改完无需重启即对本场生效，会先备份")},
             "dummySide": {"type": "string", "enum": ["none", "attacker", "defender"],
-                          "description": "不朽靶场（v0.8.0）：把该方设为永不倒下的靶子，默认 none"},
+                          "description": "不朽靶场：把该方设为永不倒下的靶子，默认 none"},
             "freezeDummies": {"type": "boolean",
-                              "description": "冻结靶子 AI（不还手）。会改变 AI 行为，默认 false"},
+                              "description": "冻结靶子 AI（不还手）。默认 false"},
             "unlimitedAmmo": {"type": "boolean",
                               "description": "给射手补满弹药（靶子的弹药不补 —— 它是被测对象），默认 false"},
             "dummyArmor": {"type": "string",
                            "description": ("靶子护甲数值覆盖，如 \"head=45,torso=35,legs=20,arms=25\""
-                                           "（只作用于靶子；未知部位名/非数字会直接报错，不静默跳过）")},
+                                           "（只作用于靶子；未知部位名/非数字直接报错）")},
             "dummyBodyItem": {"type": "string",
-                              "description": ("把靶子**身甲**换成该物品 id（材质对照实验用，"
-                                              "如 plated_leather_coat）。材质抗性只来自物品，数值可另用 dummyArmor 对齐")},
+                              "description": ("把靶子**身甲**换成该物品 id（材质对照实验用，如 plated_leather_coat）。"
+                                              "材质抗性只来自物品，数值可另用 dummyArmor 对齐")},
             "skipTroopCheck": {"type": "boolean",
-                               "description": ("跳过兵种 id 校验（默认 false=校验）。"
-                                               "校验走 BannerlordSage 索引，只覆盖官方 XML；"
-                                               "用第三方模组兵种时该 id 会被判为不存在，此时置 true 跳过")},
+                               "description": ("跳过兵种 id 校验（默认 false）。校验走 BannerlordSage 索引，"
+                                               "只覆盖官方 XML；用第三方模组兵种时置 true")},
             "allowAnyState": {"type": "boolean",
                               "description": ("跳过「必须停在自定义战斗界面」检查（默认 false）。"
-                                              "用于从主菜单直接开战，但仍需游戏内数据已加载（否则会报 unknown_troop）")},
+                                              "⚠️ 实测：**裸主菜单下兵种/文化数据未加载**，传任何兵种 id 都是 "
+                                              "unknown_troop ⇒ 它**不能**用来『从主菜单开战』（该原始设计目标"
+                                              "当年就已被排除，见 PROGRESS §四）。"
+                                              "⚠️ 也**不要**再用它去绕 wrong_state —— "
+                                              "带 NavalDLC 时官方入口落 NavalCustomBattleState，"
+                                              "v0.8.44 起判据已改为后缀匹配 `*CustomBattleState`，"
+                                              "正常走 open_ui 就不会被误报。")},
             "rounds": {"type": "integer",
-                       "description": ("多轮连续实验：同一 mission 内跑 N 轮（每轮一个独立日志文件），"
-                                       "默认 1 = 关闭")},
+                       "description": "多轮连续实验：同一 mission 内跑 N 轮（每轮独立日志），默认 1 = 关闭"},
             "roundEndAlive": {"type": "integer",
                               "description": "某方存活 ≤ 此值即判定本轮结束（默认 1）"},
             "roundSwap": {"type": "boolean", "description": "每轮交换攻守（第 2、4…轮把原守方放到攻方位置）"},
@@ -997,25 +1037,71 @@ TOOLS = [
                                    "description": "重生时攻方进场点，如 \"100,0,200\"（x,y,z 或 x,z）"},
             "roundSpawnDefender": {"type": "string", "description": "重生时守方进场点，语法同上"},
             "randomSeed": {"type": "integer",
-                           "description": ("随机种子（-1 = 不设）。注意：伤害公式里的随机命中因子在 native 层掷，"
+                           "description": ("随机种子（-1 = 不设）。⚠️ 伤害公式的随机命中因子在 native 层掷，"
                                            "同种子不保证逐值复现")},
             "attackerGroups": {"type": "string",
                                "description": ("攻方多兵种/战术组：troop:count[:formation[:movement]]，多组用 | 分隔。"
                                                "给了它则 attackerTroop/attackerCount 被忽略；与 orders 互斥。"
-                                               "⚠️ 第 3 字段 `formation` **不决定编队**（v0.8.32 明确）："
-                                               "编队由兵种自身决定（troop.GetFormationClass()），该字段只回显；"
-                                               "写了不同族的名字会在返回的 `formationWarnings` 里被点名"
-                                               "（不阻断开战）")},
-            "defenderGroups": {"type": "string", "description": "守方多兵种/战术组，语法同上"}},
+                                               "⚠️ 第 3 字段 formation **不决定编队**（编队由兵种自身决定），只回显；"
+                                               "写错族名会在 formationWarnings 里被点名（不阻断开战）")},
+            "defenderGroups": {"type": "string", "description": "守方多兵种/战术组，语法同上"},
+            # ── v0.8.41：战术档位 + 环境旋钮（零 Harmony；取证见 src/TacticsCombatant.cs / src/BattleEnv.cs）──
+            "attackerTacticLevel": {
+                "type": "integer",
+                "description": ("攻方战术档位：-1（默认，不覆盖）或 0..100。"
+                                "引擎用它**分 20 / 50 两档**决定给该方挂哪些 TacticOption"
+                                "（<20 只有 TacticCharge；>=20 追加 TacticFullScaleAttack 等；"
+                                ">=50 再追加 TacticFrontalCavalryCharge 等）。"
+                                "⚠️ 默认 orders=charge 会 ClearTacticOptions() 只留 TacticCharge —— "
+                                "想真的看到档位效果，要配 orders=default（保留引擎战术菜单）。"
+                                "响应与 status 里的 aNative/dNative 是引擎原生值（= 参战兵种 max(Tactics)），"
+                                "用来和你设的值对照")},
+            "defenderTacticLevel": {"type": "integer", "description": "守方战术档位，语义同上"},
+            "terrain": {
+                "type": "string",
+                # ⚠️ 这里**必须是纯字面量**：`bl_check_dispatch.py` 用 `ast.literal_eval(TOOLS)`
+                #    静态核对"声明 ↔ 分派"，任何表达式（`+` / `.join()`）都会让它当场报
+                #    "malformed node or string"（v0.8.41 实测踩到）。权威表是 bl_common.TERRAINS，
+                #    与 src/BattleEnv.cs 的一致性由 bl_selftest ⑭ 双向对账。
+                "description": ("地形覆盖（默认不设 = 引擎按场景决定）。可选："
+                                "plain | desert | snow | forest | steppe | fording | mountain | "
+                                "lake | water | river | canyon | ruralarea | swamp | dune | bridge | "
+                                "coastalsea | opensea | beach | cliff | nonnavigableriver | "
+                                "landrestriction | searestriction | underbridge。"
+                                "⚠️ 只管野战路径；攻城走官方入口，传了会被显式忽略并在 envNotes 里报出。"
+                                "⚠️ **在自定义战斗里它没有托管消费者**（2026-10-05 反证）：唯一已知消费点"
+                                "`SandboxAgentStatCalculateModel` 只注册在战役模式；自定义战斗用的是 "
+                                "`CustomBattleAgentStatCalculateModel`（全文 Terrain/Perk 命中 0）"
+                                "⇒ 本靶场实测「默认 vs snow 无可测差异」（native 侧未排除）")},
+            "randomTerrainSeed": {
+                "type": "integer",
+                "description": ("随机地形种子（默认不设）。设了会同时打开 NeedsRandomTerrain。"
+                                "⚠️ 托管侧零读取消费者；实测把引擎的**植被指纹**（rgl 日志的 "
+                                "`Placed tree/flora count`）当判据，种子 -1/-1/7/12345 四次场景加载**逐字相同**"
+                                "⇒ 该判据下**无可测差异**（不代表参数无效：指纹看不到地形索引图/地表材质）")},
+            "keepCorpses": {
+                "type": "boolean",
+                "description": ("关掉尸体淡出（默认 false）。长跑/多轮时尸体量稳定 ⇒ 性能与寻路不随轮次漂移。"
+                                "v0.8.45 起可用 `sample` 事件的 **`corpses`** 字段验证行为效应："
+                                "实测对照的尸体数 13→7→5→1→0（会淡出），而 keepCorpses=true 时单调升到 19 "
+                                "并**从不回落**")},
+            "sceneLevel": {
+                "type": "integer",
+                "description": "攻城场景升级等级 1..3（默认 3 = 改动前的写死值）。仅攻城路径生效"},
+            "timeOfDay": {
+                "type": "number",
+                "description": "攻城开战时刻，小时 0..24（默认 6 = 改动前的写死值）。仅攻城路径生效"}},
             "required": ["attackerTroop", "defenderTroop"], "additionalProperties": False},
     },
     {
         "name": "bl_wait_for_state",
-        "description": "轮询等待推演状态（idle/loading/running/ended/error），到点返回当前状态与结果",
+        "description": ("轮询等待推演状态（idle/loading/running/ended/error），到点返回当前状态与结果。"
+                        "开战后的 `loading` 段是引擎加载场景（秒级~几十秒），本工具只是盯状态，"
+                        "1s 一轮；running 但引擎停滞（stalled）会提前判无效并早退。"),
         "inputSchema": {"type": "object", "properties": {
             "state": {"type": "string", "description": "目标状态，默认 ended"},
             "timeoutSec": {"type": "integer", "description": "最长等待秒数，默认 180"},
-            "pollSec": {"type": "number", "description": "轮询间隔秒，默认 2"}},
+            "pollSec": {"type": "number", "description": "轮询间隔秒，默认 1"}},
             "additionalProperties": False},
     },
     {
@@ -1043,7 +1129,9 @@ TOOLS = [
                         "v0.8.14 起不再有自建面板 —— 官方界面本身就是完整入口"
                         "（战斗/围攻/村庄/海战/海上掠夺 + 玩家类型 + 选择攻守方 + 全套地图参数）。"
                         "⚠️ 入口动作是 fire-and-forget（跨帧加载）：返回 requested=true 只代表已触发，"
-                        "请用 bl_list_ui 看 activeState 是否真的变了（约 1~5 秒）。"
+                        "请用 bl_list_ui 轮询 activeState 是否真的变了。"
+                        "⚠️ CustomBattleState 从主菜单进**官方本身要 ~30s 才落地**（真机实测，"
+                        "不是本工具慢）；本工具不代等，落地判据见 bl_launch_game 第二步。"
                         "⚠️ 只在**主菜单**可用：游戏已加载时执行它会让状态栈卡在 GameLoadingState（真机实测过）。"),
         "inputSchema": {"type": "object", "properties": {
             "uiId": {"type": "string",
@@ -1060,6 +1148,146 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "state": {"type": "string", "enum": ["CustomBattleState"],
                       "description": "要离开的状态，默认且仅支持 CustomBattleState"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_get_screen",
+        "description": ("只读：读当前界面的层 / 影片 / 可点按钮（文本 + 是否可用 + 状态 + id）—— 读界面，"
+                        "不模拟鼠标（合成输入到不了官方界面）。"
+                        "返回 screenType / layerCount / layers[]（name、isActive、movies[]：movieName、dataSource、"
+                        "buttonCount、buttons[]）。地图装饰层默认跳过，layerFilter 只看某层。"
+                        "⚠️ 按钮定位**优先用 text**：id 常常是空的、而且不唯一"
+                        "（真机 2026-09-27：主菜单 11 个按钮只有 1 个有 id；自定义战斗界面 16 个里 AddTroopButton 占 8 个）。"
+                        "前置：游戏在跑，且已部署含 get_screen 的 DLL（v0.8.34+；未部署会 no_response）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "layerFilter": {"type": "string",
+                            "description": "可选：只返回层名包含该子串的层（大小写不敏感），并展开其全部按钮"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_get_viewmodel_property",
+        "description": ("只读：读当前界面某层 ViewModel 的一个属性；点号路径可穿透嵌套"
+                        "（如 'Smelting.SmeltableItemList'）。列表属性返回 count + items + missingSubProperties，"
+                        "subProperties 抽每项的子字段。layerName 从 bl_get_screen 的 layers[].name 取。"
+                        "⚠️ 属性不存在 = `ok:false` / `property_not_found` 并给出候选属性名（不是 value:null）；"
+                        "`value:null` 只表示‘属性存在、值就是空’。层名写错 = `no_data_source` 并点名那层。"
+                        "前置同 bl_get_screen（游戏在跑 + DLL 已部署 v0.8.34+）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "propertyName": {"type": "string",
+                             "description": "ViewModel 上的属性路径，点号分隔，如 'PlayerGold' 或 'Smelting.SmeltableItemList'"},
+            "layerName": {"type": "string",
+                          "description": "层名（从 bl_get_screen 的 layers[].name 取；如 'CustomBattle'）"},
+            "subProperties": {"type": "string",
+                              "description": "可选：对列表属性的每项，逗号分隔抽取的子字段名，如 'ItemDescription,ItemCost'"}},
+            "required": ["propertyName", "layerName"], "additionalProperties": False},
+    },
+    {
+        "name": "bl_get_inventory",
+        "description": ("只读：读玩家队伍的库存清单（主队伍 ItemRoster）+ 金币。"
+                        "返回 gold / itemCount / totalElements / items[]（name、id、quantity、type、value、weight、tier）。"
+                        "limit 控制最多返回几条（默认 50；截断时 totalElements 是真实总数，可对账）。"
+                        "⚠️ 前置：**战役内**（Campaign 上下文）—— 主菜单 / 自定义战斗会如实报 no_campaign，不猜。"
+                        "需要已部署含 get_inventory 的 DLL（v0.8.36+）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "最多返回的条目数，默认 50"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_saves",
+        "description": ("只读：列出所有存档（MBSaveLoad.GetSaveFiles）。"
+                        "返回 count / saves[]（name、isCorrupted、meta：存档元数据键值包，含模组/版本信息）。"
+                        "name 是唯一标识，喂给 bl_load_save。前置：游戏在跑（v0.8.36+ DLL）。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_load_save",
+        "description": ("**按名字直载存档**（MBSaveLoad.LoadSaveGameData + StartNewGame，"
+                        "不经过存档选择界面）—— 无人值守换档的正门，也是复现读档期弹窗（模组不匹配）"
+                        "的测试入口。异步加载：返回 started=true 后轮询 bl_list_ui 等 topScreen 变 *MapScreen"
+                        "（自动应答器会点掉『模组不匹配』的『是』）。"
+                        "⚠️ 前置：主菜单（战役进行中拒绝 in_campaign）；name 必须精确匹配 bl_list_saves 的 name"
+                        "（不存在 → save_not_found 并列出可用档）。需要 v0.8.36+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "存档名（bl_list_saves 里的 name，精确匹配）"}},
+            "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "bl_campaign_time",
+        "description": ("只读：战役时间/暂停状态诊断。"
+                        "status（默认，也是唯一可用的 mode）回读 "
+                        "timeControlMode / inMenuContext / campaignDays / pauseMenuOpen。"
+                        "**pauseMenuOpen** = 地图上的暂停菜单（ESC 菜单）是否开着 —— 原版在失焦时若 "
+                        "BannerlordConfig.StopGameOnFocusLost=true 会自动打开它，而它会向 GameStateManager "
+                        "注册 ActiveStateDisableRequest ⇒ MapState 不再 Tick ⇒ 整个战役冻结"
+                        "（档位却仍是 StoppablePlay）⇒ 判定「切窗口会不会被暂停」只能靠本字段。"
+                        "**campaignDays** = 单调递增的战役天数（CampaignTime.Now.ToDays）："
+                        "失焦前后各读一次，天数涨了才证明时间真的在走"
+                        "（timeControlMode 不是 Stop 证明不了引擎没冻结战役推进）。"
+                        "⚠️ v0.8.39：时间保活（mode=on/off）已移除 —— 用户明确不需要改游戏的时间暂停，"
+                        "而且它看不见暂停菜单那种暂停、副作用还会顶掉手动暂停。"
+                        "要「切窗口不弹暂停菜单」请用原版选项 BannerlordConfig.StopGameOnFocusLost=false"
+                        "（PROGRESS §三十二）。"
+                        "前置：战役加载后才有 timeControlMode / campaignDays 字段。v0.8.36+ 才有本工具。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["status"],
+                     "description": "只接受 status（默认）；on/off 已在 v0.8.39 移除，传了会显式报错"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_campaign_overview",
+        "description": ("只读：战役全局概览（控制面 A 阶段）。"
+                        "返回 inCampaign / clans / kingdoms / settlements / mobileParties 计数，"
+                        "以及玩家 gold / influence / playerClan / playerKingdom / campaignDays / timeControlMode。"
+                        "⚠️ 前置：战役内（Campaign 上下文）；主菜单 / 自定义战斗如实报 no_campaign，不猜。"
+                        "需要 v0.8.40+ DLL（含 campaign_overview）。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_kingdoms",
+        "description": ("只读：列出所有王国（Kingdom）。"
+                        "返回 count / kingdoms[]（name、stringId、rulingClan、leader、clanCount、gold、isKingdom）。"
+                        "limit 控制最多返回几条（默认全量）。前置：战役内。需要 v0.8.40+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "最多返回的条目数，默认全量"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_clans",
+        "description": ("只读：列出所有家族（Clan）。"
+                        "返回 count / clans[]（name、stringId、tier、gold、influence、kingdom、leader、"
+                        "isMinor、isEliminated、fiefCount、partyCount）。"
+                        "limit 控制最多返回几条（默认全量）。前置：战役内。需要 v0.8.40+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "最多返回的条目数，默认全量"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_settlements",
+        "description": ("只读：列出所有封地（Settlement）。"
+                        "返回 count / settlements[]（name、stringId、type=town/castle/village/hideout、"
+                        "ownerClan、mapFaction，以及 town 的 prosperity/loyalty/security/foodStocks、"
+                        "village 的 hearth）。limit 控制最多返回几条（默认全量）。前置：战役内。需要 v0.8.40+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "最多返回的条目数，默认全量"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_list_parties",
+        "description": ("只读：列出地图上所有队伍（MobileParty）。"
+                        "返回 count / parties[]（name、stringId、isMainParty/isLordParty/isCaravan/isGarrison、"
+                        "leader、mapFaction、partyType、strength、morale、gold、size、aiBehavior、"
+                        "targetSettlement、targetParty）。limit 控制最多返回几条（默认全量）。前置：战役内。需要 v0.8.40+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "最多返回的条目数，默认全量"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_campaign_log",
+        "description": ("只读：战役日志快照（最近 N 条 LogEntry）。"
+                        "返回 count / entries[]（text、time）。count 控制条数（默认 20，上限 200）。"
+                        "注意：这是快照而非实时流；实时订阅后续版本提供。前置：战役内。需要 v0.8.40+ DLL。"),
+        "inputSchema": {"type": "object", "properties": {
+            "count": {"type": "integer", "description": "返回的日志条数，默认 20，上限 200"}},
             "additionalProperties": False},
     },
     {
@@ -1146,16 +1374,51 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_blockade",
+        "description": ("关隘封锁候选生成（离线、只读，对应 tools/bl_blockade.py）。"
+                        "给 MapBlockade（城池关隘 mod）算「哪座城该封哪几块地图面片」，"
+                        "输出候选 + 有效性证据 + 冲突，**由你裁决**后再落盘 map_blockades.xml。"
+                        "⚠️ 分工是刻意的：几何/图论由本工具算（确定性、可复现），"
+                        "「该不该设关隘」由你按 isBorder/effect/type/冲突来判 —— "
+                        "10408 个面片的坐标不该进上下文，你也判不动。"
+                        "三层判据要一起看：mode=pass 表示**真的封得住**（BFS 实测封锁后邻城不可达），"
+                        "mode=zoc 只是城门口控制区面片（作者人工数据里大多是这种，"
+                        "墙长中位数才 4.7，根本封死不了通道）；isBorder=邻接别国，"
+                        "是「该不该设」最强的单一信号（人工已标记城 88% 是边境城）。"
+                        "⏱ 首次调用要 30~40s（解析拓扑 + 建邻接 + 全城扫描），结果按参数缓存，"
+                        "后续同参数调用毫秒级；换参数或 refresh=true 才重算。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "candidates", "emit"],
+                           "description": "status=只查输入可用性；candidates=出候选；emit=按裁决落盘。默认 candidates"},
+                "city": {"type": "string", "description": "只看这一座城（id 或名字子串）"},
+                "types": {"type": "string",
+                          "description": "参与的节点类型，默认 castle,town（村庄不设关隘，是 MapBlockade 自己的规则）"},
+                "mode": {"type": "string", "enum": ["pass", "zoc"],
+                         "description": "只返回这一类的城（pass=真封得住 / zoc=只有控制区面片）"},
+                "limit": {"type": "integer", "description": "最多返回几座，默认 40（按 pass 优先、关宽升序）"},
+                "full": {"type": "boolean",
+                         "description": "带上每块候选面片的明细（fi/地形/面积/通路数）。默认 false —— 全量明细会撑爆上下文"},
+                "adopt": {"type": "object",
+                          "description": ("action=emit 时的裁决结果：{settlement_id: {keep:bool, faces?:[fi]}}。"
+                                          "faces 省略=采纳全部候选；keep=false=该城不设关隘。不给 adopt 则写全部候选。")},
+                "out": {"type": "string", "description": "action=emit 的输出路径（map_blockades.xml）"},
+                "refresh": {"type": "boolean", "description": "忽略缓存重算"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "bl_launch_game",
-        "description": ("无人值守启动 Bannerlord（走 BLSE）并**进到自定义战斗界面** —— 分两步（v0.8.18）："
-                        "① `tools/bl_launch.ps1` 起游戏、自动应答两个模态弹窗（Safe Mode -> 否；"
-                        "Mod change detected -> 确定），成功判据是**游戏窗口出现**；"
-                        "② 本工具接着自己做：轮询到**主菜单真的就绪**（控制通道应答 + moduleLoaded "
-                        "+ activeState 为空 + CustomBattle 入口未被禁用）→ 期间按 ESC 跳过场动画（有上限）"
-                        "→ `open_ui` → **每 5 秒**确认一次 activeState 是否变成 CustomBattleState。"
-                        "⚠️ 为什么必须分两步：窗口出现时游戏还在加载/启动动画里，那时 open_ui 只会拿到 "
-                        "`wrong_state`，旧行为就是「等上一次失败」才轮到主菜单。"
-                        "返回里的 `enterCustomBattle.timeline` 是逐步时间线（可复现、不猜）。"),
+        "description": ("无人值守启动 Bannerlord（走 BLSE）并**进到自定义战斗界面**，分两步："
+                        "① 起游戏、自动应答两个模态弹窗（Safe Mode -> 否；Mod change detected -> 确定），"
+                        "成功判据是**游戏窗口出现**；"
+                        "② 轮询到**主菜单真的就绪**（1s 一轮；实测 ~10s）→ 期间跳过场动画 → "
+                        "默认只截图即返回（await_confirm），你确认后再调 bl_open_ui → "
+                        "之后 **1 秒**一轮等 activeState 变成 CustomBattleState（这一步官方状态本身要 ~30s 才落地）。"
+                        "⚠️ 必须分两步：窗口出现时游戏还在加载/启动动画里，那时 open_ui 只会拿到 `wrong_state`。"
+                        "返回里的 `enterCustomBattle.timeline` 是逐步时间线。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1165,18 +1428,22 @@ TOOLS = [
                 "autoOpen": {"type": "boolean",
                              "description": ("第二步里是否**自动**执行 open_ui（默认 false）。"
                                              "⚠️ 启动期 fire open_ui 会崩游戏（2026-09-25 真机：cleanExit=false + "
-                                             "rgl_log 崩溃栈），所以默认只截图并返回 await_confirm，由调用方看完再调 bl_open_ui")},
+                                             "rgl_log 崩溃栈），所以默认只截图并返回 await_confirm，由调用方看完再调 bl_open_ui。"
+                                             "true 时会先套 minStartupSec 安全下限（默认 20s）再 fire")},
                 "uiId": {"type": "string", "description": "第二步要进的入口 id，默认 CustomBattle"},
                 "menuTimeoutSec": {"type": "integer", "description": "等主菜单就绪的上限秒数，默认 120"},
                 "entryTimeoutSec": {"type": "integer", "description": "open_ui 后等 CustomBattleState 的上限秒数，默认 60"},
+                "minStartupSec": {"type": "number",
+                                  "description": ("autoOpen=true 的安全下限秒数（默认 20）。"
+                                                  "默认路径（不自动 fire）**不受它约束**：主菜单就绪即返回"
+                                                  "（实测 ~10s；2026-09-27 前固定等 45s，白等 35s）")},
                 "skipModuleList": {"type": "boolean",
                                    "description": "调试用：不带 _MODULES_ 列表启动（结果是 no-mods 模式）"},
                 "excludeModules": {"type": "array", "items": {"type": "string"},
-                                   "description": ("启动时**排除**的模块名（v0.8.16），用于 A/B 对照："
-                                                   "同一次启动只差一个模块。名字必须与列表里完全一致，"
-                                                   "拼错会直接启动失败（不会静默忽略）。"
+                                   "description": ("启动时**排除**的模块名，用于 A/B 对照（同一次启动只差一个模块）。"
+                                                   "名字必须与列表里完全一致，拼错会直接启动失败（不会静默忽略）。"
                                                    "例：[\"RTSCamera\",\"RTSCamera.CommandSystem\"] "
-                                                   "= 关掉 RTSCamera，好让我们的兜底相机（spectate）露出来")},
+                                                   "= 关掉 RTSCamera，好让兜底相机（spectate）露出来")},
             },
             "additionalProperties": False,
         },
@@ -1246,6 +1513,147 @@ TOOLS = [
         },
     },
 ]
+
+# ── 工具集分组（BLBRIDGE_TOOLSET=core+config，默认全开）──────────────────
+# 目的：减少常驻在模型上下文里的工具名数量。分组只决定 tools/list 暴露哪些工具，
+# 不改变任何工具的行为。
+TOOL_GROUPS = {
+    "core": [
+        "bl_status", "bl_battle_status", "bl_start_battle", "bl_wait_for_state", "bl_abort",
+        "bl_order", "bl_control_agent", "bl_launch_game", "bl_skip_video",
+        "bl_list_ui", "bl_open_ui", "bl_close_ui", "bl_fast_forward",
+        "bl_get_screen", "bl_get_viewmodel_property", "bl_get_inventory",
+        "bl_list_saves", "bl_load_save", "bl_campaign_time",
+        "bl_campaign_overview", "bl_list_kingdoms", "bl_list_clans",
+        "bl_list_settlements", "bl_list_parties", "bl_campaign_log",
+    ],
+    "config": [
+        "bl_read_config", "bl_apply_config", "bl_rts_config", "bl_apply_rts_config",
+        "bl_ghost_camera", "bl_camera_speed", "bl_cheat_mode",
+    ],
+    "lab": [
+        "bl_list_battles", "bl_analyze", "bl_read_events", "bl_run_batch", "bl_batch_report",
+        "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config",
+    ],
+    "desktop": [
+        "bl_desktop_windows", "bl_desktop_screenshot", "bl_desktop_click", "bl_desktop_key",
+    ],
+}
+
+
+def _active_tool_names():
+    """当前启用的工具名集合；None = 不过滤（全开）。
+
+    未知组名不静默忽略：拼错会让整组工具凭空消失且极难察觉，所以显式抛错。
+    """
+    raw = (os.environ.get("BLBRIDGE_TOOLSET") or "").strip()
+    if not raw or raw.lower() in ("all", "*"):
+        return None
+    wanted = [g.strip().lower() for g in raw.replace("+", ",").split(",") if g.strip()]
+    unknown = [g for g in wanted if g not in TOOL_GROUPS]
+    if unknown:
+        raise ValueError(
+            "BLBRIDGE_TOOLSET 含未知组名: %s（可用: %s）"
+            % (", ".join(unknown), ", ".join(sorted(TOOL_GROUPS)))
+        )
+    names = set()
+    for group in wanted:
+        names.update(TOOL_GROUPS[group])
+    return names
+
+
+def active_tools():
+    names = _active_tool_names()
+    if names is None:
+        return TOOLS
+    return [t for t in TOOLS if t["name"] in names]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 关隘候选（后端 = tools/bl_blockade.py）
+#
+# 为什么必须缓存：全量扫描 120 座城要 30~40s（解析拓扑 + 建面片邻接 + 每城 BFS 实测
+# 封锁效果）。MCP 是长驻进程，没缓存的话每次调工具都重扫一遍，根本没法交互。
+# 缓存键 = (types, topology 路径+大小+mtime)，任一变化自动失效；
+# city / mode / limit / full 只是**视图过滤**，不进缓存键（过滤是毫秒级的）。
+# ─────────────────────────────────────────────────────────────────────
+_BLOCKADE_CACHE = {"key": None, "payload": None}
+
+
+def _blockade_payload(types=("castle", "town"), refresh=False):
+    """拿全量候选（带缓存）。返回 dict；不可用时带 ok=False + reason。"""
+    if bl_blockade is None:
+        return {"ok": False, "reason": "bl_blockade 模块导入失败：%s" % _BLOCKADE_IMPORT_ERR}
+    try:
+        topo_path = bl_blockade.DEFAULT_TOPOLOGY
+        paths_path = bl_blockade.DEFAULT_PATHS
+        st = os.stat(topo_path)
+        key = (tuple(sorted(types)), topo_path, paths_path,
+               st.st_size, int(st.st_mtime), os.path.isfile(paths_path))
+    except OSError as e:
+        return {"ok": False, "reason": "拓扑/通路文件不可用：%s" % e}
+
+    if not refresh and _BLOCKADE_CACHE["key"] == key and _BLOCKADE_CACHE["payload"]:
+        return _BLOCKADE_CACHE["payload"]
+
+    try:
+        topo = bl_blockade.Topo.load(topo_path)
+        paths = bl_blockade.load_paths(paths_path)
+    except bl_blockade.TopoError as e:
+        return {"ok": False, "reason": str(e)}
+
+    t0 = time.time()
+    gen = bl_blockade.Generator(topo, paths)
+    results = []
+    for nd in topo.nodes:
+        if nd["type"] in types:
+            results.append(gen.candidates(nd))
+    ok = [r for r in results if r.get("ok")]
+    payload = {
+        "ok": True,
+        "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsedSec": round(time.time() - t0, 1),
+        "topology": topo_path,
+        "paths": paths_path,
+        "faceCount": len(topo.faces),
+        "settlementCount": len(ok),
+        "passCount": sum(1 for r in ok if r.get("mode") == "pass"),
+        "skipped": [{"id": r["id"], "name": r["name"], "reason": r.get("reason")}
+                    for r in results if not r.get("ok")],
+        "conflicts": bl_blockade.find_conflicts(results),
+        "results": ok,
+    }
+    _BLOCKADE_CACHE["key"] = key
+    _BLOCKADE_CACHE["payload"] = payload
+    return payload
+
+
+def _blockade_view(r, full=False):
+    """把一条结果压成**裁决所需的最小字段**。
+
+    full=false 时丢掉 candidates 明细：120 座城 × 每座 ~10 块面片的明细会让一次
+    tools/call 的返回大到没法读，而裁决根本用不到那些 —— 真要下钻时用 city 过滤再开 full。
+    """
+    v = {
+        "id": r["id"], "name": r["name"], "type": r["type"],
+        "kingdom": r.get("kingdom"), "mode": r.get("mode"),
+        "passWidth": r.get("passWidth"),
+        "isBorder": r.get("isBorder"),
+        "foreignKingdoms": r.get("foreignKingdoms"),
+        "neighborCount": r.get("neighborCount"),
+        "effect": r.get("effect"),
+        "cutCount": r.get("cutCount"),
+        "chosenFaces": r.get("chosenFaces"),
+        "outline": r.get("outline"),
+        "reason": r.get("reason"),
+    }
+    if full:
+        v["candidates"] = r.get("candidates")
+        v["cutDestinations"] = r.get("cutDestinations")
+        v["reachBefore"] = r.get("reachBefore")
+        v["reachAfter"] = r.get("reachAfter")
+        v["shrink"] = r.get("shrink")
+    return v
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1422,9 +1830,66 @@ def _menu_state(ui):
     return True, "主菜单就绪（topScreen=%s）" % top_screen
 
 
+_ANSWER_PS1 = os.path.join(_TOOLS_DIR, "bl_launch.ps1")
+
+# v0.8.44：进自定义战斗的**落地判据**用后缀匹配，别写死单一状态名。
+# 依据（2026-10-05 真机）：装了 NavalDLC 时从主菜单 `open_ui(CustomBattle)` 落的是
+# `NavalCustomBattleState`（官方把自定义战斗入口劫持到海战选兵界面），
+# 而纯原版下是 `CustomBattleState`。旧实现 `if state == "CustomBattleState"` 只认后者
+# ⇒ 带 NavalDLC 的机器上**永远等不到**。后缀匹配同时覆盖两者，且不会误认
+# `MapState` / `CampaignState`（它们不以 CustomBattleState 结尾）。
+_CUSTOM_BATTLE_STATE_SUFFIX = "CustomBattleState"
+_last_answer_try = {"at": 0.0}
+
+
+def _answer_late_dialogs(answer_sec=6, min_gap=15.0):
+    """读档/加载期的迟到模态弹窗（如"模组不匹配"存档确认）应答器。
+
+    背景（2026-09-27，用户真机指认）：bl_launch.ps1 的应答只覆盖**启动后**的 grace period，
+    而 ContinueCampaign 的"模组不匹配"弹窗出现在读档阶段 —— 那时早没人守着，弹窗就挂在那
+    等人点，bl_mcp 这边只看到 list_ui 一直 no_response（上一版把它误判成"加载慢 ~165s"）。
+
+    做法：子进程跑 `bl_launch.ps1 -AnswerSec N`（独立应答模式，只扫弹窗不启游戏），
+    点掉词表命中的按钮（OK/确定/是/Yes）。节流：min_gap 秒内只试一次。
+    返回被点击的按钮日志（列表，可能为空）；None = 本次被节流或执行失败。
+    """
+    import time as _t
+    now = _t.time()
+    if now - _last_answer_try["at"] < min_gap:
+        return None
+    _last_answer_try["at"] = now
+    try:
+        p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-File", _ANSWER_PS1, "-AnswerSec", str(int(answer_sec))],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=answer_sec + 30)
+        out = p.stdout.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - 应答器失败不影响等待主流程（下一轮可再试）
+        return None
+    return [l.strip() for l in out.splitlines() if ("BM_CLICK" in l or "VK_RETURN" in l)]
+
+
 def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout=60.0,
-                         poll=5.0, skip_intro=True, auto_open=False, min_startup_sec=45.0):
-    """启动第二步：等主菜单 → （必要时发 ESC 跳过场）→ open_ui → 每 poll 秒确认一次。"""
+                         poll=1.0, skip_intro=True, auto_open=False, min_startup_sec=20.0):
+    """启动第二步：等主菜单 → （必要时发 ESC 跳过场）→ open_ui → 每 poll 秒确认一次。
+
+    时间账（2026-09-27 真机 + 对照上游 GABS 后收紧，原先是 poll=5.0 / 下限 45s）：
+      • `min_startup_sec` 下限**只作用于 auto_open=True 的路径** —— 它防的是"自动 fire open_ui"，
+        而 await_confirm 路径根本不发 open_ui（只截图），等下限纯属白等
+        （实测：菜单 9.9s 就绪却拖到 45.0s 才返回，白白多等 35s）。
+      • 下限本身 45 → 20s：45s 是 v0.8.18 定的，**早于** v0.8.20 的主菜单硬判据
+        （topScreen=GauntletInitialScreen + CustomBattle 入口 enabled，就是为那次启动期
+        open_ui 崩溃加的）；硬判据已在，下限退居"兜底"。上游 GABS 的 wait_for_state 用
+        500ms 轮询、无任何下限（判据同为 topScreen 不含 Loading）。
+      • 轮询 2s/5s → 1s：list_ui(status) 是轻量读（sceneLimit=1），不值得每 5s 看一眼。
+      • **落地判据不能只认 `CustomBattleState`**（v0.8.44 真机修正）：
+        装了 **NavalDLC** 时，从主菜单 `open_ui(CustomBattle)` 落的是
+        **`NavalCustomBattleState`**（官方把自定义战斗入口劫持到海战选兵界面）。
+        旧实现硬编码 `if state == "CustomBattleState"` ⇒ **永远等不到**、只能等到超时，
+        于是 `--auto-open` 修好之后仍报 `wait_custom_battle`（2026-10-05 实测 140 s 超时）。
+        ⇒ 改为**后缀匹配**（见 `_CUSTOM_BATTLE_STATE_SUFFIX`），同时容纳两者。
+        这个缺陷原先被掩盖：手写脚本用 `-match 'CustomBattleState'`（子串）侥幸绕开。
+    """
     import time as _time
     timeline = []
     t0 = _time.time()
@@ -1468,7 +1933,7 @@ def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout
             elif can_key:
                 _send_key("esc", wid)
                 esc += 1
-        _time.sleep(2.0)
+        _time.sleep(1.0)
 
     if not ready:
         return {"ok": False, "phase": "wait_menu", "reason": why, "escSent": esc,
@@ -1481,11 +1946,17 @@ def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout
     # ⇒ 只靠"activeState 为空"判主菜单**不够**（启动期同样是空串）。
     #   默认**不自动 fire**：先截图、把路径带回去，由调用方看一眼再决定；
     #   无人值守要显式传 autoOpen=True，且仍受 min_startup_sec 下限保护。
-    waited = _time.time() - t0
-    if waited < min_startup_sec:
-        _time.sleep(min_startup_sec - waited)
-        timeline.append("t=%.1fs 已等足启动下限 %.0fs" % (_time.time() - t0, min_startup_sec))
-    if not auto_open:
+    #   （下限只在这一条路生效 —— await_confirm 不 fire open_ui，等下限没有保护对象。
+    #     2026-09-27：45s → 20s，理由见函数 docstring；真机 A/B 见 PROGRESS §三十 8。）
+    if auto_open:
+        waited = _time.time() - t0
+        if waited < min_startup_sec:
+            _time.sleep(min_startup_sec - waited)
+            timeline.append("t=%.1fs 已等足启动下限 %.0fs（auto_open 安全门）"
+                            % (_time.time() - t0, min_startup_sec))
+        t1 = _time.time()
+        resp, err = send_command("open_ui", {"uiId": ui_id}, timeout=20)
+    else:
         wid2 = wid or _game_window_id()
         shot_path = None
         if can_key and wid2:
@@ -1494,14 +1965,12 @@ def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout
                            "out": os.path.join(log_dir(), "ui", "enter_battle_confirm.png")})
             shot_path = r.get("path")
         return {"ok": False, "phase": "await_confirm", "uiId": ui_id,
-                "reason": ("主菜单信号已就绪，但默认**不自动**执行 open_ui（启动期 fire 会崩游戏，"
-                           "2026-09-25 真机证据见 PROGRESS §二十九 9.6）。看一眼截图确认是主菜单后，"
-                           "再调 bl_open_ui；要无人值守就传 autoOpen=true。"),
+                "reason": ("主菜单就绪即返回（不自动 fire open_ui）。看一眼截图确认是主菜单后，"
+                           "再调 bl_open_ui；要无人值守就传 autoOpen=true（那才会套 %.0fs 安全下限）。"
+                           % min_startup_sec),
                 "screenshot": shot_path, "escSent": esc,
                 "seconds": round(_time.time() - t0, 1), "timeline": timeline}
 
-    t1 = _time.time()
-    resp, err = send_command("open_ui", {"uiId": ui_id}, timeout=20)
     if err:
         return {"ok": False, "phase": "open_ui", "reason": err, "escSent": esc,
                 "seconds": round(_time.time() - t0, 1), "timeline": timeline}
@@ -1525,22 +1994,36 @@ def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout
     poll_errors = 0
     while _time.time() - t1 < entry_timeout:
         _time.sleep(poll)
-        r2, e2 = send_command("list_ui", {"sceneLimit": 1}, timeout=15)
+        # timeout=6：真机实测（2026-09-27，B 组）open_ui 后 ~30s 里官方状态在主线程加载、
+        # 控制通道**不应答** —— 轮询超时若是 15s，两次 no_response 就吃掉 30s，
+        # "1s 轮询"名存实亡。短超时 + 失败小睡，让落地后最多 1s 就能发现。
+        r2, e2 = send_command("list_ui", {"sceneLimit": 1}, timeout=6)
         if e2 or not r2:
             poll_errors += 1
-            # 不静默：轮询失败也要记账（否则最后只看到 state=None，无从判断）
-            if poll_errors <= 3 or poll_errors % 4 == 0:
-                timeline.append("t=+%.1fs list_ui 失败×%d：%s"
+            # 不静默：轮询失败也要记账（否则最后只看到 state=None，无从判断），
+            # 但加载期会连着失败几十秒，只记第 1 条 + 每 10 条报一次数
+            if poll_errors == 1 or poll_errors % 10 == 0:
+                timeline.append("t=+%.1fs list_ui 失败×%d（多半是加载期主线程忙）：%s"
                                 % (_time.time() - t1, poll_errors, e2 or "空响应"))
+            # no_response 有两种：主线程真忙（加载），或者被一个没人应答的模态弹窗挡住
+            # （2026-09-27：ContinueCampaign 的"模组不匹配"确认框）—— 后者等人点，等再久也没用，
+            # 扫一轮把"是/OK"点掉（bl_launch.ps1 -AnswerSec 独立应答模式，节流 15s）。
+            clicked = _answer_late_dialogs()
+            if clicked:
+                timeline.append("t=+%.1fs 应答了迟到的弹窗：%s"
+                                % (_time.time() - t1, "; ".join(clicked)[:180]))
+            _time.sleep(2.0)
             continue
         state = (r2.get("result") or {}).get("activeState") or ""
         timeline.append("t=+%.1fs activeState=%r" % (_time.time() - t1, state))
-        if state == "CustomBattleState":
+        if state.endswith(_CUSTOM_BATTLE_STATE_SUFFIX):
             return {"ok": True, "phase": "in_custom_battle", "uiId": ui_id, "state": state,
                     "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
     return {"ok": False, "phase": "wait_custom_battle", "uiId": ui_id, "state": state,
             "pollErrors": poll_errors,
-            "reason": "等了 %.0f 秒还没看到 CustomBattleState（轮询清单见 timeline）" % entry_timeout,
+            "reason": ("等了 %.0f 秒还没看到 *%s（轮询清单见 timeline；"
+                       "带 NavalDLC 时官方入口会落 NavalCustomBattleState，判据已含它）"
+                       % (entry_timeout, _CUSTOM_BATTLE_STATE_SUFFIX)),
             "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
 
 
@@ -1940,6 +2423,38 @@ def call_tool(name, args):
                 return {"ok": False, "error": "--dummy-armor 解析失败：%s" % e}
         if args.get("dummyBodyItem"):
             params["dummyBodyItem"] = str(args.get("dummyBodyItem"))
+        # ── v0.8.41：战术档位 + 环境旋钮 ─────────────────────────────────
+        # 数值参数发**裸数字**（C# 侧 Jmini.Num 只吃数字字符）；名字/枚举在本地先校验（GC3）。
+        for arg_key in ("attackerTacticLevel", "defenderTacticLevel"):
+            if args.get(arg_key) is not None:
+                try:
+                    params[arg_key] = bl_common.check_tactic_level(args[arg_key], arg_key)
+                except ValueError as e:
+                    return {"ok": False, "error": str(e)}
+        if args.get("terrain"):
+            try:
+                params["terrain"] = bl_common.parse_terrain(args["terrain"])
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+        if args.get("randomTerrainSeed") is not None:
+            params["randomTerrainSeed"] = int(args["randomTerrainSeed"])
+        if args.get("aiFriendlyFireMultiplier") is not None:
+            ff = float(args["aiFriendlyFireMultiplier"])
+            if ff < 0.0 or ff > 1.0:
+                return {"ok": False, "error": "aiFriendlyFireMultiplier 只接受 0..1"}
+            params["aiFriendlyFireMultiplier"] = ff
+        if args.get("keepCorpses") is True:
+            params["keepCorpses"] = "true"
+        if args.get("sceneLevel") is not None:
+            lv = int(args["sceneLevel"])
+            if lv < 1 or lv > 3:
+                return {"ok": False, "error": "sceneLevel 只接受 1..3"}
+            params["sceneLevel"] = lv
+        if args.get("timeOfDay") is not None:
+            tod = float(args["timeOfDay"])
+            if tod < 0.0 or tod > 24.0:
+                return {"ok": False, "error": "timeOfDay 只接受 0..24"}
+            params["timeOfDay"] = tod
         if not params["attackerTroop"] or not params["defenderTroop"]:
             return {"ok": False, "error": "必须提供 attackerTroop 与 defenderTroop"}
 
@@ -1999,7 +2514,7 @@ def call_tool(name, args):
         import time as _t
         target = args.get("state") or "ended"
         timeout = float(args.get("timeoutSec") or _cfg("waitForStateTimeoutSec", 180))
-        poll = float(args.get("pollSec") or 2)
+        poll = float(args.get("pollSec") or 1)
         stall_tolerance = float(args.get("stallToleranceSec") or 15)
         deadline = _t.time() + timeout
         last = None
@@ -2097,6 +2612,179 @@ def call_tool(name, args):
             return {"ok": False, "error": e.get("message") or "close_ui 失败", "response": resp}
         return {"ok": True, "result": resp.get("result"), "response": resp}
 
+    # ── L2 #1：只读 UI 探测（脱壳抄 BUTR/Bannerlord.GABS 的 ui/get_screen / ui/get_viewmodel_property）──
+    # 派发分支与 TOOLS 表是一对：只加 TOOLS 不加分支 ⇒ 工具在 tools/list 里看得见、一调就
+    # `unknown tool`（2026-09-27 实测踩到）。防回归看 bl_check_dispatch.py。
+    if name == "bl_get_screen":
+        params = {}
+        if args.get("layerFilter"):
+            params["layerFilter"] = str(args["layerFilter"])
+        resp, err = send_command("get_screen", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_screen 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_get_viewmodel_property":
+        property_name = str(args.get("propertyName") or "").strip()
+        layer_name = str(args.get("layerName") or "").strip()
+        if not property_name or not layer_name:
+            return {"ok": False,
+                    "error": "propertyName 与 layerName 都必填（layerName 从 bl_get_screen 的 layers[].name 取）"}
+        params = {"propertyName": property_name, "layerName": layer_name}
+        if args.get("subProperties"):
+            params["subProperties"] = str(args["subProperties"])
+        resp, err = send_command("get_viewmodel_property", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_viewmodel_property 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_get_inventory":
+        params = {}
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("get_inventory", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_inventory 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_list_saves":
+        resp, err = send_command("list_saves", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_saves 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_load_save":
+        name_ = str(args.get("name") or "").strip()
+        if not name_:
+            return {"ok": False,
+                    "error": "name 必填（用 bl_list_saves 里的 name，精确匹配）"}
+        resp, err = send_command("load_save", {"name": name_}, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "load_save 被拒绝",
+                    "code": e.get("code"), "response": resp}
+        # C# 侧的失败（save_not_found / load_failed / in_campaign）装在 result.ok=false 里，
+        # 信封 ok 仍是 true —— 不看第二层就会把"没启动"报成"启动成功"（自测 2026-09-27 抓到）。
+        body = resp.get("result") or {}
+        if not body.get("ok"):
+            return {"ok": False, "code": body.get("code"),
+                    "error": body.get("error") or "load_save 被拒绝", "response": resp}
+        return {"ok": True, "result": body, "response": resp,
+                "hint": ("异步加载中：轮询 bl_list_ui 等 topScreen 变 *MapScreen"
+                         "（读档期的模组不匹配确认框会被自动点『是』）")}
+
+    if name == "bl_campaign_time":
+        mode = str(args.get("mode") or "status")
+        if mode in ("on", "off"):
+            # 显式失败，不静默忽略：老脚本/老文档还在传 on/off，必须当场看见功能已撤。
+            return {"ok": False, "code": "keep_awake_removed",
+                    "error": ("时间保活（mode=on/off）已在 v0.8.39 移除：用户明确不需要改游戏的时间暂停，"
+                              "而且它看不见「失焦自动打开的暂停菜单」那种暂停、还会顶掉手动暂停。"
+                              "要「切窗口不弹暂停菜单」请用原版选项 "
+                              "BannerlordConfig.StopGameOnFocusLost=false（见 PROGRESS §三十二）。")}
+        if mode != "status":
+            return {"ok": False, "error": "mode 只接受 status，收到 %r" % (mode,)}
+        params = {}
+        resp, err = send_command("campaign_time", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "campaign_time 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    # ── A 阶段：战役只读遥测（控制面，对应战场的 get_inventory / list_battles）──
+    # C# 侧 no_campaign / *_failed 装在信封 ok=false 里（统一走这里判第二层）。
+    if name == "bl_campaign_overview":
+        resp, err = send_command("campaign_overview", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "campaign_overview 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_list_kingdoms":
+        params = {}
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("list_kingdoms", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_kingdoms 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_list_clans":
+        params = {}
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("list_clans", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_clans 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_list_settlements":
+        params = {}
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("list_settlements", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_settlements 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_list_parties":
+        params = {}
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("list_parties", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "list_parties 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_campaign_log":
+        params = {}
+        if args.get("count"):
+            params["count"] = int(args["count"])
+        resp, err = send_command("campaign_log", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "campaign_log 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
     # ── 阶段 2④：批量跑批 + A/B 对比报告 ────────────────────────────────
     # ⚠️ 必须捕获子进程输出：MCP 走 stdio，任何漏到 stdout 的东西都会破坏 JSON-RPC。
     if name == "bl_run_batch":
@@ -2158,6 +2846,78 @@ def call_tool(name, args):
                     "count": len(rows), "troops": rows}
         return {"ok": True, "sage": bl_sage.status()}
 
+    if name == "bl_blockade":
+        if bl_blockade is None:
+            return {"ok": False, "error": "bl_blockade 不可用（导入失败）：%s" % _BLOCKADE_IMPORT_ERR}
+        action = args.get("action") or "candidates"
+        types = tuple(t.strip() for t in (args.get("types") or "castle,town").split(",") if t.strip())
+
+        if action == "status":
+            try:
+                topo = bl_blockade.Topo.load(bl_blockade.DEFAULT_TOPOLOGY)
+                paths = bl_blockade.load_paths(bl_blockade.DEFAULT_PATHS)
+            except bl_blockade.TopoError as e:
+                return {"ok": False, "error": str(e)}
+            return {"ok": True, "topology": bl_blockade.DEFAULT_TOPOLOGY,
+                    "faces": len(topo.faces), "vertices": len(topo.verts),
+                    "nodes": len(topo.nodes), "edges": len(topo.edges),
+                    "paths": len(paths),
+                    "cached": _BLOCKADE_CACHE["payload"] is not None}
+
+        payload = _blockade_payload(types, refresh=bool(args.get("refresh")))
+        if not payload.get("ok"):
+            return {"ok": False, "error": payload.get("reason")}
+
+        if action == "emit":
+            out = args.get("out")
+            if not out:
+                return {"ok": False, "error": "emit 必须给 out（输出 xml 路径）"}
+            adopt = args.get("adopt")
+            if adopt is not None and not isinstance(adopt, dict):
+                return {"ok": False, "error": "adopt 必须是对象：{settlement_id:{keep,faces}}"}
+
+            class _R(object):
+                pass
+            # emit_xml 需要能按裁决顺序遍历（先到先得），这里直接复用缓存里的 results
+            topo = bl_blockade.Topo.load(payload["topology"])   # 已缓存过磁盘解析，代价可接受
+            n_set, n_face, dropped = bl_blockade.emit_xml(
+                out, topo, payload["results"], adopt,
+                source_xml=os.path.basename(payload["topology"]))
+            return {"ok": True, "out": out, "settlements": n_set, "faces": n_face,
+                    "droppedDuplicates": [{"fi": f, "loser": l, "winner": w}
+                                          for (f, l, w) in dropped[:50]],
+                    "droppedCount": len(dropped),
+                    "note": ("一块面片只能归一座城；重复归属已由写文件层强制剔除。"
+                             "想改归属就调整 adopt 里的顺序或显式给 faces。")}
+
+        # action == candidates
+        rows = payload["results"]
+        city = args.get("city")
+        if city:
+            rows = [r for r in rows if city == r["id"] or city in r["name"]]
+            if not rows:
+                return {"ok": False, "error": "没有匹配的城池：%s（类型过滤=%s）"
+                        % (city, ",".join(types))}
+        if args.get("mode"):
+            rows = [r for r in rows if r.get("mode") == args.get("mode")]
+        rows = sorted(rows, key=lambda r: (r.get("mode") != "pass",
+                                           r.get("passWidth") or 999.0))
+        limit = int(args.get("limit") or 40)
+        full = bool(args.get("full"))
+        shown = rows[:limit]
+        return {
+            "ok": True,
+            "elapsedSec": payload["elapsedSec"],
+            "cached": True,
+            "settlementCount": payload["settlementCount"],
+            "passCount": payload["passCount"],
+            "returned": len(shown),
+            "truncated": len(rows) - len(shown),
+            "conflicts": payload["conflicts"],
+            "skipped": payload["skipped"][:10],
+            "results": [_blockade_view(r, full) for r in shown],
+        }
+
     # ── 桌面 / 游戏 GUI 能力 ──────────────────────────────────────────
 
     if name == "bl_launch_game":
@@ -2194,7 +2954,8 @@ def call_tool(name, args):
                 ui_id=args.get("uiId") or "CustomBattle",
                 menu_timeout=float(args.get("menuTimeoutSec") or 120),
                 entry_timeout=float(args.get("entryTimeoutSec") or 60),
-                auto_open=bool(args.get("autoOpen")))
+                auto_open=bool(args.get("autoOpen")),
+                min_startup_sec=float(args.get("minStartupSec") or 20.0))
             res["enterCustomBattle"] = sec
             if sec.get("ok"):
                 res["hint"] = "已进自定义战斗界面（activeState=%s）" % sec.get("state")
@@ -2329,7 +3090,10 @@ def handle(req):
         _result(req_id, {})
         return
     if method == "tools/list":
-        _result(req_id, {"tools": TOOLS})
+        try:
+            _result(req_id, {"tools": active_tools()})
+        except ValueError as exc:
+            _error(req_id, -32602, str(exc))
         return
     if method == "tools/call":
         name = params.get("name")

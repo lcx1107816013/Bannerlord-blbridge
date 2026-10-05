@@ -52,16 +52,31 @@ if (-not (Test-Path $gameBin)) { throw "Game bin directory not found: $gameBin" 
 $refs = @()
 foreach ($n in @(
         'TaleWorlds.MountAndBlade.dll',
+        'TaleWorlds.CampaignSystem.dll',
         'TaleWorlds.Core.dll',
         'TaleWorlds.Library.dll',
         'TaleWorlds.ObjectSystem.dll',
         'TaleWorlds.Engine.dll',
         'TaleWorlds.DotNet.dll',
         'TaleWorlds.Localization.dll',
-        'TaleWorlds.InputSystem.dll')) {
+        'TaleWorlds.InputSystem.dll',
+        # v0.8.36: save/load (SaveGameFileInfo / LoadResult live here, NOT in SaveLoad.dll)
+        'TaleWorlds.SaveSystem.dll')) {
     $p = Join-Path $gameBin $n
     if (Test-Path $p) { $refs += $p } else { Write-Warning "missing game assembly: $n" }
 }
+
+# v0.8.36: SandBoxGameManager lives in the Sandbox MODULE (not in game bin); needed by load_save.
+$sandBoxDll = Join-Path $GameDir 'Modules\Sandbox\bin\Win64_Shipping_Client\SandBox.dll'
+if (Test-Path $sandBoxDll) { $refs += $sandBoxDll } else { Write-Warning "missing module assembly: $sandBoxDll" }
+
+# v0.8.38: SandBox.View.dll = MapScreen (IsEscapeMenuOpened). The name does not start with
+# "TaleWorlds.", so the glob above will not pick it up -- it has to be listed explicitly.
+# Why we need it: the pause menu (Esc) registers an ActiveStateDisableRequest on GameStateManager,
+# which stops MapState from ticking while TimeControlMode stays "play" -- i.e. the one pause shape
+# our keep-awake judge (TimeControlMode == Stop) cannot see.
+$sandBoxViewDll = Join-Path $GameDir 'Modules\SandBox\bin\Win64_Shipping_Client\SandBox.View.dll'
+if (Test-Path $sandBoxViewDll) { $refs += $sandBoxViewDll } else { Write-Warning "missing module assembly: $sandBoxViewDll" }
 
 # framework reference assemblies (preferred) or runtime assemblies (fallback)
 $refAsmDir = 'C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8'
@@ -325,6 +340,14 @@ if ($Deploy) {
     }
     Copy-Item -Path (Join-Path $mcpSrc '*') -Destination $mcpTarget -Recurse -Force
     Copy-Item -Path (Join-Path $root 'tools\*.py') -Destination $mcpTarget -Force
+    # Two NON-.py files are referenced from inside the deployed mcp\ directory and were missed by
+    # the '*.py' glob above, so a clean deploy shipped a broken bl_launch_game:
+    #   bl_launch.ps1    - bl_mcp.py resolves it via _TOOLS_DIR (same dir as bl_mcp.py):
+    #                      bl_launch_game + the load-time modal-dialog answering both run it.
+    #   gabp_names.json  - read by bl_check_gabp_names.py (GABP naming alignment check).
+    # Copy them explicitly; keep this list in sync if any other non-.py data file is added.
+    Copy-Item -Path (Join-Path $root 'tools\bl_launch.ps1') -Destination $mcpTarget -Force
+    Copy-Item -Path (Join-Path $root 'tools\gabp_names.json') -Destination $mcpTarget -Force
     $mcpFiles = @(Get-ChildItem $mcpTarget -Recurse -File)
     Write-Host ("      deployed mcp/ ({0} file(s), {1} KB)" -f $mcpFiles.Count,
         [math]::Round((($mcpFiles | Measure-Object -Property Length -Sum).Sum) / 1KB, 1))
