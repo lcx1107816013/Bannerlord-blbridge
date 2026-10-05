@@ -67,6 +67,17 @@ namespace BlBridge
             return FindKey(json, key) >= 0;
         }
 
+        /// <summary>
+        /// v0.8.46：把"键对应的**值起始位置**"暴露出来（`FindKey` 本来就是干这个的）。
+        /// 用途：需要读**嵌套对象内部**的键时，先切出对象文本（见 `Protocol.ExtractObject`），
+        /// 再在子串里扁平查找 —— `Jmini` 刻意不做嵌套解析，这是最小可行的补法。
+        /// 找不到 ⇒ -1。
+        /// </summary>
+        internal static int ValueStart(string json, string key)
+        {
+            return FindKey(json, key);
+        }
+
         public static string Str(string json, string key, string fallback)
         {
             int p = FindKey(json, key);
@@ -188,6 +199,43 @@ namespace BlBridge
             if (string.Equals(s, "true", StringComparison.OrdinalIgnoreCase)) return true;
             if (string.Equals(s, "false", StringComparison.OrdinalIgnoreCase)) return false;
             return fallback;
+        }
+
+        /// <summary>
+        /// **三态**布尔读取：`true` / `false` / **`null`（键存在但值不是布尔，或值就是 JSON null）**。
+        ///
+        /// v0.8.46 新增，动机（账本方案 A）：`Bool(json,key,fallback)` 把"缺席"和"值为 null"
+        /// **压成同一个返回值**，于是"这个结果是失败"与"这个结果没有 ok 字段"无法区分。
+        /// 账本新增的 `resultOk` 字段必须能表达三态（成功/失败/**未知**）——
+        /// 历史行没有这个键 ⇒ 必须是"未知"，**不能**假装它成功或失败。
+        ///
+        /// 判据：`Has(json,key)==false` ⇒ 返回 **null**（缺席）；键存在时按 `Bool` 的两种形态解析，
+        /// 仍然解不出布尔（含字面量 `null`）⇒ 也返回 **null**。
+        /// ⚠️ 与 `Bool(..., fallback)` 的分工：**需要 fallback 的老调用点一律不动**，
+        /// 只有确实要区分三态的新调用点才用它。
+        /// </summary>
+        public static bool? BoolOrNull(string json, string key)
+        {
+            if (!Has(json, key)) return null;              // 键缺席
+            int p = FindKey(json, key);
+            if (p < 0 || p >= json.Length) return null;
+            char c = json[p];
+            if (c == 'n' || c == 'N')
+            {
+                // JSON 字面量 null（后面可能跟逗号/花括号，只要前 4 字符是 null 即可）
+                if (string.Compare(json, p, "null", 0, 4, StringComparison.OrdinalIgnoreCase) == 0)
+                    return null;
+            }
+            if (string.Compare(json, p, "true", 0, 4, StringComparison.OrdinalIgnoreCase) == 0) return true;
+            if (string.Compare(json, p, "false", 0, 5, StringComparison.OrdinalIgnoreCase) == 0) return false;
+            // 带引号形态（CLI 约定）
+            if (c == '"')
+            {
+                string s = Str(json, key, null);
+                if (string.Equals(s, "true", StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(s, "false", StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            return null;                                   // 存在但不是布尔 ⇒ 未知
         }
     }
 }

@@ -195,12 +195,13 @@ namespace BlBridge
                 // 修掉的缺口 B：原来 `Jmini.Bool(response,"ok",false)` 兜底是 false
                 // ⇒ 成功的请求只要响应读不出来就被记成失败，且与真失败无法区分。
                 bool readable, ok, uncertain;
+                bool? resultOk;
                 string code, note;
                 Protocol.ReadResponseOutcome(response, out readable, out ok, out code,
-                    out uncertain, out note);
+                    out uncertain, out note, out resultOk);
                 double ms = (DateTime.UtcNow - startedUtc).TotalMilliseconds;
                 ActionLedger.Record(id, method, ok, code, ms, bytes, uncertain, note,
-                    ActionLedger.ArgsSnippet(raw));
+                    ActionLedger.ArgsSnippet(raw), resultOk);
             }
             catch
             {

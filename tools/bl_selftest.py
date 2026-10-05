@@ -887,11 +887,55 @@ def test_action_ledger():
             text = fh.read()
         cs_keys = set(m.group(1) for m in re.finditer(r'Append\([^)]*?\\"(\w+)\\":', text))
         cs_keys.add("t")   # 首键写法是 '{\"t\":\"'（带左花括号），上面的正则抓不到，显式补
-        expected = set(["t", "seq", "runToken", "id", "method", "ok", "code",
+        # v0.8.46：新增 `resultOk`（`result` 内部的 ok，三态 true/false/null）。
+        # 它写在 `ok` 之后、`code` 之前，既有键一个不删不改（方案 A 的"零破坏"承诺）。
+        expected = set(["t", "seq", "runToken", "id", "method", "ok", "resultOk", "code",
                         "ms", "bytes", "uncertain", "note", "args"])
         check(cs_keys == expected,
               "C# 写侧字段集 == 读侧期望集（%d 项）" % len(expected),
               "仅 C# 有：%s ／ 仅期望有：%s" % (sorted(cs_keys - expected), sorted(expected - cs_keys)))
+
+        # ── v0.8.46：`resultOk` 的**三态语义**（上面那条只对字段名，不对行为）──
+        # 判据来自真实响应形状（skip_video 的 not_video 就是第一种）。
+        p2 = os.path.join(tmp, "actions2.jsonl")
+        rows = [
+            # ① 信封成功 + 操作失败（not_video 那一类）—— 旧账本看不出来的正是这条
+            {"t": "x", "seq": 1, "runToken": "r", "id": "a", "method": "skip_video",
+             "ok": True, "resultOk": False, "code": "", "ms": 1, "bytes": 1,
+             "uncertain": False, "note": "", "args": "{}"},
+            # ② 操作成功
+            {"t": "x", "seq": 2, "runToken": "r", "id": "b", "method": "ghost_camera",
+             "ok": True, "resultOk": True, "code": "", "ms": 1, "bytes": 1,
+             "uncertain": False, "note": "", "args": "{}"},
+            # ③ 历史行：**没有** resultOk 键（= 未知，不能当失败）
+            {"t": "x", "seq": 3, "runToken": "r", "id": "c", "method": "status",
+             "ok": True, "code": "", "ms": 1, "bytes": 1,
+             "uncertain": False, "note": "", "args": "{}"},
+            # ④ 信封失败 ⇒ resultOk 为 null（未知，**不是** false）
+            {"t": "x", "seq": 4, "runToken": "r", "id": "d", "method": "start_battle",
+             "ok": False, "resultOk": None, "code": "unknown_scene", "ms": 1, "bytes": 1,
+             "uncertain": False, "note": "n", "args": "{}"},
+        ]
+        with io.open(p2, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        entries, _ = bl_common.load_actions(p2)
+        check(len(entries) == 4, "resultOk 样本 4 行可读", len(entries))
+        op_fail = [e["id"] for e in entries if e.get("resultOk") is False]
+        check(op_fail == ["a"],
+              "★ `resultOk is False` 只圈出'操作失败'那条（信封 ok=true 但 not_video）", op_fail)
+        unknown = sorted(e["id"] for e in entries if e.get("resultOk") is None)
+        check(unknown == ["c", "d"],
+              "★ 历史行(无键) 与 信封失败(null) 都算**未知**（不是失败）", unknown)
+        not_fail = [e["id"] for e in entries if not e.get("resultOk")]
+        check(set(not_fail) == {"a", "c", "d"},
+              "反向对照：`not resultOk` 会把'未知'当失败 ⇒ 所以文档要求写 `is False`",
+              not_fail)
+        # 信封口径**不变**：fail_only 仍只按 ok 过滤
+        entries, _ = bl_common.load_actions(p2, fail_only=True)
+        check([e["id"] for e in entries] == ["d"],
+              "既有 `--fail-only` 仍按**信封** ok 过滤（语义一字不改）",
+              [e["id"] for e in entries])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

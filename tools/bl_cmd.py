@@ -259,7 +259,14 @@ def main(argv):
     # ── v0.8.42：动作账本（commands/actions.jsonl）────────────────────────
     ac = sub.add_parser("actions", help="读控制通道动作账本：每个请求一行（含被拒的）")
     ac.add_argument("--limit", type=int, default=30, help="只显示最后 N 条（0 = 全显示），默认 30")
-    ac.add_argument("--fail-only", dest="fail_only", action="store_true", help="只看失败项")
+    ac.add_argument("--fail-only", dest="fail_only", action="store_true",
+                    help="只看**信封**失败项（ok=false，请求没被处理）")
+    # v0.8.46：第二层口径 ——「信封成功、但**操作**失败」。实测这类占 2.00%、
+    # 涉及 10 个方法（skip_video / order / control_agent / ghost_camera / camera_speed …），
+    # 旧账本**完全看不出来**（因为信封就是 ok=true）。判据用 3 值：真 / 假 / 未知。
+    ac.add_argument("--op-fail-only", dest="op_fail_only", action="store_true",
+                    help="只看**操作**失败项（resultOk 明确为 false）；"
+                         "历史行没有该字段 ⇒ 视为未知，**不计入**")
     ac.add_argument("--json", action="store_true", help="原样吐 JSON 行，便于二次处理")
     ac.add_argument("--path", default=None, help="直接指定 actions.jsonl 路径（默认按日志目录推导）")
 
@@ -587,8 +594,15 @@ def main(argv):
 
     if args.cmd == "actions":
         limit = None if int(args.limit) <= 0 else int(args.limit)
-        entries, stats = bl_common.load_actions(args.path, limit=limit,
-                                               fail_only=bool(args.fail_only))
+        entries, stats = bl_common.load_actions(args.path, limit=None,
+                                                fail_only=bool(args.fail_only))
+        # v0.8.46：第二层口径。**必须在 load_actions 之后自己筛**，而不是加参数进去 ——
+        # 因为 3 值语义（true/false/None）用 `fail_only` 那种二值开关表达不了，
+        # 硬塞会把"未知"当成"失败"（`not resultOk` 的经典错误）。
+        if args.op_fail_only:
+            entries = [e for e in entries if e.get("resultOk") is False]
+        if limit is not None and limit >= 0:
+            entries = entries[-limit:]
         if stats.get("missing"):
             print("账本还不存在：%s" % stats["path"])
             print("（v0.8.42 起，游戏每次处理一个请求就追加一行；先跑一条命令再看）")
@@ -605,11 +619,15 @@ def main(argv):
             #    能活下来的原因（分析器不报错、只是少一段数据）。审计数据不接受这种静默。
             for s in stats["badSamples"]:
                 print("  [坏行] %s" % s)
-            print("%-23s %-4s %-24s %-22s %7s  %s"
-                  % ("t(UTC)", "ok", "method", "code", "ms", "note"))
+            # v0.8.46：多一列 `opOk` —— 两个 ok 各占一列，一眼看出"信封成功但操作失败"。
+            # 三态显示：OK / FAIL / **?**（未知：历史行没有该字段，或信封失败/结果无 ok）。
+            print("%-23s %-4s %-4s %-24s %-22s %7s  %s"
+                  % ("t(UTC)", "ok", "opOk", "method", "code", "ms", "note"))
             for ev in entries:
-                print("%-23s %-4s %-24s %-22s %7s  %s"
-                      % (str(ev.get("t", ""))[:23], "OK" if ev.get("ok") else "FAIL",
+                r = ev.get("resultOk")
+                op = "?" if r is None else ("OK" if r else "FAIL")
+                print("%-23s %-4s %-4s %-24s %-22s %7s  %s"
+                      % (str(ev.get("t", ""))[:23], "OK" if ev.get("ok") else "FAIL", op,
                          str(ev.get("method", ""))[:24], str(ev.get("code", ""))[:22],
                          ev.get("ms", ""), str(ev.get("note", ""))[:60]))
         return 0

@@ -98,6 +98,18 @@ def load_actions(path=None, limit=None, fail_only=False):
     ``stats`` 键：``path`` / ``lines``（非空行总数）/ ``bad``（解析失败行数）/
     ``badSamples``（前 3 条坏行原文，截断 160 字符）/ ``runs``（出现过的 runToken 列表）。
     ``limit`` 取**过滤后的最后 N 条**（要的是"最近发生了什么"）。
+
+    **两个 ``ok``（v0.8.46 起，务必分清）**：每行有两个布尔语义 ——
+
+    * ``ok``：**信封**是否成功（"请求有没有被游戏端处理"）。**语义与 v0.8.42 逐字不变。**
+    * ``resultOk``：``result`` **内部**的 ``ok``（"**这个操作成功了吗**"）。
+      ``true``=操作成功 / ``false``=操作失败 / **``null``=未知**。
+
+    ⚠️ **历史行没有 ``resultOk`` 键** ⇒ ``ev.get("resultOk")`` 返回 ``None``，
+    与"值是 null"**同形**，两者都表示**未知**（老数据确实没记录过这件事）。
+    ⇒ 想筛"操作失败"请用 ``resultOk is False``（**不要**写 ``not resultOk``，
+    那会把"未知"也算成失败）。``fail_only`` 仍按**信封** ``ok`` 过滤（既有语义不变）；
+    要按操作成败筛，用本函数返回的条目自行按 ``resultOk is False`` 过滤。
     """
     p = path or actions_path()
     entries = []

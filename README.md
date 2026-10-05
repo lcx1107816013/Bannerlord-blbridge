@@ -409,13 +409,40 @@ manifest_missing         旧版部署，没有清单
 | `seq` | 进程内单调序号（判"有没有丢行/两个写者交错"，比时间戳可靠） |
 | `runToken` | 游戏**进程会话**标识 ⇒ 账本能按会话分组（重启游戏即换 token） |
 | `id` / `method` | 请求 id / 方法名（拒绝路径上 method 可能为空） |
-| `ok` / `code` | 是否成功 / 失败码（成功时 `code` 为空） |
+| `ok` / `resultOk` | **两个不同的 ok** —— 见下面「两个 ok」；`ok` = 信封，`resultOk` = **操作** |
+| `code` | 失败码（**信封**成功时为空） |
 | `ms` / `bytes` | 处理耗时（毫秒）/ 请求文件字节数（读不到为 -1） |
 | `uncertain` | 协议里的 `outcomeUncertain` —— 为 true 时**绝不盲目重试** |
 | `note` | 成功时 `state=<状态>`；失败时错误消息（截断） |
 | `args` | 请求参数片段（截断 600 字符；账本是**索引**不是副本） |
 
-读它：`python tools\bl_cmd.py actions [--limit 30] [--fail-only] [--json] [--path …]`
+### ⚠️ 两个 `ok`（v0.8.46 起，务必分清）
+
+响应里有**两层**成败，**它们不是一回事**：
+
+| 字段 | 回答的问题 | 取值 |
+|---|---|---|
+| `ok` | "**请求有没有被游戏端处理**"（信封） | `true` / `false` |
+| `resultOk` | "**这个操作成功了吗**"（`result` 内部） | `true` / `false` / **`null` = 未知** |
+
+**为什么需要两个**：有 **10 个方法**返回的是**裸 body 字符串**、被成功信封包起来
+（`skip_video` / `order` / `control_agent` / `ghost_camera` / `camera_speed` / `cheat_mode` …）。
+典型例子：主菜单下跳开场动画 ⇒ 信封 `ok=true`（请求确实被处理了）
+但操作失败（`code=not_video`）。**实测这类占全部响应的 2.00%**。
+v0.8.46 之前，这类在账本里**完全看不出来**。
+
+**`resultOk` 的 `null` 表示"未知"**，两种来源：
+① **历史行没有这个字段**（v0.8.46 之前写的，确实没记录过这件事）；
+② 信封失败、或 `result` 里没有 `ok` 键。
+
+⇒ **筛"操作失败"要写 `resultOk is False`**，**不要**写 `not resultOk`
+（后者会把"未知"也算成失败 —— 自测里有一条断言专门钉住这条）。
+
+读它：`python tools\bl_cmd.py actions [--limit 30] [--fail-only] [--op-fail-only] [--json] [--path …]`
+
+- `--fail-only`：只看**信封**失败（`ok=false`，请求没被处理）。**语义与 v0.8.42 一致，未变。**
+- `--op-fail-only`：只看**操作**失败（`resultOk` 明确为 `false`）；未知的**不计入**。
+- 表格第二列 `opOk` 显示三态：`OK` / `FAIL` / **`?`**（未知）。
 
 - **每个请求都有且只有一行**，含全部拒绝路径：过大 / id 非法 / 版本不符 / 过期 / 未知方法 / 处理器异常。
 - ⚠️ **轮转默认关闭**（`maxActionLogBytes` 默认 0）。理由：battle 日志是**实验数据**（`battles/` 从不自动删），

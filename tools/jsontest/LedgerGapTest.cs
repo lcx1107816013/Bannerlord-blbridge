@@ -45,7 +45,18 @@ internal static class LedgerGapTest
     private static void ReverseRead(string response, out bool ok, out string code, out string note)
     {
         bool readable, uncertain;
-        Protocol.ReadResponseOutcome(response, out readable, out ok, out code, out uncertain, out note);
+        bool? resultOk;
+        Protocol.ReadResponseOutcome(response, out readable, out ok, out code, out uncertain,
+            out note, out resultOk);
+    }
+
+    /// <summary>v0.8.46：把内层 `resultOk` 也带出来（方案 A 的判定入口）。</summary>
+    private static void ReverseReadFull(string response, out bool ok, out string code,
+        out string note, out bool? resultOk)
+    {
+        bool readable, uncertain;
+        Protocol.ReadResponseOutcome(response, out readable, out ok, out code, out uncertain,
+            out note, out resultOk);
     }
 
     public static int Run()
@@ -181,6 +192,92 @@ internal static class LedgerGapTest
         {
             try { Directory.Delete(tmp, true); } catch { }
         }
+
+        // ══ v0.8.46 · 方案 A：`resultOk` 三态（二层 ok 不再混淆）═══════════════
+        // 动机：响应里有**两个** ok。10 个 handler 返回裸 body、被 Protocol.Success 包起来
+        // （如 skip_video 的 not_video）⇒「信封 ok=true 但操作失败」在账本里看不出来（实测 2.00%）。
+        Console.WriteLine("   —— v0.8.46 方案 A：resultOk 三态 ——");
+
+        // ① 真正的案例：skip_video 的 not_video（信封成功、操作失败）
+        {
+            string resp = Protocol.Success("0011223344556677",
+                "{\"ok\":false,\"code\":\"not_video\",\"error\":\"没有开场动画可跳\"}");
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(ok, "A ① 信封 ok=true（请求确实被处理了）", "ok=" + ok);
+            Check(r.HasValue && r.Value == false,
+                "A ① ★ resultOk=false（**操作失败**）—— 这正是旧账本看不出来的那一层",
+                "resultOk=" + (r.HasValue ? r.Value.ToString() : "null"));
+            Check(code == "", "A ① 信封成功 ⇒ code 仍为空串（既有语义一字不改）", "code='" + code + "'");
+        }
+
+        // ② 正常的操作成功：result.ok=true ⇒ resultOk=true
+        {
+            string resp = Protocol.Success("0011223344556677",
+                "{\"ok\":true,\"via\":\"GameStateManager.Current(static)\"}");
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(r.HasValue && r.Value, "A ② result.ok=true ⇒ resultOk=true",
+                "resultOk=" + (r.HasValue ? r.Value.ToString() : "null"));
+        }
+
+        // ③ result 里**没有** ok 键 ⇒ 未知（null），**不假装**成功或失败
+        {
+            string resp = Protocol.Success("0011223344556677", "{\"state\":\"loading\"}");
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(!r.HasValue, "A ③ result 无 ok 键 ⇒ resultOk=null（未知，不猜）",
+                "resultOk=" + (r.HasValue ? r.Value.ToString() : "null"));
+        }
+
+        // ④ 信封失败 ⇒ result 必为 null ⇒ resultOk=null（不是 false！）
+        {
+            string resp = Protocol.Failure("0011223344556677", "unknown_scene", "场景不存在", false);
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(!ok && !r.HasValue,
+                "A ④ 信封 ok=false ⇒ resultOk=null（未知；**不能**与'操作失败'混为一谈）",
+                "ok=" + ok + " resultOk=" + (r.HasValue ? r.Value.ToString() : "null"));
+        }
+
+        // ⑤ 解不出来的响应 ⇒ resultOk 也是 null（不能凭空说成功/失败）
+        {
+            bool ok; string code, note; bool? r;
+            ReverseReadFull("{\"protocolVersion\":1,\"proc", out ok, out code, out note, out r);
+            Check(!r.HasValue && code == "ledger_unreadable",
+                "A ⑤ 不可读响应 ⇒ resultOk=null 且 code=ledger_unreadable",
+                "resultOk=" + (r.HasValue ? r.Value.ToString() : "null") + " code='" + code + "'");
+        }
+
+        // ⑥ ★ 扁平读取器陷阱：**不能**让 result 里的 ok 被当成信封的 ok
+        {
+            string resp = Protocol.Success("0011223344556677", "{\"ok\":false,\"code\":\"x\"}");
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(ok, "A ⑥ ★ 内层 ok=false **不得**污染信封 ok（Jmini 是扁平读取器）",
+                "ok=" + ok + "（若为 false 说明读错了层）");
+        }
+
+        // ⑦ result 里含 `}` 的字符串不得截断对象提取（ExtractObject 必须跳过字符串字面量）
+        {
+            string resp = Protocol.Success("0011223344556677",
+                "{\"ok\":false,\"note\":\"brace } inside string\",\"code\":\"z\"}");
+            bool ok; string code, note; bool? r;
+            ReverseReadFull(resp, out ok, out code, out note, out r);
+            Check(r.HasValue && r.Value == false,
+                "A ⑦ result 值里含 '}' 仍能正确取到内层 ok=false（跳过字符串字面量）",
+                "resultOk=" + (r.HasValue ? r.Value.ToString() : "null"));
+        }
+
+        // ⑧ 注入对照：把"读内层"退化成"读信封"（= 旧行为），① 必须不再成立
+        ExpectRed(delegate
+        {
+            string resp = Protocol.Success("0011223344556677", "{\"ok\":false,\"code\":\"not_video\"}");
+            // 旧行为：只读信封，于是 resultOk 无从谈起 ⇒ 表达成 null
+            bool? legacy = Jmini.Bool(resp, "ok", false) ? (bool?)null : null;
+            bool broken = !(legacy.HasValue && legacy.Value == false);
+            return broken;   // 退化的读法确实**抓不到** not_video ⇒ 证明 ① 有区分力
+        }, "A ⑧ 注入对照：退化成只读信封 ⇒ 抓不到 not_video（证明 ① 不是恒绿）");
 
         return _fail;
     }

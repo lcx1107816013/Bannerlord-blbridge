@@ -4636,3 +4636,142 @@ if (agent != null && victimAgent.IsFriendOf(agent))
 > 数据本身没问题（报错信息里能看到全文），但这是 `AGENTS.md` 第一节那个坑的**又一个面**：
 > **不只是 `.ps1` 源码，`Get-Content` 读 UTF-8 数据文件也一样**。
 > 读侧要显式 `-Encoding UTF8`。
+
+---
+
+## [2026-10-05] §四十五 账本「两个 ok」口径定案（v0.8.46，方案 A）+ 编码门禁覆盖面自检
+
+> 执行者 dsh-agent。用户裁定：**① 账本口径选方案 A；② 补上 `.rsp` 门禁缺口**。
+> 两项都已实施 + **注入验证** + **真机验证**。
+
+### 1. 问题（实测量化，不是推测）
+
+响应里有**两个** `ok`：**信封**的（"请求有没有被游戏端处理"）与 `result` 里的（"**这个操作成功了吗**"）。
+有 **10 个 handler** 返回的是**裸 body 字符串**、被 `Protocol.Success` 包起来，于是
+「信封 ok=true 但操作失败」在**旧账本里完全看不出来**。
+
+**实测规模**（`E:\Document\blbridge-ok-semantics\quantify.py`，对 12654 个真实响应）：
+
+| 项 | 值 |
+|---|---|
+| 信封 `ok=true` | 11022 |
+| 其中 `result.ok=false` | **220（2.00%）** |
+| 涉及方法 | **10 个**（`skip_video` 105 / `order` / `control_agent` / `ghost_camera` / `camera_speed` / `cheat_mode` …） |
+| 内部失败码 | `not_video` / `no_mission` / `bad_request` / `unsupported_param` / `controller_not_verified` … |
+
+**旧账本行长什么样**（实测）：`ok=true`、`code=''`、`note='state='`（空）——
+**真实的 `not_video` 在 26 行里 0 命中**。
+
+> ⚠️ **我先前给的一个选项是错的，如实记**：我曾建议"只在读侧加筛选"（方案 C 的弱化版）。
+> 实测否证了它 —— **数据根本没写进去**，读侧无从筛起。
+> 教训：**"读侧能补"这类判断，必须先确认字段真的落盘了。**
+
+### 2. 为什么选 A（对 AI 更友好）—— 这是**实测**结论，不是架构偏好
+
+**关键发现**：`bl_mcp.py` 里那 6 个受影响的 handler **全都已经在读内层 `body.ok`**：
+
+```python
+return {"ok": bool(body.get("ok")), ...}   # L2004 / L2027 / L2100 / L2163 / L2186 / L2205
+```
+
+⇒ **AI 今天已经能正确看到 `not_video`**（`bl_skip_video` 返回 `{"ok":false,"code":"not_video",...,"hint":...}`）。
+**AI 侧从未受这个 bug 影响**；受影响的**只有账本**。
+
+而方案 B（把那 10 处改用 `Protocol.Failure`）会**让 AI 变差**：
+信封变 `ok=false` 后，`bl_mcp.py` 的通用分支 `if not resp.get("ok"): return {...}` 会**提前返回**，
+**丢掉那 6 个 handler 精心写的 `hint` 与结构化字段**（`hint` 是给 AI 的下一步指引，
+如"先开一场战斗再切幽灵相机"）。⇒ **为修账本而减少 AI 可用信息，方向错了。**
+
+| | **A（选用）** | B（否决） |
+|---|---|---|
+| AI 看到的 | **完全不变** | 信封变了 ⇒ 丢 `hint` |
+| 历史 2153 行 | 缺字段 ⇒ **未知**（语义明确） | 语义变了，**新旧不可比** |
+| 改动面 | 2 个 C# 文件 | 10 处 C# + 6 处 Python + 重验 `hint` |
+
+### 3. 实施（方案 A）
+
+| 层 | 改动 |
+|---|---|
+| `Jmini` | 新增 `BoolOrNull`（**三态**读取：true/false/**null**）+ `ValueStart` |
+| `BridgeProtocol` | `ReadResponseOutcome` 增出参 `resultOk`；新增 `ExtractObject`（花括号配对取内层 `result`，**跳过字符串字面量**） |
+| `ActionLedger` | 行新增 **`"resultOk"`**（写在 `ok` 之后、`code` 之前）；**既有键一个不删不改** |
+| `bl_common` | docstring 写清两个 ok 的分工与"历史行=未知" |
+| `bl_cmd` | 新增 `--op-fail-only` + 表格新增 **`opOk`** 列（三态显示 `OK`/`FAIL`/`?`） |
+
+**为什么需要 `ExtractObject`**：`Jmini` 是**扁平**读取器，`Jmini.Bool(resp,"ok")` 拿的是**信封**的
+（文本里第一个 `"ok"`）⇒ 要读内层必须先把 `result` 的对象文本切出来。这是**结构性的**，
+所以专门加了一条断言（A ⑥）来钉住"内层不得污染信封"。
+
+### 4. 验证（三层，都可复现）
+
+**① 离线断言 + 注入对照**（`tools/jsontest/LedgerGapTest.cs`，新增 10 条）：
+
+| 断言 | 判据 |
+|---|---|
+| A ① | `skip_video` 的 not_video ⇒ `ok=true` **且** `resultOk=false`（旧账本看不出的正是这层） |
+| A ② / ③ / ④ / ⑤ | 操作成功 ⇒ true；`result` 无 ok 键 ⇒ **null**；信封失败 ⇒ **null**（**不是 false**）；不可读 ⇒ null |
+| A ⑥ ★ | **内层 `ok=false` 不得污染信封 `ok`**（扁平读取器陷阱） |
+| A ⑦ | `result` 的值里含 `}` 仍能正确取到内层（跳过字符串字面量） |
+| A ⑧ | **注入对照**：退化成只读信封 ⇒ 抓不到 `not_video` ⇒ 证明 ① 不是恒绿 |
+
+jsontest 从 181 → **191 条，全过**。
+
+**② Python 侧字段对账 + 语义断言**（`tools/bl_selftest.py`）：
+字段集对账**先变红**（`仅 C# 有：['resultOk']`）—— **这正是它该做的**，改完变绿；
+另加 4 条**行为**断言（字段名对账管不到行为）：
+- `resultOk is False` **只**圈出"操作失败"那条；
+- 历史行(无键) 与 信封失败(null) **都算未知，不是失败**；
+- **反向对照**：`not resultOk` 会把"未知"当失败 ⇒ 证明文档里"要写 `is False`"这条**必要**；
+- 既有 `--fail-only` 仍按**信封**过滤（**语义一字不改**）。
+
+**③ 真机**（pid **32444**，v0.8.46，四段链 `c01a7312de4259dd` 已闭合）：
+发一条 `bl_skip_video`（主菜单、无动画）⇒ 账本真实行：
+
+```json
+{"method":"skip_video","ok":true,"resultOk":false,"code":"","ms":5.5129,...}
+```
+
+⇒ **旧账本只会说 `ok:true`（"成功"），现在 `resultOk:false` 明说"操作失败了"**，而 `ok` 未变。
+读侧实测：`--op-fail-only` 精确 1 条；`--fail-only` 仍 10 条；2153 条历史**正确地不计入**操作失败。
+
+### 5. 编码门禁的覆盖面自检（用户裁定的第 ② 项）
+
+**缺口**（子代理发现、我复核）：`.rsp` 不在 `TEXT_EXT` 里 ⇒
+`tools/l2probe/_refs.rsp` 被 `git add` 后**静默不被检查**，而它恰好是合规的
+（BOM=False / LF / 11329 B）⇒ **谁也没发现门禁漏了它**。
+这正是本项目反复记录的失效模式：**不是坏掉，是坏掉而无人知**。
+
+**修法**（`tools/check_repo_encoding.py`）：
+1. `.rsp` 加进 `TEXT_EXT`（并顺带补齐 `.sh/.bat/.cmd/.sql/.tsv/.csv`）；
+2. 新增 **`BINARY_EXT`** 白名单 + **`uncovered_tracked_files()`**：
+   凡**已跟踪**文件的后缀**既不在文本集、也不在二进制集**，**当场报错退出 1** ——
+   并明确提示"这意味着体检从未检查过它们，而你会看到『全部合规』—— 那是假的"。
+   ⚠️ 刻意只查**已跟踪**文件：未跟踪的构建产物不该让体检变红。
+
+**注入验证**（判据 + 对照）：
+
+| 步骤 | 结果 |
+|---|---|
+| 正常跑 | exit 0，**检查 111 / 共 111**（修前是 **110 / 111**，漏的正是 `_refs.rsp`） |
+| **注入**：把 `.rsp` 从 `TEXT_EXT` 拿掉 | **exit 1**，点名 `tools/l2probe/_refs.rsp（后缀 '.rsp'）` |
+| 还原 | 逐字节恢复（`$env:TEMP\cre.orig`），复跑 exit 0 |
+
+### 6. 门禁与状态
+
+**十道门禁全绿**：encoding（**111/111**，修前 110）/ selftest / metrics / gabp(+self) /
+dispatch(+self) / **jsontest 191** / clock_reset（全量 11 历史仍 FAIL = 有区分力）/ envelope。
+
+| 项 | 值 |
+|---|---|
+| 版本 | 0.8.45 → **0.8.46** |
+| `out\BlBridge.dll` | `c01a7312de4259dd…`，202 KB |
+| 四段链 | ✅ 源码 = 产物 = 部署 = 进程内（pid 32444，`runToken=ff45822246d8`） |
+
+### 7. 仍未做
+
+- ~~`resultOk` 尚未在真机上覆盖"操作成功"那一支~~ ⇒ **✅ 已补**：
+  真机再发一条 `bl_ghost_camera(mode=status)`（`result.ok=true`）⇒ 账本记 `resultOk=true`。
+  **三态在真机上全齐**：`false`（skip_video，信封成功/操作失败）、
+  `true`（ghost_camera，信封成功/操作成功）、`null`（历史 2153 行 = 未知）。
+- `randomTerrainSeed` / `terrain` 的 **native 侧**（仍无客观观测量）。
+- `0xC0000005` 那 16 秒里引擎具体走到哪（需已删的 rgl 日志或复现）。

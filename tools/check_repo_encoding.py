@@ -30,13 +30,47 @@ if HERE not in sys.path:
 import bl_common  # noqa: E402
 
 # 按扩展名判定"文本文件"（二进制文件不做编解码检查）。
-TEXT_EXT = (".py", ".cs", ".md", ".json", ".xml", ".ps1", ".txt", ".cfg", ".ini", ".yml", ".yaml")
+TEXT_EXT = (".py", ".cs", ".md", ".json", ".xml", ".ps1", ".txt", ".cfg", ".ini", ".yml", ".yaml",
+            ".rsp",     # Roslyn 响应文件（纯文本的编译参数表）—— tools/l2probe/_refs.rsp
+            ".sh", ".bat", ".cmd", ".sql", ".tsv", ".csv")
 TEXT_NAMES = (".gitignore", ".gitattributes", ".editorconfig")
+
+# 明确**不是**文本、因而不做编码检查的后缀（二进制/产物）。
+# 有了它，下面那条"覆盖面自检"才能区分「故意不查」与「忘了加」——
+# 否则任何新后缀都会让自检变红，人会习惯性把它加进白名单，自检就废了。
+BINARY_EXT = (".dll", ".exe", ".pdb", ".so", ".dylib", ".zip", ".7z", ".gz", ".tar",
+              ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+              ".bin", ".dat", ".obj", ".lib", ".res", ".mdb", ".sacx", ".mmd",
+              ".ivf", ".ogg", ".wav", ".mp3", ".ttf", ".otf", ".woff", ".woff2")
 
 
 def is_text(path):
     base = os.path.basename(path)
     return base in TEXT_NAMES or path.endswith(TEXT_EXT)
+
+
+def uncovered_tracked_files(files):
+    """返回"既不在 TEXT_EXT/TEXT_NAMES、也不在 BINARY_EXT"的**已跟踪**文件。
+
+    为什么要有这个自检（2026-10-05 实测踩到）：
+      `tools/l2probe/_refs.rsp` 被 `git add` 进仓库后，体检**静默不检查它** ——
+      因为 `.rsp` 当时不在 `TEXT_EXT` 里，`is_text()` 返回 False，`continue` 掉了。
+      **它恰好是合规的（BOM=False / LF），所以谁也没发现门禁漏了它。**
+      ⇒ 「没报错」在这里**不等于**「检查过」。加一个新后缀的文件时，体检会**安静地放过**，
+      这正是本项目反复记录的失效模式：**不是坏掉，是坏掉而无人知**。
+
+    判据刻意只覆盖**已跟踪**文件：未跟踪的临时产物（`out/` 等已被 .gitignore 排除）
+    不该让体检变红。一旦有人 `git add` 了一个新后缀，本自检立刻点名。
+    """
+    out = []
+    for f in files:
+        if is_text(f):
+            continue
+        ext = os.path.splitext(f)[1].lower()
+        if ext in BINARY_EXT:
+            continue
+        out.append(f)
+    return out
 
 
 def tracked_files():
@@ -74,6 +108,23 @@ def main(argv):
     files = tracked_files()
     if files is None:
         return 2
+
+    # ── 覆盖面自检（先跑）────────────────────────────────────────────────
+    # 必须在逐文件检查**之前**：如果某个后缀根本没进覆盖集合，下面的循环会静默跳过它，
+    # 于是"全部合规"是一句**没检查过它**的结论。这条自检让那种情况**当场变红**。
+    uncovered = uncovered_tracked_files(files)
+    if uncovered:
+        print("发现 %d 个已跟踪文件的后缀**不在编码检查的覆盖集合内**："
+              % len(uncovered))
+        for f in uncovered:
+            print("  %-46s （后缀 %r）" % (f, os.path.splitext(f)[1].lower() or "(无)"))
+        print()
+        print("这意味着体检**从未检查过**它们，而你会看到「全部合规」—— 那是假的。")
+        print("修法（二选一，别默默放过）：")
+        print("  · 若它是文本 ⇒ 把后缀加进本脚本的 `TEXT_EXT`；")
+        print("  · 若它是二进制/产物 ⇒ 加进 `BINARY_EXT`（或写进 .gitignore 别入库）。")
+        return 1
+
     problems = []
     checked = 0
     for f in files:

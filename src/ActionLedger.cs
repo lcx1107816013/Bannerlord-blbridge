@@ -94,8 +94,19 @@ namespace BlBridge
         /// <param name="outcomeUncertain">该次失败是否"副作用不确定"（协议里要求外部绝不盲目重试）</param>
         /// <param name="note">失败原因摘要 / 其它需要留痕的一句话（成功时通常为空）</param>
         /// <param name="argsSnippet">请求参数片段（已截断；可为空）</param>
+        /// <param name="resultOk">
+        /// v0.8.46：`result` **内部**的 `ok`，三态：`true`=操作成功 / `false`=操作失败 /
+        /// **`null`=未知**（信封失败、`result` 为 null、或 `result` 里没有 `ok` 键）。
+        ///
+        /// 为什么加它（账本方案 A）：响应里有**两个** `ok` —— 信封的（"请求有没有被处理"）
+        /// 与 `result` 里的（"这个操作成功了吗"）。有 10 个 handler 返回**裸 body 字符串**、
+        /// 被 `Protocol.Success` 包起来（如 `skip_video` 的 `not_video`），于是
+        /// 「信封 ok=true 但操作失败」在账本里**完全看不出来**（实测占 2.00%、涉及 10 个方法）。
+        /// ⇒ 两个语义**各占一个字段**；既有 `ok` 的语义**一字不改**（零破坏）。
+        /// </param>
         internal static void Record(string id, string method, bool ok, string code, double ms,
-            long bytes, bool outcomeUncertain, string note, string argsSnippet)
+            long bytes, bool outcomeUncertain, string note, string argsSnippet,
+            bool? resultOk = null)
         {
             try
             {
@@ -113,6 +124,10 @@ namespace BlBridge
                 sb.Append(",\"id\":\"").Append(Jw.Esc(id ?? "")).Append('"');
                 sb.Append(",\"method\":\"").Append(Jw.Esc(method ?? "")).Append('"');
                 sb.Append(",\"ok\":").Append(Jw.B(ok));
+                // v0.8.46：`result` 内部的 ok（三态）。**写在 `ok` 之后**，既有键一个不删不改。
+                // null 写成 JSON 字面量 `null`（= 未知）—— 与 `false`（= 操作确实失败）**可区分**。
+                sb.Append(",\"resultOk\":").Append(resultOk.HasValue
+                    ? Jw.B(resultOk.Value) : "null");
                 sb.Append(",\"code\":\"").Append(Jw.Esc(code ?? "")).Append('"');
                 sb.Append(",\"ms\":").Append(Jw.N((float)ms));
                 sb.Append(",\"bytes\":").Append(Jw.N(bytes));
