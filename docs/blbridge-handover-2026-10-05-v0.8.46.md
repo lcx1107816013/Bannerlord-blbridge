@@ -1,7 +1,9 @@
 # BlBridge 交接日志（第二份）· v0.8.33–v0.8.46 入库与结案
 
 - 项目：`C:\Users\LCGX\CodeBuddy\20260923171333\BlBridge`
-- 分支：**`prototype/ui-probe`**，HEAD **`8740359`**
+- 分支：**`main`** @ **`d5da4a6`**
+  - ⚠️ **本行已就地更正（2026-10-05 晚）**：写这份时为 `prototype/ui-probe` @ `8740359`。
+    该分支已 **ff 合并进 `main` 并退役** —— 见下方 §1 的【结案】。
 - 当前版本：**v0.8.46**（源码 / 构建 / 部署 / 进程内**四段链已闭合**，`loadedSha256 = c01a7312de4259dd`）
 - 工作区：**干净**（`git status --short` 为空）
 - **本文件随仓库入库** ⇒ 与代码同寿命，不再只活在外部工作区
@@ -16,39 +18,82 @@
 
 ```
 远端：**没有配任何 remote**（git remote -v 为空）
+[写本文时 / 合并前]
 分支：main  657b982
-      prototype/ui-probe  8740359   ← 当前分支，无 upstream
+      prototype/ui-probe  8740359   ← 当时的当前分支，无 upstream
+
+[结案后 / 现在]
+分支：main  d5da4a6               ← 唯一分支
+tag ：baseline/pre-ui-entry -> 657b982（旧 main 位，可寻址）
+tag ：v0.8.9 -> 4b35b19
 ```
 
-**关键实测结论**：
+**关键实测结论**（下列为**合并前**的 divergence 实测；现已全部结案，见下方【结案】）：
 
 | 判据 | 值 | 含义 |
 |---|---|---|
-| `git rev-list --count main..prototype/ui-probe` | **14** | prototype 领先 main 14 个 commit |
+| `git rev-list --count main..prototype/ui-probe` | **16**（写本文时是 14） | prototype 领先 main 16 个 commit |
 | `git rev-list --count prototype/ui-probe..main` | **0** | main **没有**任何 prototype 没有的提交 |
 | `git merge-base --is-ancestor main prototype/ui-probe` | **成立** | **main 是 prototype 的严格祖先** |
 
 ⇒ **main → prototype 是纯 fast-forward，零冲突风险、零 merge commit。**
 `git checkout main && git merge --ff-only prototype/ui-probe` 即可。
+**（2026-10-05 已按此执行，见下。）**
+
+> ⚠️ **措辞更正（2026-10-05 晚实测）**：本文原写"实测**零冲突**"。更准确的说法是
+> **结构上不可能冲突** —— `merge-base == main` tip ⇒ `main` 是 `prototype` 的**严格祖先**，
+> fast-forward **没有"合并"这个动作**，自然没有东西可冲。这不是"测出来没冲突"。
+
+### ✅ 【结案】2026-10-05：已 ff 合并 + 退役分支 + 转单线
+
+**下面 §1 的"未决"叙述保留原样（留档不删），但它已经不再是未决项了。**
+裁定与完整判据见 **`PROGRESS.md` §四十七**；要点：
+
+| 项 | 结果 |
+|---|---|
+| `git merge --ff-only` | ✅ `657b982..d5da4a6`，69 files，+21408/−184 |
+| 分支改名 `feat/ui-entry` | ❌ **否决** —— 该名前提已过期（16 个 commit 里只有 5 个与 UI 有关） |
+| 旧基线 `657b982` | ✅ 打 tag **`baseline/pre-ui-entry`**（仍在主线历史里） |
+| `prototype/ui-probe` | ✅ **已退役**（`git branch -d`，非 `-D`） |
+| 往后模型 | ✅ **单线**：`main` 即主线，直接在 `main` 上开发 |
+| 内容完整性 | ✅ `main` tree 与 `d5da4a6` tree **逐字相同**（`32bc862b…`），`git diff` 为空 |
 
 ### ⚠️ 但"要不要合"是**已登记的未决项**，不是我不知道
+
+> 🛑 **更正（D1）**：本文原把这条引作"`PROGRESS.md:2113`（**§二十七 §4** 未决）"。
+> **`PROGRESS.md` 从来没有 §二十七 这个标题** —— `## ` 标题是 **二十六 → 二十八** 跳过去的；
+> line 2113 的**真实归属是 §二十三**（标题在 line 2007）。全文所有 `§二十七 2b/2c` 都是**悬空引用**
+> （`git log -S` 追过历史：该标题**任何版本都不存在**）。
+> ⇒ **下一个人按"§二十七 §4"去找一定落空** —— 这也是它挂了 10 天没人动的原因之一。
 
 我查了仓库自己的记录，**这条早就挂在那里了**：
 
 | 出处 | 原文 |
 |---|---|
 | `PROGRESS.md:15` | 版本控制：git 基线 `7d3aadf`（分支 `main`，**无远端**，`core.autocrlf=false`） |
-| `PROGRESS.md:2113`（§二十七 §4 未决） | **分支去留**：W7 之后 `prototype/ui-probe` 是否改名 `feat/ui-entry` 并合回 `main`。 |
+| `PROGRESS.md:2113`（**§二十三 §4**，原误引为"§二十七 §4"） | **分支去留**：W7 之后 `prototype/ui-probe` 是否改名 `feat/ui-entry` 并合回 `main`。 |
 | `PROGRESS.md:2019` | 对照分支 `main` @ `657b982`（攻城轮，**无 UI 相关代码**） |
 
 ⇒ **两个事实**：① **"无远端"是立项时就定下的**（不是本轮才丢的）；
 ② `main` 在本项目里的实际角色一直是**对照基线**（"无 UI 相关代码"那条注释就是证据），
 `prototype/ui-probe` 才是**主线开发分支**。
-⇒ 所以"合回 main"要连**分支命名/定位**一起裁（§二十七 §4 问的就是这个），**不是一条命令的事**。
+⇒ 所以"合回 main"要连**分支命名/定位**一起裁（§二十三 §4 问的就是这个），**不是一条命令的事**。
+
+> ⚠️ **上面这最后一句（"不是一条命令的事"）已被实测反证（D2）** —— 保留原文，更正如下：
+> 仓库自己的历史不支持"`main` 只是对照基线"这个定位：
+> ① **`v0.8.9` tag 就落在 `main` 上** ⇒ `main` 至少承担过一次**发布线**；
+> ② **存在 `66a036c Merge branch 'feat/multitroop-tactics'`（v0.8.8）** ⇒ 本项目**已经**走过一次
+> "`feat/*` 合回 `main`"，且那次是**真 merge commit**（有分叉、两父）；这次连 merge commit 都不需要。
+> ⇒ `main` 的实际定义是**集成分支**；"对照基线"只是 §二十三 那一轮的**临时用法**，
+> **不是它的身份**。事实上它就是**一条命令的事**。
 
 **`main` 停在 2026-09-25 15:19；prototype HEAD 是 2026-10-05 20:57** —— 差 **10 天**。
 
-## 2. 这 14 个 commit 里，前 7 个是本轮入库的（`af4cd0c..HEAD`）
+## 2. 这批 commit 里，前 7 个是本轮入库的（`af4cd0c..8740359`）
+
+> 计数更正：写本文时 `main..prototype/ui-probe` 为 **14**（标题原写"这 14 个"）；
+> 写完之后本文自身入库，又多了 2 个 docs commit（`042d186`、`d5da4a6`）⇒ 合并时实为 **16**。
+> 版本跨度 **v0.8.12 → v0.8.46**（`main` 停在 v0.8.11）。
 
 | commit | 版本 | 规模 | 内容 |
 |---|---|---|---|
@@ -118,8 +163,11 @@
 
 ## 6. ⚠️ 未做 / 需要人裁定的
 
-1. **要不要把 prototype 合进 main**：实测**零冲突**（§1），但 `main` 的定位（稳定线？发布线？）
-   我不知道 ⇒ **没动**。
+1. ~~**要不要把 prototype 合进 main**：实测**零冲突**（§1），但 `main` 的定位（稳定线？发布线？）
+   我不知道 ⇒ **没动**。~~
+   **✅ 已结案（2026-10-05，用户裁定）**：**ff 合并已做**（`657b982..d5da4a6`）；
+   不叫 `feat/ui-entry`（该名前提已过期）；旧基线打 `baseline/pre-ui-entry`；分支退役；**转单线**。
+   完整判据见 **`PROGRESS.md` §四十七**。⚠️ 顺带更正：本条原引的"§二十七 §4"**不存在**（真实归属 §二十三 §4）。
 2. **要不要推远端**：**本仓库根本没配 remote** ⇒ 物理上推不了。若要，需先给仓库地址。
 3. **`0xC0000005` 的属主**（JIT 还是 Harmony detour）：**本 dump 上无法定案**，原因明确 ——
    `MemoryInfoList(16)` **缺席** ⇒ 拿不到**页保护**（而区分 JIT 与 detour 正是看页属性）；
