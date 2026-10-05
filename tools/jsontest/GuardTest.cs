@@ -365,6 +365,10 @@ internal static class GuardTest
         _fail += EnvelopeTest.Run();
         // 2026-10-05：账本两个缺口（写失败静默 / 非法响应静默记错）。
         _fail += LedgerGapTest.Run();
+        // 2026-10-06：HarmonyException 消息解析（`bl_patch_failures` 的解析核心）。
+        // 为什么放进单测：解析错了会给出**错误的 targetClass**，下游 `bl_patches` 按它反查
+        // 就会**指到无关类型上** —— 比不解析更糟。而它是**纯字符串处理**，没理由不覆盖。
+        _fail += HarmonyMessageTest.Run();
 
         Console.WriteLine();
         Console.WriteLine(_fail == 0 ? "结果: 全部通过" : "结果: 失败 " + _fail + " 项");

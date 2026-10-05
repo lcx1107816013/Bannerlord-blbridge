@@ -313,6 +313,50 @@ namespace BlBridge
             {
                 return InventoryProbe.HandleGetInventory(id, raw);
             }
+            // ── Harmony 补丁内省（只读）──
+            // 回答「谁补了哪个方法」。三合一 MOD 的核心风险是「双重叠加」（两个 mod 补同一方法、
+            // Transpiler 撞 Transpiler 生成非法 IL），此前只能靠猜。
+            //
+            // ⚠️ 它**不违反**本项目「零 Harmony 补丁」的原则：只调 Harmony 的**公开内省 API**，
+            // 不创建 Harmony 实例、不 patch 任何方法、不改任何 IL —— 与 EngineProbe 同一性质。
+            // 且**用反射**（而非 using HarmonyLib）⇒ BlBridge.dll 对 0Harmony.dll **零依赖**，
+            // Harmony 没装时返回 available=false 而不是加载失败。
+            // 无 needs：任何时候都能读（模块加载完就有补丁表）。
+            if (method == "get_patches")
+            {
+                return PatchProbe.HandleGetPatches(id, raw);
+            }
+            // ── MCM（Mod Configuration Menu）设置表只读 ──
+            // 面板型 mod 的可调参数最终都落成 MCM 设置项 ⇒ 读得到它 = 拿到全场 mod 的参数面。
+            // 同样**只读 + 零依赖（反射）**：不注册设置、不写值、不碰它的 DI 容器。
+            if (method == "get_mcm_settings")
+            {
+                return McmProbe.HandleGetMcmSettings(id, raw);
+            }
+            // ── UIExtenderEx 界面扩展只读（第三座桥）──
+            // 回答「哪个 mod 改了哪个官方界面」。也是三合一 C4（浮点输入框）那套
+            // 手工注册（WidgetFactory/_builtinTypes）的**成熟版对照物**。
+            // 同样**只读 + 零依赖（反射）**。
+            if (method == "get_ui_extensions")
+            {
+                return UiExtendProbe.HandleGetUiExtensions(id, raw);
+            }
+            // ── 运行时异常统计（FirstChance 捕获的只读视图）──
+            // 与 `bl_crash`（读 WER minidump）互补：那个管"进程已死"，这个管"进程还活着"。
+            // ⚠️ 边界：只含**托管**异常；JIT 期失败与原生崩溃不在其中（要靠 dump）。
+            if (method == "get_exceptions")
+            {
+                return Protocol.Success(id, ExceptionProbe.Summary());
+            }
+            // ── 补丁失败清单（把 HarmonyException 从「现象」变成「点名」）──
+            // 与 `bl_patches` **交叉使用**才完整：这里给"补丁**想补的目标**"，
+            // 把 targetClass 交给 `bl_patches` 按类型反查就能看到 owner ⇒ 定位到 mod。
+            // ⚠️ 发起补丁的 mod **不在异常里**（HarmonyException 只带目标描述），
+            //    所以本接口的输出里显式标注了这一点，不假装它是归因结论。
+            if (method == "get_patch_failures")
+            {
+                return Protocol.Success(id, ExceptionProbe.PatchFailures());
+            }
             // ── 存档：列表 + 按名直载（脱壳抄上游 CoreTools.cs 的 core/list_saves / core/load_save）──
             // load_save 绕过存档选择界面 ⇒ 无人值守换档成为可能，也因此才能自主复现读档期弹窗。
             if (method == "list_saves")

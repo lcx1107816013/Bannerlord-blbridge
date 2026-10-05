@@ -9,6 +9,7 @@ $src = @(
     (Join-Path $Root 'tools\jsontest\GuardTest.cs'),
     (Join-Path $Root 'tools\jsontest\EnvelopeTest.cs'),  # 2026-10-05: response envelope shape
     (Join-Path $Root 'tools\jsontest\LedgerGapTest.cs'), # 2026-10-05: the two ledger gaps
+    (Join-Path $Root 'tools\jsontest\HarmonyMessageTest.cs'), # 2026-10-06: HarmonyException message parsing
     (Join-Path $Root 'tools\jsontest\Shims.cs'),         # 2026-10-05: Debug.Print + CommandPump path helpers
     (Join-Path $Root 'src\ActionLedger.cs'),   # shipped: non-silent write-failure path
     (Join-Path $Root 'src\BridgeProtocol.cs'),  # driven by EnvelopeTest (never unit-tested before)
@@ -21,7 +22,8 @@ $src = @(
     (Join-Path $Root 'src\BridgeConfigFile.cs'),
     (Join-Path $Root 'src\SquadSpec.cs'),      # T4: pure BCL (no TaleWorlds) => offline-testable
     (Join-Path $Root 'src\MainMenuStates.cs'), # v0.8.22: main-menu state names (same set as bl_mcp.py)
-    (Join-Path $Root 'src\OrderSpec.cs')       # v0.8.23: order name table / validator (safety boundary)
+    (Join-Path $Root 'src\OrderSpec.cs'),      # v0.8.23: order name table / validator (safety boundary)
+    (Join-Path $Root 'src\HarmonyMessage.cs')  # v0.8.47: HarmonyException message parsing (pure BCL)
 )
 Write-Output ("[1/2] compile offline unit tests -> " + $out)
 # /r:System.Web.Extensions.dll : EnvelopeTest uses the BCL's real JavaScriptSerializer as an
