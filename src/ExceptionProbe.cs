@@ -56,12 +56,38 @@ namespace BlBridge
             internal string TypeName;
             internal string Message;
             internal string StackHead;
+            /// <summary>
+            /// 前 <see cref="StackFrameLimit"/> 帧（含 <see cref="StackHead"/> 那帧）。
+            ///
+            /// ★ 为什么需要它（v0.8.47 新增，2026-10-06）：
+            /// 只留第一帧时，若某异常的栈首帧落在 **BCL 的抛助记帧**上
+            /// （如 `CryptographicException.ThrowCryptographicException`），
+            /// 那一帧**与调用者无关** ⇒ 真正的来源**在记录里根本不存在** ⇒ 事后无法归因。
+            /// 实测：`CryptographicException` 44 次，栈首帧恒为抛助记帧，导致"来源未判读"。
+            /// 多留几帧后，调用者就落在第 2~N 帧里。
+            /// </summary>
+            internal string StackFrames;
             internal string ThreadName;
             internal bool HandledUnknown;
         }
 
         // ★ 环形上限：回调**永不阻塞**，满了就丢并计数（丢了多少要报出来，不静默）
         private const int MaxQueued = 4096;
+
+        /// <summary>
+        /// 采集栈的**帧数上限**（v0.8.47）。
+        ///
+        /// 为什么是 6：够越过"抛助记帧 + 少量 BCL 包装帧"看到调用者，
+        /// 又不至于把长栈整条搬进来（异常风暴时每次抛异常都要走这里）。
+        ///
+        /// ⚠️ 代价说明（诚实记账）：`Exception.StackTrace` 是**惰性且带缓存**的
+        /// （首次访问构建一次，后续读缓存字段），所以这里的增量成本只是
+        /// **多几次 `IndexOf('\n')` + 一次 `Substring`**，相对"构建栈字符串"可忽略。
+        /// 但既然去重后**只有首次出现会落盘**，这里对同一条异常的重复抛出
+        /// 仍会重复做这段截取 —— 换取的是"来源可归因"，这个交换是划算的。
+        /// </summary>
+        private const int StackFrameLimit = 6;
+
         private static readonly ConcurrentQueue<Entry> Pending = new ConcurrentQueue<Entry>();
         private static int _queued;
         private static long _dropped;
@@ -152,17 +178,25 @@ namespace BlBridge
                 Entry en = new Entry();
                 en.TypeName = ex.GetType().FullName;
                 en.Message = ex.Message;
-                // 栈只取**第一帧**（回调里不做大字符串操作；完整栈在主线程排空时按需再取）
+                // 栈取**第一帧**（`StackHead`，去重键的一半 —— **语义一字不改**）
+                // ＋ 前 `StackFrameLimit` 帧（v0.8.47 新增 `StackFrames`，供归因用）。
+                //
+                // ⚠️ 历史坑（2026-10-06 实测）：原注释说"完整栈在主线程排空时按需再取"，
+                //    但**排空路径里从来没有那段代码**（全文件 `StackTrace` 只此一处）
+                //    ⇒ 调用者信息在采集那一刻就被丢弃。对栈首帧是 BCL 抛助记帧的异常
+                //    （如 CryptographicException）来说，这直接导致"来源不可判定"。
+                //    现在改为**在回调里就地截取前 N 帧**：`Exception.StackTrace` 本身
+                //    是惰性+带缓存的，所以这里只是多几次 IndexOf，不是"搬整条长栈"。
                 try
                 {
                     string st = ex.StackTrace;
                     if (!string.IsNullOrEmpty(st))
                     {
-                        int nl = st.IndexOf('\n');
-                        en.StackHead = (nl > 0 ? st.Substring(0, nl) : st).Trim();
+                        en.StackHead = FirstLine(st);
+                        en.StackFrames = FirstLines(st, StackFrameLimit);
                     }
                 }
-                catch { en.StackHead = null; }
+                catch { en.StackHead = null; en.StackFrames = null; }
                 try { en.ThreadName = Thread.CurrentThread.Name; }
                 catch { en.ThreadName = null; }
 
@@ -173,6 +207,46 @@ namespace BlBridge
                 // ★ 回调里吞掉一切：**绝不能让诊断设施把游戏搞崩**
                 //   （这与"诊断设施不得影响被测对象"的原则一致）。
             }
+        }
+
+        /// <summary>
+        /// 取文本的**第一行**（去首尾空白）。与旧版内联逻辑**逐字等价**
+        /// —— `StackHead` 是去重键的一半，改它就等于改变既有去重口径。
+        /// </summary>
+        private static string FirstLine(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            int nl = text.IndexOf('\n');
+            return (nl > 0 ? text.Substring(0, nl) : text).Trim();
+        }
+
+        /// <summary>
+        /// 取文本的**前 max 行**（保留换行，各行 trim 后拼接）。
+        ///
+        /// v0.8.47 新增：给"栈首帧是 BCL 抛助记帧"的异常留出调用者。
+        /// 返回 null（而非空串）当没有任何帧时 —— 让调用方能区分"没有栈"与"栈是空"。
+        /// </summary>
+        private static string FirstLines(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text) || max <= 0) return null;
+            StringBuilder sb = new StringBuilder();
+            int start = 0;
+            int taken = 0;
+            while (start < text.Length && taken < max)
+            {
+                int nl = text.IndexOf('\n', start);
+                int end = nl < 0 ? text.Length : nl;
+                string line = text.Substring(start, end - start).Trim();
+                if (line.Length > 0)
+                {
+                    if (taken > 0) sb.Append('\n');
+                    sb.Append(line);
+                    taken++;
+                }
+                if (nl < 0) break;
+                start = nl + 1;
+            }
+            return sb.Length == 0 ? null : sb.ToString();
         }
 
         /// <summary>
@@ -224,6 +298,13 @@ namespace BlBridge
                         sb.Append(",\"type\":\"").Append(Jw.Esc(en.TypeName ?? "")).Append('"');
                         sb.Append(",\"message\":\"").Append(Jw.Esc(Truncate(en.Message, 400) ?? "")).Append('"');
                         sb.Append(",\"stackHead\":\"").Append(Jw.Esc(Truncate(en.StackHead, 300) ?? "")).Append('"');
+                        // v0.8.47：前 N 帧（含 stackHead 那帧）。**新增字段**，不动既有字段
+                        // —— 老读者（如历史账本）解析既有字段仍然逐字可用。
+                        // 用途：栈首帧若是 BCL 抛助记帧，调用者在这里能找到。
+                        if (!string.IsNullOrEmpty(en.StackFrames))
+                        {
+                            sb.Append(",\"stackFrames\":\"").Append(Jw.Esc(Truncate(en.StackFrames, 1200))).Append('"');
+                        }
                         if (!string.IsNullOrEmpty(en.ThreadName))
                         {
                             sb.Append(",\"thread\":\"").Append(Jw.Esc(en.ThreadName)).Append('"');
@@ -425,6 +506,138 @@ namespace BlBridge
                     b.Append(",\"targetMethod\":\"").Append(Jw.Esc(meth ?? "")).Append('"');
                 }
                 b.Append(",\"occurrences\":").Append(kv.Value);
+
+                // ── ★★ v0.8.47：**归因判据**（单一决策点，`attribution` 只写一次）──
+                //
+                // ⚠️ 实现纪律：`attribution` 是**机器字段**，全对象里**只能出现一次**。
+                //    第一版把"邻居反查"与"申明普查"分成两段各写一次 ⇒ 产生**重复 JSON 键**
+                //    （正是本项目最忌讳的那类：解析器取第一个/最后一个会不一致）。
+                //    ⇒ 现在所有分支**只在这一个 if/else 链里**决定。
+                //
+                // ## 两条依据，优先级：申明普查 > 邻居反查
+                //
+                // ① **申明普查**（优先）：看**代码里的 `[HarmonyPatch]` 申明**，
+                //    它在程序集元数据里，与"注册有没有成功"**完全解耦**
+                //    ⇒ 即使补丁失败、甚至该 mod 不在模块表里，只要程序集已加载就能定位。
+                //
+                // ② **邻居反查**（旧做法，现在只用来**标注不可信**）：
+                //    Harmony 先解析全部补丁、**再**注册（`PatchWithAttributes`：7845 抛 /
+                //    7853-7887 才注册），而 `GetAllPatchedMethods()` 读的是注册结果
+                //    ⇒ **失败的补丁贡献恒为 0 条** ⇒ 按 targetClass 反查到的 owner
+                //    **全是打成功了的别人**（不是"可能指错人"，是"只要指了人就一定错"）。
+                if (string.IsNullOrEmpty(cls))
+                {
+                    // 解析不出 targetClass（如 `Patching exception in method null`）
+                    // ⇒ 连"申明普查"的第一步都做不了，如实标注。
+                    b.Append(",\"attribution\":\"unknown_no_target\"");
+                }
+                else
+                {
+                    // ── 依据 ① 申明普查 ──
+                    List<PatchProbe.PatchDeclaration> ds = null;
+                    try { ds = PatchProbe.FindDeclarers(cls); }
+                    catch { ds = null; }
+
+                    // ── 依据 ② 邻居反查（仅用于标注不可信）──
+                    int onTarget = -1;              // -1 = 查不了（≠ 0）
+                    try
+                    {
+                        Dictionary<string, int> counts = PatchProbe.CountPatchesByTarget(cls);
+                        if (counts != null)
+                        {
+                            onTarget = 0;
+                            if (!string.IsNullOrEmpty(meth))
+                            {
+                                foreach (KeyValuePair<string, int> c in counts)
+                                {
+                                    int cbar = c.Key.LastIndexOf("::", StringComparison.Ordinal);
+                                    string cm = cbar >= 0 ? c.Key.Substring(cbar + 2) : c.Key;
+                                    if (cm.Equals(meth, StringComparison.Ordinal)) onTarget += c.Value;
+                                }
+                            }
+                        }
+                    }
+                    catch { onTarget = -1; }
+                    if (onTarget >= 0) b.Append(",\"patchesOnTarget\":").Append(onTarget);
+
+                    if (ds != null && ds.Count > 0)
+                    {
+                        b.Append(",\"declarers\":[");
+                        for (int di = 0; di < ds.Count; di++)
+                        {
+                            if (di > 0) b.Append(',');
+                            b.Append('{');
+                            b.Append("\"assembly\":\"").Append(Jw.Esc(ds[di].Assembly ?? "")).Append('"');
+                            b.Append(",\"patchClass\":\"").Append(Jw.Esc(ds[di].PatchClass ?? "")).Append('"');
+                            if (!string.IsNullOrEmpty(ds[di].TargetMethod))
+                            {
+                                b.Append(",\"targetMethod\":\"").Append(Jw.Esc(ds[di].TargetMethod)).Append('"');
+                            }
+                            b.Append('}');
+                        }
+                        b.Append(']');
+
+                        List<string> asms = new List<string>();
+                        for (int di = 0; di < ds.Count; di++)
+                        {
+                            string a = ds[di].Assembly ?? "";
+                            if (a.Length > 0 && !asms.Contains(a)) asms.Add(a);
+                        }
+                        if (asms.Count == 1)
+                        {
+                            b.Append(",\"attribution\":\"attributed_by_declaration\"");
+                            b.Append(",\"attributedAssembly\":\"").Append(Jw.Esc(asms[0])).Append('"');
+                            b.Append(",\"attributionWhy\":\"")
+                             .Append(Jw.Esc("申明来自程序集元数据（[HarmonyPatch] 特性），"
+                                            + "与补丁**注册成败无关** ⇒ 即使该补丁失败、该 mod 不在模块表里，"
+                                            + "只要程序集已加载就能定位到发起者。"))
+                             .Append('"');
+                        }
+                        else
+                        {
+                            b.Append(",\"attribution\":\"ambiguous_multiple_declarers\"");
+                            b.Append(",\"attributedAssemblies\":[");
+                            for (int di = 0; di < asms.Count; di++)
+                            {
+                                if (di > 0) b.Append(',');
+                                b.Append('"').Append(Jw.Esc(asms[di])).Append('"');
+                            }
+                            b.Append(']');
+                        }
+                    }
+                    else if (ds == null)
+                    {
+                        // 申明普查不可用 ⇒ 退一步，只剩"邻居反查"这条错路 ⇒ 明确标注不可信
+                        b.Append(",\"attribution\":\"unknown_declarations_unavailable\"");
+                        if (onTarget == 0)
+                        {
+                            b.Append(",\"attributionWhy\":\"")
+                             .Append(Jw.Esc("申明普查不可用（Harmony 不在/扫描失败），"
+                                            + "而该目标在补丁表里条目为 0 ⇒ 若按 targetClass 反查 owner "
+                                            + "会指向**打成功了的别人**，**不要**那样归因。"))
+                             .Append('"');
+                        }
+                    }
+                    else
+                    {
+                        b.Append(",\"declarers\":[]");
+                        // 扫过了但没人申明 ⇒ 两种可能不可分，如实说
+                        if (onTarget == 0)
+                        {
+                            b.Append(",\"attribution\":\"unreliable_neighbor_lookup\"");
+                        }
+                        else
+                        {
+                            b.Append(",\"attribution\":\"no_declarer_found\"");
+                        }
+                        b.Append(",\"attributionWhy\":\"")
+                         .Append(Jw.Esc("已扫全部**已加载**程序集，没有 [HarmonyPatch] 申明这个类型。"
+                                        + "两种可能**无法区分**：① 真没人补它；"
+                                        + "② 申明者所在程序集**未加载**（进程内看不见，信息论下界）。"))
+                         .Append('"');
+                    }
+                }
+
                 // 折叠了几个原始记录（>1 说明 Harmony 抛了不止一次 —— 正常，见上面注释）
                 List<string> hl;
                 if (heads.TryGetValue(tkey, out hl) && hl.Count > 1)
@@ -437,6 +650,7 @@ namespace BlBridge
                     }
                     b.Append(']');
                 }
+
                 b.Append(",\"message\":\"").Append(Jw.Esc(Truncate(msg, 500))).Append('"');
                 b.Append('}');
                 items.Add(b.ToString());
@@ -444,11 +658,22 @@ namespace BlBridge
 
             sb.Append(",\"failureCount\":").Append(items.Count);
             sb.Append(",\"rawRecords\":").Append(rawRecords);
+            // ★ v0.8.47：申明普查的统计（含"读不到静态目标"的边界计数）
+            try { sb.Append(",\"declarationScan\":").Append(PatchProbe.DeclarationsStats()); }
+            catch { }
             sb.Append(",\"note\":\"").Append(Jw.Esc(
                 "targetClass/targetMethod 是**异常消息直接给出的「补丁想补的目标」**；"
-                + "**发起该补丁的 mod 不在异常里**（Harmony 的 HarmonyException 只带目标描述）。"
-                + "要定位到 mod，请把 targetClass 交给 bl_patches 按类型反查"
-                + "（同类型的其它方法上会看到 owner）。"
+                + "**发起该补丁的 mod 不在异常消息里**（Harmony 的 HarmonyException 只带目标描述）。"
+                + "⚠️ **不要**用「把 targetClass 交给 bl_patches 按类型反查 owner」来归因 —— "
+                + "那条路**结构性错误**：Harmony 先解析全部补丁、再注册（GetOriginalMethod 抛在注册之前），"
+                + "而 GetAllPatchedMethods() 读的是注册结果 ⇒ **失败的补丁贡献恒为 0 条** ⇒ "
+                + "按 targetClass 反查到的 owner **全是打成功了的别人**（只要指了人就一定是错的）。"
+                + "★ 正解：看每条失败自带的 `attribution` 字段 —— "
+                + "`attributed_by_declaration` + `attributedAssembly` = **真定位到申明者**"
+                + "（申明来自 [HarmonyPatch] 元数据，与注册成败无关，故即使该 mod 不在模块表里也能定位）；"
+                + "`ambiguous_multiple_declarers` = 多个申明者，如实列出；"
+                + "`no_declarer_found` = 扫过了但没人申明（真没人补 / 申明者未加载，**两者不可分**）；"
+                + "`unreliable_neighbor_lookup` = 该目标在补丁表里条目为 0（旧做法会指错人）。"
                 + "★ 结果已按 (targetClass, targetMethod) **归并** —— 同一个失败 Harmony 会抛两次"
                 + "（GetOriginalMethod 一次、PatchClassProcessor 包装后再一次），"
                 + "不归并会误报成「两个补丁失败」。")).Append('"');

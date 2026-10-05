@@ -86,6 +86,322 @@ namespace BlBridge
             get { EnsureProbed(); return _harmonyType != null; }
         }
 
+        /// <summary>
+        /// `targetClass`（全名或短名）下**每个**被补方法的补丁条目数。
+        ///
+        /// ★ 为什么需要它（v0.8.47，2026-10-06 结构性证明）：
+        ///
+        /// Harmony 的注册顺序是（反编译 0Harmony 2.4.2 逐行核对）：
+        ///     `PatchClassProcessor.PatchWithAttributes()`
+        ///       7843: foreach (patchMethod)          ← 逐个解析
+        ///       7845:   GetOriginalMethod()          ← **Ambiguous 在这里抛**
+        ///       7853: foreach (job)                  ← 注册循环在**之后**
+        ///       7887:   UpdatePatchInfo()            ← 唯一写 state 字典处
+        /// 而 `GetAllPatchedMethods()` 读的就是那个 state 字典。
+        ///
+        /// ⇒ **抛出严格早于注册** ⇒ **失败的补丁对该目标贡献恒为 0 条记录**。
+        ///
+        /// ⇒ 推论（这条是本函数的整个理由）：用 targetClass 去 `bl_patches` 反查 owner，
+        ///    **查到的全部是"打成功了的别人"** —— 不是"可能指错人"，
+        ///    而是**只要指了人就一定是错的**。
+        ///
+        /// 本函数让上层能给出**机器判据**：某目标方法在补丁表里条目数为 0
+        /// ⇒ 该失败**不可能**由那里标出的 owner 造成 ⇒ 标注 `unreliable_neighbor_lookup`。
+        ///
+        /// 返回：`null` = Harmony 不可用/查不了（**不要**当成"0 个补丁"）；
+        ///       否则是 `方法显示名 -> 补丁条目数`。
+        /// </summary>
+        internal static Dictionary<string, int> CountPatchesByTarget(string targetClass)
+        {
+            EnsureProbed();
+            if (_harmonyType == null || _getAll == null || _getInfo == null) return null;
+            if (string.IsNullOrEmpty(targetClass)) return null;
+            try
+            {
+                object all = _getAll.Invoke(null, null);
+                System.Collections.IEnumerable methods = all as System.Collections.IEnumerable;
+                if (methods == null) return null;
+                Dictionary<string, int> map = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (object m in methods)
+                {
+                    MethodBase mb = m as MethodBase;
+                    if (mb == null) continue;
+                    if (!TypeMatches(mb.DeclaringType, targetClass)) continue;
+                    int n = 0;
+                    try
+                    {
+                        object pi = _getInfo.Invoke(null, new object[] { mb });
+                        n = PatchEntryCount(pi);
+                    }
+                    catch { continue; }
+                    string disp = MethodDisplay(mb);
+                    int prev;
+                    if (map.TryGetValue(disp, out prev)) map[disp] = prev + n;
+                    else map[disp] = n;
+                }
+                return map;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>数一个 `Patches` 对象里的补丁条目总数（反射，不改它的容器）。</summary>
+        private static int PatchEntryCount(object patches)
+        {
+            if (patches == null) return 0;
+            int total = 0;
+            try
+            {
+                Type pt = patches.GetType();
+                string[] names = { "Prefixes", "Postfixes", "Transpilers",
+                                   "Finalizers", "InnerPrefixes", "InnerPostfixes" };
+                for (int i = 0; i < names.Length; i++)
+                {
+                    System.Collections.IEnumerable seq = GetPatchList(patches, names[i]);
+                    if (seq == null) continue;
+                    foreach (object _ in seq) total++;
+                }
+            }
+            catch { }
+            return total;
+        }
+
+        /// <summary>方法的简短显示名（与 `bl_patches` 里 entries 的写法保持同一口径）。</summary>
+        private static string MethodDisplay(MethodBase mb)
+        {
+            try
+            {
+                Type dt = mb.DeclaringType;
+                string t = dt == null ? "?" : (dt.FullName ?? dt.Name);
+                return t + "::" + mb.Name;
+            }
+            catch { return "?"; }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // ★★ v0.8.47：**申明目标普查** —— 回答"谁申明了要补这个目标"
+        //
+        // ## 为什么需要它（2026-10-06 结构性证明）
+        //
+        // `PatchFailures()` 旧版教读者「把 targetClass 交给 bl_patches 反查 owner」，
+        // 但那条路**结构性错误**：Harmony 先解析全部补丁、**再**注册
+        // （`PatchWithAttributes`：7845 抛 / 7853-7887 才注册），而
+        // `GetAllPatchedMethods()` 读的是注册结果 ⇒ **失败的补丁贡献恒为 0 条**
+        // ⇒ 反查到的 owner **全是打成功了的别人**。
+        //
+        // ⇒ 正解：不看"谁注册成功"，而看"**谁在代码里申明了要补它**"。
+        //    申明来自 `[HarmonyPatch]` 特性，它在**程序集元数据**里，
+        //    与"注册有没有成功"**完全解耦** ⇒ 即使该 mod 的补丁失败了、
+        //    甚至该 mod 没在模块表里，只要它的程序集**已加载**就能读到。
+        //
+        // ## 依据（反编译 0Harmony 2.4.2 逐行核对，非推测）
+        //
+        //   6159: public class HarmonyAttribute : Attribute
+        //   6161:     public HarmonyMethod info = new HarmonyMethod();   ← **public 字段**
+        //   7245:     public Type declaringType;                        ← 申明目标类型
+        //   7247:     public string methodName;                         ← 申明目标方法
+        //
+        // ⇒ 反射读 `info.declaringType` / `info.methodName` 即可，
+        //    **不需要实例化 Harmony、不需要它注册成功**。
+        //
+        // ## 边界（必须随结果报出，不能假装完备）
+        //
+        //   · **程序集未加载者，任何进程内探针都看不见**（信息论下界）⇒ 只能报 unknown；
+        //   · `[HarmonyPatchAll]` / `TargetMethod()` / `TargetMethods()` 形态
+        //     **读不到静态申明目标** ⇒ 单独计数上报，不混进结果；
+        //   · `declaringType` 可能是 `null`（仅给了 `methodName`，靠 Harmony 全局搜）
+        //     ⇒ 归入"目标不完整"，不猜。
+        // ─────────────────────────────────────────────────────────────────
+
+        /// <summary>一条申明记录（谁申明了补谁）。</summary>
+        internal struct PatchDeclaration
+        {
+            internal string Assembly;       // 申明者所在程序集（= "哪个 mod 干的"最直接证据）
+            internal string PatchClass;     // 补丁类全名
+            internal string TargetClass;    // 申明的目标类型（可能为空）
+            internal string TargetMethod;   // 申明的目标方法（可能为空）
+            internal bool Incomplete;       // 目标不完整（缺 declaringType 或 methodName）
+        }
+
+        private static List<PatchDeclaration> _declarations;
+        private static bool _declarationsScanned;
+        private static int _declSkipNoTarget;      // PatchAll / TargetMethod(s)：读不到静态目标
+        private static int _declErrors;            // 读某个类时抛异常的次数
+
+        /// <summary>
+        /// 扫**已加载程序集**里的 `[HarmonyPatch]` 申明（带缓存；进程内只扫一次）。
+        ///
+        /// 返回 `null` = Harmony 类型都找不到（⇒ 上层报 unknown，**不要**当成"没人申明"）。
+        /// 返回空列表 = 扫过了，确实没有申明。
+        /// </summary>
+        internal static List<PatchDeclaration> ScanDeclarations()
+        {
+            EnsureProbed();
+            if (_harmonyType == null) return null;
+            if (_declarationsScanned) return _declarations;
+            _declarationsScanned = true;
+            List<PatchDeclaration> list = new List<PatchDeclaration>();
+            Type patchAttrType = null;
+            Type patchAllType = null;
+            Type targetMethodType = null;
+            try
+            {
+                patchAttrType = _harmonyType.Assembly.GetType("HarmonyLib.HarmonyPatch", false);
+                patchAllType = _harmonyType.Assembly.GetType("HarmonyLib.HarmonyPatchAll", false);
+                targetMethodType = _harmonyType.Assembly.GetType("HarmonyLib.HarmonyTargetMethod", false);
+                Type targetMethodsType = _harmonyType.Assembly.GetType("HarmonyLib.HarmonyTargetMethods", false);
+                if (targetMethodsType != null) { /* 同上：读不到静态目标 */ }
+            }
+            catch { }
+
+            if (patchAttrType == null) return null;
+
+            Assembly[] asms;
+            try { asms = AppDomain.CurrentDomain.GetAssemblies(); }
+            catch { return null; }
+
+            for (int ai = 0; ai < asms.Length; ai++)
+            {
+                Assembly asm = asms[ai];
+                string asmName = null;
+                try { asmName = asm.GetName().Name; } catch { }
+                Type[] types;
+                try { types = asm.GetTypes(); }        // ⚠️ 可能抛 ReflectionTypeLoadException
+                catch (ReflectionTypeLoadException rtle)
+                {
+                    types = rtle.Types;                // 拿到能拿的部分（其余为 null）
+                }
+                catch { _declErrors++; continue; }
+                if (types == null) continue;
+
+                for (int ti = 0; ti < types.Length; ti++)
+                {
+                    Type t = types[ti];
+                    if (t == null) continue;
+                    try
+                    {
+                        // ── 类级 `[HarmonyPatch]`（含继承来的）──
+                        object[] attrs = t.GetCustomAttributes(patchAttrType, true);
+                        bool hasPatchAll = patchAllType != null
+                            && t.GetCustomAttributes(patchAllType, true).Length > 0;
+                        bool hasTargetMethod = (targetMethodType != null
+                            && t.GetCustomAttributes(targetMethodType, true).Length > 0);
+
+                        if (attrs == null || attrs.Length == 0)
+                        {
+                            // 没有类级 [HarmonyPatch]：可能是 PatchAll 形态 ⇒ 单独计数
+                            if (hasPatchAll || hasTargetMethod) _declSkipNoTarget++;
+                            continue;
+                        }
+
+                        for (int k = 0; k < attrs.Length; k++)
+                        {
+                            PatchDeclaration d = new PatchDeclaration();
+                            d.Assembly = asmName;
+                            d.PatchClass = t.FullName ?? t.Name;
+                            // ★ 读 public 字段 `info`（HarmonyAttribute:6161）
+                            object info = null;
+                            try
+                            {
+                                FieldInfo fi = attrs[k].GetType().GetField("info",
+                                    BindingFlags.Public | BindingFlags.Instance);
+                                if (fi != null) info = fi.GetValue(attrs[k]);
+                            }
+                            catch { }
+                            if (info != null) d = ReadTargetFromInfo(info, d);
+                            d.Incomplete = string.IsNullOrEmpty(d.TargetClass)
+                                        || string.IsNullOrEmpty(d.TargetMethod);
+                            list.Add(d);
+                        }
+
+                        // 类级特性没有覆盖到"方法级 [HarmonyPatch]"——那些是**补丁方法**上的申明，
+                        // 目标是同一个类级申明，这里不重复记（否则同一目标会被记 N 次）。
+                        if (hasPatchAll || hasTargetMethod) _declSkipNoTarget++;
+                    }
+                    catch { _declErrors++; }
+                }
+            }
+
+            _declarations = list;
+            return list;
+        }
+
+        /// <summary>从 `HarmonyMethod` 实例读 `declaringType` / `methodName`（public 字段）。</summary>
+        private static PatchDeclaration ReadTargetFromInfo(object info, PatchDeclaration d)
+        {
+            try
+            {
+                Type it = info.GetType();
+                FieldInfo fd = it.GetField("declaringType",
+                    BindingFlags.Public | BindingFlags.Instance);
+                FieldInfo fm = it.GetField("methodName",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (fd != null)
+                {
+                    Type dt = fd.GetValue(info) as Type;
+                    if (dt != null) d.TargetClass = dt.FullName ?? dt.Name;
+                }
+                if (fm != null)
+                {
+                    d.TargetMethod = fm.GetValue(info) as string;
+                }
+            }
+            catch { }
+            return d;
+        }
+
+        /// <summary>申明普查的统计（供上层如实报边界）。</summary>
+        internal static string DeclarationsStats()
+        {
+            StringBuilder sb = new StringBuilder();
+            int n = _declarations == null ? -1 : _declarations.Count;
+            sb.Append("{\"count\":").Append(n);
+            sb.Append(",\"skippedNoStaticTarget\":").Append(_declSkipNoTarget);
+            sb.Append(",\"readErrors\":").Append(_declErrors);
+            sb.Append(",\"note\":\"").Append(Jw.Esc(
+                "skippedNoStaticTarget = 用 [HarmonyPatchAll]/TargetMethod(s) 的类，"
+                + "它们的申明目标**读不到静态值** ⇒ 计入此项而不是混进结果；"
+                + "**程序集未加载者任何进程内探针都看不见**（信息论下界）⇒ 那类只能报 unknown。"))
+              .Append('"');
+            sb.Append('}');
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 按 `targetClass` 查**申明者**（谁在代码里说要补这个类型）。
+        ///
+        /// 返回值语义（上层据此给机器判据）：
+        ///   `null`            = 查不了（Harmony 不在 / 还没扫）⇒ **不是**"没人申明"；
+        ///   空列表            = 扫过了，确实没有申明者；
+        ///   ≥1 条             = 找到申明者，`Assembly` 即"哪个 mod"。
+        /// </summary>
+        internal static List<PatchDeclaration> FindDeclarers(string targetClass)
+        {
+            if (string.IsNullOrEmpty(targetClass)) return null;
+            List<PatchDeclaration> all = ScanDeclarations();
+            if (all == null) return null;
+            List<PatchDeclaration> hits = new List<PatchDeclaration>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                if (TypeMatches2(all[i].TargetClass, targetClass)) hits.Add(all[i]);
+            }
+            return hits;
+        }
+
+        /// <summary>类型名匹配（申明目标可能是短名，查询方可能给全名，双向都要认）。</summary>
+        private static bool TypeMatches2(string declared, string query)
+        {
+            if (string.IsNullOrEmpty(declared) || string.IsNullOrEmpty(query)) return false;
+            if (declared.Equals(query, StringComparison.OrdinalIgnoreCase)) return true;
+            if (declared.EndsWith("." + query, StringComparison.OrdinalIgnoreCase)) return true;
+            if (query.EndsWith("." + declared, StringComparison.OrdinalIgnoreCase)) return true;
+            // 短名对短名
+            int d1 = declared.LastIndexOf('.');
+            int q1 = query.LastIndexOf('.');
+            string ds = d1 >= 0 ? declared.Substring(d1 + 1) : declared;
+            string qs = q1 >= 0 ? query.Substring(q1 + 1) : query;
+            return ds.Equals(qs, StringComparison.OrdinalIgnoreCase);
+        }
+
         /// <summary>把手写的简短类型名（如 `Mission`/`MobileParty`）与真实类型对上。</summary>
         private static bool TypeMatches(Type t, string filter)
         {
