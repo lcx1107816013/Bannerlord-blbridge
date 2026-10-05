@@ -31,8 +31,22 @@
 ⇒ **main → prototype 是纯 fast-forward，零冲突风险、零 merge commit。**
 `git checkout main && git merge --ff-only prototype/ui-probe` 即可。
 
-⚠️ **但"要不要合"是项目决策，我没做**（见 §6）。`main` 停在 `657b982`（一个攻城特性提交，
-是 `af4cd0c` 的祖先）⇒ 也就是说 **v0.8.33–v0.8.46 全部只在 prototype 分支上**。
+### ⚠️ 但"要不要合"是**已登记的未决项**，不是我不知道
+
+我查了仓库自己的记录，**这条早就挂在那里了**：
+
+| 出处 | 原文 |
+|---|---|
+| `PROGRESS.md:15` | 版本控制：git 基线 `7d3aadf`（分支 `main`，**无远端**，`core.autocrlf=false`） |
+| `PROGRESS.md:2113`（§二十七 §4 未决） | **分支去留**：W7 之后 `prototype/ui-probe` 是否改名 `feat/ui-entry` 并合回 `main`。 |
+| `PROGRESS.md:2019` | 对照分支 `main` @ `657b982`（攻城轮，**无 UI 相关代码**） |
+
+⇒ **两个事实**：① **"无远端"是立项时就定下的**（不是本轮才丢的）；
+② `main` 在本项目里的实际角色一直是**对照基线**（"无 UI 相关代码"那条注释就是证据），
+`prototype/ui-probe` 才是**主线开发分支**。
+⇒ 所以"合回 main"要连**分支命名/定位**一起裁（§二十七 §4 问的就是这个），**不是一条命令的事**。
+
+**`main` 停在 2026-09-25 15:19；prototype HEAD 是 2026-10-05 20:57** —— 差 **10 天**。
 
 ## 2. 这 14 个 commit 里，前 7 个是本轮入库的（`af4cd0c..HEAD`）
 
