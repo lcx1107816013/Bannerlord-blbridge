@@ -1300,6 +1300,135 @@ TOOLS = [
             "required": ["enabled"], "additionalProperties": False},
     },
     {
+        "name": "bl_patches",
+        "description": ("**Harmony 补丁内省（只读）**：回答「**谁补了哪个方法**」。"
+                        "为什么需要它：三合一 MOD（RBM + Warbandlord + RCM）的**核心风险就是"
+                        "「双重叠加」** —— 两个 mod 补同一方法、Transpiler 撞 Transpiler "
+                        "会不会生成非法 IL。此前只能靠猜（2026-10-06 做 C6 血量系统时，"
+                        "我就是靠猜「我的补丁装上没有」「和 RBM 既有的撞没撞」）。"
+                        "conflicts=true 只列被 ≥2 个 owner 补的方法；transpilerClash=true "
+                        "是**最危险**的一类（改 IL，出错就是崩溃）。"
+                        "⚠️ 它**只读** Harmony 的公开内省 API（不建实例、不 patch、不改 IL），"
+                        "与 EngineProbe 同性质，不破坏本项目「删模块即完全回退」。"
+                        "Harmony 未安装时返回 available=false（用反射，BlBridge 对 0Harmony 零依赖）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "description": "只看补某个方法（简短类型名或全名，如 Mission / "
+                                                             "DefaultCharacterStatsModel；也支持方法名子串）"},
+                "owner": {"type": "string", "description": "只看某个 Harmony 实例 id（如 com.rbmcombat / "
+                                                           "com.rbmmain / bannerlord.uiextender.ex）"},
+                "conflicts": {"type": "boolean", "description": "只看被 ≥2 个 owner 补的方法（★ 核心判据）"},
+                "detail": {"type": "boolean", "description": "是否给出每个补丁的明细行（默认 true；"
+                                                             "false 只给计数，省 token）"},
+                "limit": {"type": "integer", "description": "最多返回几个方法，默认 100"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_patch_failures",
+        "description": ("**补丁失败清单**：把 Harmony 的 `HarmonyException` 从「现象」变成「点名」。"
+                        "返回每条失败**想补的目标**（`targetClass` / `targetMethod`）与出现次数。"
+                        "为什么需要它：`bl_patches` 只说「这个方法**没被补**」，"
+                        "**不会说为什么**；而异常消息里直接写着原因"
+                        "（如 `Ambiguous match for HarmonyMethod[(class=X, methodname=Y, …)]` "
+                        "⇒ 方法有重载、Harmony 找不到唯一目标）。"
+                        "★ **用法（两座桥交叉）**：拿这里的 `targetClass` 交给 `bl_patches` 按类型反查，"
+                        "就能看到该类型上**谁在打补丁**（同类型的邻居方法上会露出 owner）"
+                        "⇒ 从而定位到是哪个 mod 的补丁失败了。"
+                        "⚠️ **边界（如实）**：发起补丁的 mod **不在异常里**"
+                        "（HarmonyException 只带目标描述），所以本工具给的是**线索**而非归因结论。"
+                        "⚠️ 只含**托管**异常；JIT 期失败与原生崩溃不在其中。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_exceptions",
+        "description": ("**运行时异常统计（FirstChance 捕获的只读视图）**。"
+                        "BlBridge 在模块加载时订阅 `AppDomain.FirstChanceException`（**.NET 原生事件，"
+                        "零 Harmony、不改任何 IL**），把托管异常落进 `<日志目录>\\exceptions.jsonl`"
+                        "（追加模式）；本工具返回统计：总共见到多少、多少种、队列积压、丢弃数、出现次数 Top。"
+                        "为什么需要它：**ButterLib 的崩溃报告不落盘**（只弹 ImGui/WinForms 窗口，"
+                        "实测没有自动写文件的开关），而 BlBridge 是无人值守的 ⇒ 弹窗会卡死流程。"
+                        "★ 与 `bl_crash` **互补**：那个读 WER minidump 管「进程已死」，这个管「进程还活着」。"
+                        "⚠️ **边界（如实）**：只含**托管**异常；**JIT 期失败**（非法 IL）与"
+                        "**原生崩溃**（0xC0000005 等）抓不到 —— 那些不在任何方法体内，只能靠 dump。"
+                        "⚠️ `dropped > 0` 表示异常风暴时队列满、**明细不全**（计数仍准确）。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_ui_extensions",
+        "description": ("**UIExtenderEx 界面扩展（只读）**：列出每个模块通过 UIExtenderEx "
+                        "**改了哪些官方界面**，以及每个界面上挂了哪些扩展类（含 ViewModel mixin 计数）。"
+                        "为什么需要它：UIExtenderEx 是**界面扩展层**（本机在跑 v2.13.3，"
+                        "自己就打了 19 个 Harmony 补丁），而**多个 mod 改同一个官方界面**时，"
+                        "它是唯一能直接回答「谁改了什么」的地方。"
+                        "对三合一项目的直接价值：C4（浮点输入框）手工做过 "
+                        "`WidgetFactory._builtinTypes` / `WidgetInfo._widgetInfos` 注册，"
+                        "而 UIExtenderEx 的 WidgetFactoryManager/WidgetPrefab 补丁**做的是同一件事** "
+                        "⇒ 它的实现是本项目那份的成熟版对照物。"
+                        "⚠️ 只读 + **零依赖**（反射，不引用其程序集）；未装时返回 available=false。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module": {"type": "string", "description": "只看某个模块的扩展（按 ModuleName 精确匹配，"
+                                                            "如 RaiseYourBanner）；不传则列全部"},
+                "moviesOnly": {"type": "boolean", "description": "只列界面名，不列每个界面上的扩展类（省 token）"},
+                "limit": {"type": "integer", "description": "每个模块最多列几个界面，默认 200"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_mcm_settings",
+        "description": ("**MCM 设置表（只读）**：列出 Mod Configuration Menu 里注册的全部设置块与设置项，"
+                        "含每项的当前值 / 类型 / 值域 / 是否需重启 / 提示文本。"
+                        "为什么需要它：MCM 是**四前置级**组件（本机在跑 v5.12.3，自己就打了 22 个 Harmony 补丁），"
+                        "而**面板型 mod 的可调参数最终都落成 MCM 设置项** ⇒ 读得到它等于拿到全场 mod 的参数面。"
+                        "对三合一项目的直接价值：C8 要手搓 172 个表格型控件，先看清 MCM 里已有什么，"
+                        "才能判断该复用还是该自建。"
+                        "⚠️ 只读 + **零依赖**（反射，不引用 MCM 程序集）：不注册设置、不写值、不碰它的 DI 容器；"
+                        "MCM 未装时返回 available=false。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "settingsId": {"type": "string", "description": "只看某个设置块（如 ButterLib / CharacterReload）；"
+                                                                "不传则列全部块"},
+                "summary": {"type": "boolean", "description": "只给每块的项数，不展开每一项（省 token）"},
+                "withValues": {"type": "boolean", "description": "是否读当前值，默认 true；false 只给元数据"},
+                "limit": {"type": "integer", "description": "每块最多几项，默认 200"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_crash",
+        "description": ("**崩溃取证（宿主侧，进程死后也能用）**：解析 Windows 自动落盘的 minidump，"
+                        "给出「异常代码 + 崩溃模块+偏移 + 访问的目标地址」，并把它接到 BlBridge 的会话上"
+                        "（pid 是否同一个进程 / 崩时在打哪一场 / 最后几行遥测）。"
+                        "为什么需要它：`bl_status` 能判 `crashed` 但**不说崩在哪**；而翻 ModLogs 对原生崩溃"
+                        "**无效**（RBM 的 Debug.Print 不落那份日志，且 ButterLib/BEW 的托管 Finalizer "
+                        "结构上抓不到原生访问违规）。minidump 是公开格式，本工具**纯标准库解析、零依赖**。"
+                        "deep=true 时再用真调试器（cdb）拿**符号化托管栈 + FAILURE_BUCKET_ID 崩溃指纹**"
+                        "（判「是不是同一个 bug」最硬的判据；需 `winget install Microsoft.WinDbg`，"
+                        "没装则优雅退化并给出安装命令，**不会**伪装成「没崩溃」）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "latest": {"type": "boolean", "description": "只看最新一份 dump（默认看最近 8 份）"},
+                "pid": {"type": "integer", "description": "只看某个 pid 的 dump（填 bl_status 给的 pid）"},
+                "limit": {"type": "integer", "description": "最多几份，默认 8"},
+                "stack": {"type": "boolean", "description": "额外做启发式栈扫描（扫栈上落在已知模块内的指针，"
+                                                            "回答「调用链里有没有某个 DLL」；不是精确帧）"},
+                "deep": {"type": "boolean", "description": "用 cdb 拿符号化托管栈 + 崩溃指纹（每份约 5~30s；"
+                                                           "首次拉 MS 符号较慢）。找不到 cdb 时会明确说明原因"},
+                "cdb": {"type": "string", "description": "指定 cdb.exe 路径（默认自动探测，含 WinDbg Appx）"},
+                "path": {"type": "string", "description": "直接指定某个 .dmp 路径"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "bl_build_check",
         "description": ("核对「源码 → 构建产物 → 部署文件 → 进程内 DLL」四段是否一致。用于回答三件事："
                         "① 改了代码没重新构建（stale_source）；② 构建了但没部署（stale_deploy）；"
@@ -1533,7 +1662,8 @@ TOOL_GROUPS = {
     ],
     "lab": [
         "bl_list_battles", "bl_analyze", "bl_read_events", "bl_run_batch", "bl_batch_report",
-        "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config",
+        "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
+        "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
     ],
     "desktop": [
         "bl_desktop_windows", "bl_desktop_screenshot", "bl_desktop_click", "bl_desktop_key",
@@ -2123,6 +2253,21 @@ def call_tool(name, args):
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e), "path": bl_rts.config_path()}
 
+    if name == "bl_crash":
+        # 宿主侧工具：解析 WER 自动落盘的 minidump。**不碰游戏、不需要游戏在跑**
+        # （进程已经死了才有 dump —— 这正是它存在的意义）。
+        # deep=true 时再用 cdb 拿符号化栈（可选；未装 cdb 会优雅退化并说明原因）。
+        import bl_crash as _bc
+        return _bc.build_report(
+            limit=int(args.get("limit") or 8),
+            latest=bool(args.get("latest")),
+            pid=args.get("pid"),
+            want_stack=bool(args.get("stack")),
+            path=args.get("path"),
+            deep=bool(args.get("deep")),
+            cdb=args.get("cdb"),
+        )
+
     if name == "bl_build_check":
         return {"ok": True, "buildCheck": build_check()}
 
@@ -2642,6 +2787,104 @@ def call_tool(name, args):
         if not resp.get("ok"):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "get_viewmodel_property 失败", "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_patch_failures":
+        # 走文件 IPC（游戏侧 ExceptionProbe.PatchFailures()）。只读，无参数。
+        resp, err = send_command("get_patch_failures", {}, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_patch_failures 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_exceptions":
+        # 走文件 IPC（游戏侧 ExceptionProbe.Summary()）。只读，无参数。
+        resp, err = send_command("get_exceptions", {}, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_exceptions 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_ui_extensions":
+        # 走文件 IPC（游戏侧 UiExtendProbe 反射读 UIExtenderEx）。只读，无副作用。
+        # ⚠️ 参数名避开信封保留键：`module`/`moviesOnly`/`limit` 都不撞
+        #    （保留键 = protocolVersion/id/method/parameters/issuedUtc）。
+        params = {}
+        if args.get("module"):
+            params["module"] = str(args["module"])
+        if args.get("moviesOnly") is not None:
+            params["moviesOnly"] = bool(args["moviesOnly"])
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("get_ui_extensions", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_ui_extensions 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_mcm_settings":
+        # 走文件 IPC（游戏侧 McmProbe 反射读 MCM）。只读，无副作用。
+        #
+        # ⚠️ **参数名必须避开信封保留键**（`protocolVersion`/`id`/`method`/`parameters`/`issuedUtc`）
+        #    —— 本项目踩过两次（`open_ui` 的 id、`bl_patches` 的 method）。
+        #    这里用的 `settingsId`/`summary`/`withValues`/`limit` 都不撞。
+        #    `bl_patches_selftest.py` 的「保留键不变式」是这条的机器闸门。
+        params = {}
+        for k in ("settingsId",):
+            if args.get(k):
+                params[k] = str(args[k])
+        if args.get("summary") is not None:
+            params["summary"] = bool(args["summary"])
+        if args.get("withValues") is not None:
+            params["withValues"] = bool(args["withValues"])
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("get_mcm_settings", params, timeout=25)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_mcm_settings 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_patches":
+        # 走文件 IPC（游戏侧 PatchProbe 反射读 Harmony 内省）。只读，无副作用。
+        #
+        # ⚠️ **参数名坑（本项目第 3 次踩）**：请求信封自带 `"method":"get_patches"`，
+        #    而 `Jmini` 是**扁平**读取器（按"第一个 "key""取值，不区分信封与 params）
+        #    ⇒ 游戏侧若用 `Jmini.Str(raw, "method")` 会读到**信封里的方法名**，
+        #      把过滤器设成 "get_patches" ⇒ 每个补丁都被跳过 ⇒
+        #      静默输出 `scannedMethods=N / matchedMethods=0`（看起来像"没有补丁"）。
+        #    ⇒ 所以这里发 `targetType`，游戏侧也读 `targetType`。同源前车之鉴：
+        #      `open_ui` 的 `id` 撞请求号（AGENTS.md 已记）。
+        params = {}
+        if args.get("method"):
+            params["targetType"] = str(args["method"])
+        if args.get("owner"):
+            params["owner"] = str(args["owner"])
+        if args.get("conflicts") is not None:
+            params["conflicts"] = bool(args["conflicts"])
+        if args.get("detail") is not None:
+            params["detail"] = bool(args["detail"])
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("get_patches", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_patches 失败",
+                    "code": e.get("code"), "response": resp}
         return {"ok": True, "result": resp.get("result"), "response": resp}
 
     if name == "bl_get_inventory":

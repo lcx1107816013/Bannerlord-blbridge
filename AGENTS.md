@@ -72,7 +72,17 @@
   已改名为 **`uiId`**。
 - **离线自测抓不到这一类缺陷**：`tools/bl_selftest.py` 的假游戏端用真 JSON 解析（认嵌套），
   天然没有这个碰撞。⇒ 新增控制通道参数**必须**在真机上过一遍（或至少确认参数名不在信封键集合里）。
-- 对照纪律仍然适用：新增/改名参数时，要能指出"哪种输入会红"（例：`uiId=NoSuchThing` 必须报 `unknown_ui`）。
+- ⚠️ **2026-10-06 又踩了一次**（`bl_patches` 的 `method`，见 PROGRESS §四十八 5.3）：
+  症状是 `scannedMethods=1194 / matchedMethods=0` —— **看起来完全像"一个补丁都没有"**，
+  差一点被当成"**真的没有冲突**"这个结论。**连烧 8 轮构建**才定位。
+  ⇒ 已改名 **`targetType`**。
+- ★ **现在有机器闸门了**：`tools/bl_patches_selftest.py` 的
+  **「保留键不变式」**（第 ② 组）会把每个工具**实际发出的 `parameters`** 与信封键集合对账
+  —— 撞了就红。**新增/改名控制通道参数时，照着往那个 cases 列表里加一条即可**，
+  不再依赖"记得在真机上过一遍"这种约定。
+  （该自测**不需要游戏在跑**：它用 `BLBRIDGE_LOG_DIR` + 假游戏端走真文件 IPC。）
+- **对照纪律仍然适用**：新增/改名参数时，要能指出"哪种输入会红"
+  （例：`uiId=NoSuchThing` 必须报 `unknown_ui`；`bl_patches` 漏映射必须让保留键不变式变红）。
 
 ### InitialStateOption 硬规则（2026-09-25 增，v0.8.12 真机踩到）
 
@@ -119,6 +129,8 @@
 python tools\check_repo_encoding.py                  # 编码体检：UTF-8 无 BOM + LF，有违规则退出码 1
 python tools\bl_selftest.py                          # 离线自测（合成数据 + MCP 协议 + 控制通道 + 构建链）
 python tools\bl_metrics_selftest.py                  # 指标模块自测
+python tools\bl_crash_selftest.py                    # 崩溃取证自测（合成 minidump + 4 处注入故障）
+python tools\bl_patches_selftest.py                  # Harmony 补丁内省自测（★ 参数透传 + 保留键不变式）
 powershell -ExecutionPolicy Bypass -File tools\jsontest\build_and_run.ps1   # C# 离线单测（Jmini/RequestGuard/SquadSpec…）
 python tools\bl_check_clock_reset.py                 # 多轮日志「时钟同源」校验（见下）
 python tools\bl_check_gabp_names.py --selftest       # GABP 命名表 ↔ 源码 method ↔ MCP 工具 三方一致（含注入故障对照组）

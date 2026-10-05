@@ -109,6 +109,36 @@
       "needs": "campaign",
       "note": "脱壳抄上游 InventoryTools.cs 的 inventory/get_inventory（只读；Campaign 上下文前置，否则如实报 no_campaign）"
     },
+    "get_patches": {
+      "gabp": "bridge/list_patches",
+      "kind": "read",
+      "needs": "any",
+      "note": "反射调 Harmony 公开内省 API（GetAllPatchedMethods/GetPatchInfo），回答「谁补了哪个方法」；只读，不建 Harmony 实例、不 patch、不改 IL。Harmony 未装时如实报 no_harmony"
+    },
+    "get_mcm_settings": {
+      "gabp": "bridge/list_mcm_settings",
+      "kind": "read",
+      "needs": "any",
+      "note": "反射读 MCM 的 BaseSettingsProvider.Instance.SettingsDefinitions（含每项 PropertyReference.Value 当前值）；只读、零依赖。MCM 未装报 no_mcm，服务未注册完报 mcm_not_ready"
+    },
+    "get_ui_extensions": {
+      "gabp": "bridge/list_ui_extensions",
+      "kind": "read",
+      "needs": "any",
+      "note": "反射读 UIExtenderEx 的 GetAllRuntimes（internal ⇒ NonPublic）→ PrefabComponent.MoviePatches + ViewModelComponent.Mixins；只读、零依赖。未装报 no_uiextenderex"
+    },
+    "get_exceptions": {
+      "gabp": "bridge/get_exceptions",
+      "kind": "read",
+      "needs": "any",
+      "note": "FirstChance 统计快照。订阅在 OnSubModuleLoad 装、OnSubModuleUnloaded 卸（删模块即回退）；回调只入队，I/O 在主线程 tick 排空"
+    },
+    "get_patch_failures": {
+      "gabp": "bridge/list_patch_failures",
+      "kind": "read",
+      "needs": "any",
+      "note": "从 HarmonyException 的 message 解析补丁目标（Harmony.cs:6028 的 attr.Description 格式：class=/methodname=）。只做提取与呈现，不做归因断言"
+    },
     "list_saves": {
       "gabp": "campaign/list_saves",
       "kind": "read",
@@ -299,6 +329,30 @@
     "bl_build_check": {
       "gabp": "bridge/check_build",
       "note": "源码 / 构建产物 / 部署文件 / 进程内 DLL 四段哈希链"
+    },
+    "bl_crash": {
+      "gabp": "bridge/triage_crash",
+      "note": "宿主侧：解析 WER 落盘的 minidump（异常代码 / 崩溃模块+偏移 / 访问目标），并关联到 BlBridge 会话（pid 是否同一进程、崩时在打哪一场）；零依赖，无需 WinDbg/x64dbg"
+    },
+    "bl_patches": {
+      "gabp": "bridge/list_patches",
+      "note": "游戏侧只读：反射调 Harmony 公开内省 API，回答「谁补了哪个方法」；conflicts 只列被 ≥2 个 owner 补的方法，transpilerClash 标出最危险的一类（改 IL，出错即崩溃）。不建 Harmony 实例、不 patch、不改 IL"
+    },
+    "bl_mcm_settings": {
+      "gabp": "bridge/list_mcm_settings",
+      "note": "游戏侧只读：反射读 MCM（Bannerlord.MBOptionScreen）的设置表 —— SettingsDefinition → SettingsPropertyDefinition（Id/DisplayName/SettingType/值域/PropertyReference.Value）。零依赖（不引用 MCM 程序集），不注册设置、不写值、不碰它的 DI 容器"
+    },
+    "bl_ui_extensions": {
+      "gabp": "bridge/list_ui_extensions",
+      "note": "游戏侧只读：反射读 UIExtenderEx 的 UIExtender.GetAllRuntimes() → 每个 runtime 的 PrefabComponent.MoviePatches（界面名 → 补丁类）与 ViewModelComponent.Mixins。回答「哪个 mod 改了哪个官方界面」。零依赖（不引用其程序集），不注册扩展、不改界面"
+    },
+    "bl_exceptions": {
+      "gabp": "bridge/get_exceptions",
+      "note": "游戏侧只读：FirstChance 异常统计（AppDomain.FirstChanceException 订阅，零 Harmony）—— 总数/种类/队列积压/丢弃数/Top。明细落 <LogDir>/exceptions.jsonl。只含托管异常；JIT 期失败与原生崩溃抓不到"
+    },
+    "bl_patch_failures": {
+      "gabp": "bridge/list_patch_failures",
+      "note": "游戏侧只读：从 FirstChance 抓到的 HarmonyException 解析出「补丁**想补的目标**」（targetClass/targetMethod）+ 次数。发起补丁的 mod **不在异常里** ⇒ 需把 targetClass 交给 bl_patches 反查 owner，两座桥交叉才能定位到 mod"
     },
     "bl_config": {
       "gabp": "bridge/get_config",

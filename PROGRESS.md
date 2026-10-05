@@ -5064,3 +5064,780 @@ dispatch(+self) / **jsontest 191** / clock_reset（全量 11 历史仍 FAIL = �
 2. 需要"对照物"时**用 tag 或 commit sha 指定**（如 `baseline/pre-ui-entry`），**不要**再养一条
    "平行分支"来当基线 —— 那正是这个未决项挂了 10 天的成因；
 3. `bl_check_clock_reset.py` 那类"只在多轮下才有区分力"的门禁，**与分支模型无关**，照旧必跑。
+
+
+---
+
+## [2026-10-06] §四十八 崩溃取证 `bl_crash`（零依赖 + `--deep`）与 Harmony 补丁内省 `bl_patches`
+
+> 执行者 dsh-agent。用户两条指令：
+> ① "你调用崩溃日志的行为太慢……应该详细分析一下有什么能加入我们 BlBridge 项目的"
+> （并陆续给了四件外部工具：BEW / ButterLib / mcp-windbg / x64dbg MCP）
+> ② "Harmony 也在我们身上接个桥算了……**我们可以不依赖它们，但是我们必须会用它**——
+> 现在 90% 以上的 mod 都依赖这些组件"
+> **两件都落地并实机验证。**
+
+### 1. `bl_crash`：先把"太慢"这件事量化
+
+原流程：启动 → 等 30s → 发现进程没了 → 翻 `ModLogs` → **猜** → 再启动。**单轮约 2 分钟且靠猜。**
+
+更糟的是这条路**经常根本不通**（都是本项目实测过的）：
+
+- **RBM 的 `Debug.Print` 不落 `ModLogs/default*.log`**（该文件 `[RBM` **零命中**）；
+- **ButterLib 的托管异常处理器对原生崩溃无效**（反编译确认：Finalizer 挂在托管 tick 上）。
+
+★ **但真正的原因一直都在，只是没人去看**：**WER 早就把每次崩溃的 minidump 落盘了**。
+本机 `%LOCALAPPDATA%\CrashDumps\` 实测 **7 份 / 563 MB**，时间戳与每次崩溃精确对应。
+
+### 2. ★ 关键突破：minidump 是公开格式 ⇒ **纯 Python 可解、零依赖**
+
+`tools/bl_crash.py` + `tools/bl_crash_selftest.py`。
+不需要 WinDbg / pybag / x64dbg。给出「**异常代码 + 崩溃地址 + 归属模块+偏移 + 访问目标地址**」，
+并**接到 BlBridge 会话上**（pid 是否同一进程 / 崩时在打哪一场 / 最后几行遥测）。
+
+#### 2.1 `--deep`：用真调试器拿**符号化托管栈 + 崩溃指纹**
+
+跑 `.loadby sos clr; .ecxr; !pe; !clrstack; !analyze -v; q`
+（**4.8 s** 有符号缓存 / **30.4 s** 首次拉 MS 符号）⇒ `FAILURE_BUCKET_ID` + 托管栈。
+
+★★ **它比异常代码精确得多**：同样报 `0xC0000005`，
+`RTSCamera.OnRemoveBehavior` 与另一处是**两个完全不同的 bug**——只看异常代码会混为一谈。
+
+#### 2.2 ★★ 三条"能不能用"的实测结论（都踩过）
+
+| 组件 | 结论 |
+|---|---|
+| **`System32\dbgeng.dll`** | ❌ **精简版**：能 `import`、能建 `CrashDbg`，但 `OpenDumpFile` 报 **`E_NOTIMPL`** ⇒ **不能**解 dump |
+| **`pybag`**（mcp-windbg 的后端） | ⚠️ 纯 Python wheel **能 pip 装**，但用 `WindowsApps` 的 WinDbg 会 **`WinError 5`**（Appx ACL 拦 `ctypes.LoadLibrary`） |
+| **`cdb.exe`** | ✅ **能跑**（`cdb version 10.0.29617.1000`）⇒ **不走 pybag，直接跑 `cdb.exe` 子进程**（外部进程无 ACL 问题，也符合本项目宿主侧架构） |
+
+安装：`winget install --id Microsoft.WinDbg --accept-package-agreements --accept-source-agreements`。
+
+#### 2.3 ★ 又一个坑：`WindowsApps` **不能 listdir**
+
+`os.listdir(r"C:\Program Files\WindowsApps")` → **WinError 5**（需管理员），
+但**具体子路径可直接访问/执行**。⇒ 用 `os.listdir` 找 WinDbg 会**在普通权限下静默漏掉已装的 WinDbg**
+（**本工具修好前就是这样：明明装了却报 `no_cdb`**）。
+**正解**：`(Get-AppxPackage -Name '*WinDbg*').InstallLocation`（**无需提权**）。
+
+### 3. ★★ 用它推翻了"崩溃是我改的"这一猜想（本轮最重要的纠错）
+
+| 时间 | `SYMBOL_NAME` / `FAILURE_BUCKET_ID` | 归因 |
+|---|---|---|
+| **10-05 12:08** | `RTSCamera_CommandSystem!...OnRemoveBehavior+2b` | ⚠️ **早于 C6 一整天** |
+| 10-06 01:53 / 01:55 / 02:01 | `0Harmony!HarmonyLib.MethodCreatorTools.<EmitCodes>` | ✅ **这是 C6 的**（Transpiler 生成非法 IL） |
+| 10-06 02:07 | `ucrtbase!abort`（`FAIL_FAST_FATAL_APP_EXIT`） | 间接 |
+| **10-06 02:09** | `RTSCamera_CommandSystem!...OnRemoveBehavior+2b` | ⚠️ **与 10-05 同一指纹** |
+
+**⇒ 不是同一个 bug，而且 C6 的修复其实生效了**：
+RTSCamera 崩溃 **10-05 12:08 就发生过**，而 C6 首次构建是 **10-06 01:52** ⇒ **同一崩溃点前后都出现 ⇒ 既有问题**；
+Harmony 那三次才是 C6 的；C6 在 **02:02** 修好后 **02:09 不再出现 Harmony 崩溃**。
+
+⚠️ **我上轮一度以为"修复没生效"，方向是错的** —— 这正是"没有崩溃指纹就只能靠猜"的代价。
+
+#### 3.1 RTSCamera 崩溃的完整托管栈（归属隔壁项目，只作证据）
+
+```
+System.NullReferenceException  (HResult 80004003)
+  RTSCamera_CommandSystem!RTSCamera.CommandSystem.Logic.CommandSystemLogic.OnRemoveBehavior()+0x2b
+  TaleWorlds_MountAndBlade!Mission.RemoveMissionBehavior(MissionBehavior)+0x1a
+  TaleWorlds_MountAndBlade!Mission.OnMissionStateFinalize(Boolean)+0x136
+  TaleWorlds_Core!GameStateManager.OnCleanAndPushState(GameState)+0xbe
+```
+⇒ **战斗收尾移除 MissionBehavior 时空引用**，触发路径是**切状态**。
+★ **SOS 的托管栈不依赖线程上下文**（多份 dump `RIP=0` 但托管栈照样对）⇒ 对 WER dump 特别有效。
+
+### 4. ★★ BEW 的"结构性盲区"（反驳了"再装一个捕获器就行"）
+
+BEW 的 Finalizer 挂在 `Mission.Tick` 等 **tick 入口**，而两个真凶**都不在那些点上**：
+
+| 真凶 | 为什么抓不到 |
+|---|---|
+| `HarmonyLib.EmitCodes` | 崩在 **JIT 期**（**不在任何被 patch 的方法体内**） |
+| `RTSCamera.OnRemoveBehavior` | 崩在 **`OnMissionStateFinalize`**（**已离开 Tick**） |
+
+⇒ **不是"跟不上版本"，是挂载点的结构性盲区。**
+
+★ 补充：**BEW 与 ButterLib 同源** —— ButterLib 那个类就叫 **`BEWPatch`**，方法名 `BEWPatch.FinalizerMethod`；
+**区别只在** BEW 的 Finalizer **返回 null（吞掉异常、游戏继续）**，ButterLib **只上报不吞**。
+
+★ **ButterLib 的 `BlankTranspiler` 技法**（值得抄）：**空 transpiler 仍要挂** ——
+因为 **Harmony patch 过的方法 JIT 不会内联**，而原生层 `ManagedCallbacks.*CallbacksGenerated`
+的入口**本来很可能被内联** ⇒ 内联后 **Finalizer 就不在调用栈上**、异常抓不到。
+
+★ **BEW vs ButterLib 取舍（用户裁定：放弃 BEW，选 ButterLib）**：
+ButterLib **已在跑 v2.12.0**（BEW **根本没装**）· 更新 **2026-09 vs 2026-05** ·
+**C# vs VB.NET** · `[BLSEInterceptor]` **正规集成且有让位机制** · **四前置之一**。
+
+### 5. ★★ `bl_patches`：Harmony 补丁内省（只读）
+
+`src/PatchProbe.cs` + `CommandPump` 的 `get_patches` 分支 + MCP 工具 `bl_patches`。
+
+**为什么需要它**：三合一 MOD（RBM + Warbandlord + RCM）的核心风险就是「**双重叠加**」——
+两个 mod 补同一方法、Transpiler 撞 Transpiler 生成非法 IL。
+此前只能靠猜（**2026-10-06 做 C6 时我就是靠猜"我的补丁装上没有""和 RBM 既有的撞没撞"**）。
+
+#### 5.1 ★ 与"零 Harmony"原则的关系（重要）
+
+本项目刻意零 Harmony 补丁（`DummyRangeBehavior`："那会破坏「删模块即完全回退」的性质"）。
+**本探针不违反它**：**只调 Harmony 的公开内省 API**，不建实例、不 patch、不改 IL
+—— 与 `EngineProbe` / `UiInspector` **同一性质**。
+
+★ **而且刻意「零依赖」**：用**反射**而非 `using HarmonyLib`
+⇒ `BlBridge.dll` 对 `0Harmony.dll` **零引用**，`build.ps1` **没加引用**、
+`SubModule.xml` **没加 `DependedModule`**（加了反而会把"可选诊断"变成"硬依赖"，
+与"找不到就优雅退化"自相矛盾）。Harmony 未装时返回 `available=false`。
+
+#### 5.2 ★★ 实机结果（`scanned=1194`，这就是"90% 的 mod 都建在这些组件上"的证据）
+
+```
+scannedMethods   = 1194     被 Harmony 补过的方法总数
+matchedMethods   = 1190
+conflictMethods  = 110      被 ≥2 个 owner 补的
+```
+
+**owner 分布（谁在打补丁）**：
+
+| owner | 补丁数 | 说明 |
+|---|---|---|
+| `bannerlord.blse.exceptionhandler` | 179 | BLSE 异常处理（全局） |
+| `MutliLittleFixes` | 98 | |
+| `mod.CharacterReload.cnedwin` | 44 | |
+| `HarvestAndProduction` | 36 | |
+| `Bannerlord.ButterLib.SubModuleWrappers2` | 30 | ★ 四前置 |
+| **`Bannerlord.MBOptionScreen`** | **22** | ★ MCM |
+| **`bannerlord.uiextender.ex`** | **19** | ★ UIExtenderEx |
+| **`com.rbmcampaign`** | **16** | ★ **RBM 自己的补丁，现在看得见了** |
+| `Bannerlord.ButterLib.SaveSystem` | 12 | |
+
+**用户那句"90% 以上的 mod 都依赖这些组件"被数据证实**：这三件（BLSE/ButterLib/UIExtenderEx/MCM）
+确实是全场基础设施，且**它们自己就是通过 Harmony 给引擎打补丁的**。
+
+★ **`com.rbmcampaign` 的补丁里包含 `TaleWorlds.GauntletUI.PrefabSystem.WidgetPrefab.LoadFrom`**
+—— 这正是本项目 **C4（浮点输入框）手工做的事**，说明 RBM 已有既有实现可对照。
+
+★ **78 个方法被多个 owner 同时补**（`conflictMethods=110` 是单次查询上限）：
+`MBSubModuleBase.OnSubModuleLoad` / `OnGameStart` / `OnApplicationTick` 等被
+`Bannerlord.MBOptionScreen` + `Bloodlust` + `Bannerlord.ButterLib.SubModuleWrappers2` **三家同时补**。
+⇒ **这就是"双重叠加"风险的实证数据**（此前只是 `bannerlord-mod-mechanism-merge` 里的理论）。
+
+#### 5.3 ★★ 本轮踩的三个坑（烧了 8 次构建，全部值得记）
+
+| # | 坑 | 症状 | 根因与正解 |
+|---|---|---|---|
+| **1** | `Patches.Prefixes/Postfixes/Transpilers/Finalizers` 是 **public readonly 字段**，不是属性 | 用 `GetProperty` 读 ⇒ **恒 null** ⇒ 补丁全读不到 | 反编译确认（`0Harmony:8082-8092`）。**正解：字段优先、属性兜底** |
+| **2** | ★★ **`Jmini` 扁平读取撞信封** | `Jmini.Str(raw,"method")` 读到**信封里的 `"method":"get_patches"`** ⇒ 过滤器被设成 `get_patches` ⇒ **每个方法都被 SKIP** ⇒ 静默 `scanned=1194 / matched=0` | 请求信封自带 `"method"` 字段（`tools/bl_mcp.py:525`）。**正解：参数改名 `targetType`**（对外仍叫 `method`）。**与本项目 `open_ui` 的 `id` 撞请求号是同一类** |
+| **3** | 改源码后**没重建** | 一度以为"代码没生效" | DLL mtime 早于源文件。**正解：核对 `loadedSha256` 与部署文件 sha256** |
+
+★★ **坑 2 最危险**：症状 `scanned=1194 / matched=0` **看起来完全像"没有补丁"**
+—— 差一点就被当成"**真的没有冲突**"这个结论。
+⇒ 已给探针加**反静默断言**：扫描到方法却一条补丁都没读出来时，显式返回 `warning`。
+
+#### 5.4 MCP 接线（"改一处同步四处"→ 实际是**五处**）
+
+`tools/bl_mcp.py` 的 `TOOLS` 声明 + `call_tool` 派发 + `TOOL_GROUPS` +
+`tools/gabp_names.json` 的 `tools` 段 + ★ **`methods` 段**。
+最后那处是 `bl_check_gabp_names.py` 抓出来的（我漏了，它报 C1 `表里缺 method: get_patches`）。
+
+### 6. 交付物与验收
+
+| 文件 | 内容 |
+|---|---|
+| `tools/bl_crash.py` | 零依赖 minidump 解析 + `--deep`（cdb）+ 会话关联 |
+| `tools/bl_crash_selftest.py` | 11 组自测，**含 4 处注入故障** |
+| `src/PatchProbe.cs` | Harmony 只读内省（反射，零依赖） |
+| `src/CommandPump.cs` | `get_patches` 派发分支 |
+| `tools/bl_mcp.py` | `bl_crash` + `bl_patches` 声明与派发 |
+| `tools/gabp_names.json` | `bridge/triage_crash` + `bridge/list_patches`（含 methods 段） |
+
+**必跑自测全绿**：编码体检 · GABP 命名（含 `--selftest` 8 类故障 8 抓到）·
+派发一致（**47/47/47**）· 主自测 · 指标自测 · `bl_crash_selftest`。
+**实机验证**：`bl_crash --deep` 出符号栈；`bl_patches` 三种查询模式（全量 / `targetType` / `owner`）全部正确。
+
+### 7. ★ 方法论（已写进工具行为）
+
+**"环境问题"与"没有崩溃"必须分清。**
+`bl_crash --deep` 找不到 `cdb` 时返回 `reason="no_cdb"` + 安装命令，
+**绝不让 deep 的失败影响纯 Python 那层的判定**（自测⑨专验这条不变式）
+⇒ 否则会把"**没装调试器**"读成"**没崩溃**"。
+
+### 8. 遗留（不写成通过）
+
+1. **`0xC0000409`（ucrtbase FailFast）根因未挖到底**（只见 `ucrtbase!abort`）。
+2. **AeDebug 未配置**（`Debugger` 空 / `Auto=0`）⇒ 原生崩溃**不会**自动启动调试器；
+   改它需管理员，**已评估：收益低于风险**（现有 WER dump + `bl_crash` 已覆盖）。
+3. **`bl_crash --deep` 未在"无符号"环境验证**（本机符号服务器可达）。
+4. **`bl_patches` 的 `conflictMethods` 是单次查询上限 110**（实际冲突 78 个已被列出，
+   但若将来冲突数超过 limit 需分页）。
+5. **RTSCamera 那个既有 bug 未修**（归属隔壁项目，只作证据，**不碰其代码**）。
+6. **三座桥只完成第一座**：`bl_mcm`（列设置/读值）与 `bl_ui_extend`（列扩展/目标界面）**未做**；
+   **Harmony 运行时注入**（写入档）**未做** —— 用户已同意"只读 + 可选的运行时注入"，
+   但写入会破坏"删模块即回退"，需单独开关，**尚未开工**。
+
+---
+
+## [2026-10-06] §四十九 `bl_patches` 补自测（对照组已验）+ 把「参数命名」从约定升级成机器闸门
+
+> 执行者 dsh-agent。用户指令："先自测再进行 bl_mcm"。
+> 起因：`bl_patches` 是当日新增**唯一没有自测**的工具，而它正是**因为没先做自测**才连烧 8 轮构建。
+
+### 1. 交付：`tools/bl_patches_selftest.py`
+
+**离线可跑、不需要游戏**：用 `BLBRIDGE_LOG_DIR`（`bl_mcp.py:69` 官方支持的环境变量）
+把 IPC 目录指到临时目录，加一个最小假游戏端轮询 `commands/pending` ⇒
+走的是**真文件 IPC**，只是对端是假的。
+
+六组判据：
+
+| # | 判据 | 为什么 |
+|---|---|---|
+| ① | MCP 的 `method` 必须落成游戏侧的 **`targetType`** | ★ 坑 2 的**回归测试** |
+| ② | ★★ **保留键不变式** —— `parameters` 里绝不出现信封保留键 | **通用防线**（见 §2） |
+| ③ | 未传的键**不应**出现（让游戏侧用默认值） | 防止"发空值覆盖默认" |
+| ④ | 布尔是真布尔、整数是真整数 | 防止 JSON 里写成字符串 |
+| ⑤ | 响应 `ok:false` 时**如实透出** `code`/`message` | 防止吞成"成功" |
+| ⑥ | 未知参数**不冒充**已知参数 | 防止 `blah` 变成 `targetType` |
+
+### 2. ★★ 第 ② 组是**通用防线**，不是只防 `method`
+
+信封保留键集合是 `protocolVersion` / `id` / `method` / `parameters` / `issuedUtc`
+（`send_command` 构造请求时写死的顶层字段，`bl_mcp.py:523-527`）。
+自测把工具**实际发出的 `parameters`** 与这个集合对账 —— **撞了就红**。
+
+⇒ **将来任何人给任何控制通道工具加参数，只要撞信封就会被拦住**，
+不必再依赖"记得在真机上过一遍"这种约定。
+
+### 3. ★ 对照组：证明它能**证伪**（不是走过场）
+
+把 `bl_mcp.py` 里的映射改回 `params["method"] = str(args["method"])`（**复现坑 2**）⇒
+自测**抓到 5 项失败**，含保留键那条：
+
+```
+[FAIL] 映射后含 targetType {'method': 'Mission'}
+[FAIL] ★ 映射后**不含** method（否则撞信封） {'method': 'Mission'}
+[FAIL] targetType 值正确 None
+[FAIL] 参数 {...} ⇒ 无保留键冲突  撞了: ['method']
+[FAIL] 参数 {...} ⇒ 无保留键冲突  撞了: ['method']
+自测失败 5 项
+```
+
+⇒ **证明这条闸门真的有效**。还原后自测回到全绿。
+
+### 4. ★ 把 AGENTS.md 的规则更新为"有机器闸门"
+
+AGENTS.md「控制通道参数命名硬规则」**2026-09-25 就写了**（`open_ui` 的 `id` 撞请求号那次），
+而且明确写了"**离线自测抓不到这一类缺陷** …… 新增参数**必须**在真机上过一遍"。
+
+**⚠️ 但 2026-10-06 我又踩了同一个坑**（`bl_patches` 的 `method`）
+⇒ **说明"靠记得在真机过一遍"这种约定不够**。
+
+已更新该条：
+- 记下第二次踩的实例（含那个**极具欺骗性**的症状：`scanned=1194 / matched=0` 看起来像"没有补丁"）；
+- ★ 指向新的机器闸门，并写明"**新增/改名参数时照 cases 列表加一条即可**"。
+
+### 5. 已登记进「改完必跑」
+
+```powershell
+python tools\bl_crash_selftest.py                    # 崩溃取证自测（合成 minidump + 4 处注入故障）
+python tools\bl_patches_selftest.py                  # Harmony 补丁内省自测（★ 参数透传 + 保留键不变式）
+```
+
+### 6. ★ 顺带又踩了一次"静默失败"（值得记）
+
+我试图用 PowerShell 的 `String.Replace` 更新 PROGRESS 的遗留项第 7 条 ——
+**`Replace` 找不到目标字符串时静默返回原文**，不报错。结果是"以为改了、其实没改"。
+
+**判据**：改完**必须回读确认**（我回读时发现"新旧文本都不见了"才察觉 —— 因为原文**本来就不存在**）。
+⇒ 与本项目一贯的"拒绝静默"一致：**`Replace` 之后要断言"目标已消失且新文已出现"**。
+（本次改用 `edit` 工具按精确上下文追加，并已回读确认。）
+
+### 7. 遗留
+
+1. **`bl_mcm` / `bl_ui_extend` 未做**（用户已定：自测之后做 `bl_mcm`）。
+2. **Harmony 运行时注入（写入档）未做**（需单独开关）。
+3. **`bl_patches_selftest` 未覆盖"游戏侧 `PatchProbe` 的读法"** ——
+   它测的是**宿主侧参数透传**；游戏侧的反射读法（字段 vs 属性）**只能在真机验**，
+   当前靠 `bl_patches` 的实机验证（1194/78）担保。
+   ⇒ 若要离线覆盖，需要把 `PatchProbe` 的反射逻辑抽成**可测的纯函数**（未做）。
+
+---
+
+## [2026-10-06] §五十 `bl_mcm_settings`：MCM 设置表只读内省（29 块 / 1225 项）
+
+> 执行者 dsh-agent。用户指令："Harmony 也在我们身上接个桥算了……UIExtenderEx 也做个桥……MCM 也是做个桥"，
+> 并定调"**我们可以不依赖它们，但是我们必须要会用他们** —— 现在 90% 以上的 mod 都依赖这些组件"。
+> 继 `bl_patches`（§四十八）之后的**第二座桥**。
+
+### 1. 交付
+
+`src/McmProbe.cs` + `CommandPump` 的 `get_mcm_settings` 分支 + MCP 工具 `bl_mcm_settings`。
+**只读 + 零依赖（反射，不引用 MCM 程序集）**，与 `PatchProbe` 同款。
+MCM 未装 → `no_mcm`；服务未注册完 → `mcm_not_ready`（**两者分开报**，不混成一句"失败"）。
+
+### 2. ★★ 实机结果：**29 个设置块 / 1225 个设置项**
+
+```
+mcm = MCMv5 5.12.3.0
+块数 = 29   项总数 = 1225
+```
+
+**项数 Top 块**：
+
+| 块（settingsId） | 显示名 | 组数 | 项数 |
+|---|---|---|---|
+| `Byzantium1071` | 战役大强化 | 28 | **323** |
+| `Bloodlust` | 嗜血 1.3.13 | 23 | **153** |
+| `KingdomMilitaryEconomy_v5` | 王国军需与军费 | 5 | **141** |
+| `MutliLittleFixes_v1` | 许多小修小补 | 13 | 73 |
+| `BannerWand` | BannerWand | 13 | 73 |
+| `KingdomDefection_v2` | 王国叛逃 | 6 | 47 |
+| `BellumCivileSettings_v1` | 内战 | 13 | 42 |
+| `HarvestAndProduction_Settings` | 收获与生产 | 11 | 37 |
+| `SiegeAIFix_v1` | Siege AI Fix | 6 | 29 |
+| … | | | |
+| `Options` | **ButterLib 2.12.0** | 8 | 10 |
+
+★ **单块 `Byzantium1071` 就有 323 项** —— 比三合一项目 C8 要手搓的 **172 个**还多。
+⇒ **这直接支持"该评估复用 MCM 而不是自建"**（见 §5 遗留）。
+
+### 3. 读到了什么（每项的字段）
+
+`id` / `name` / `type`（Bool·Integer·Float·Dropdown…）/ `group` / `value`（**当前值**）/
+`min`·`max`（**仅在真有值域时输出**）/ `requireRestart` / `isToggle` / `hint`。
+
+**实测样例**（`Options` 块 = ButterLib 自己）：
+
+```
+ExceptionHandler Enabled  Bool  value=true      ← 与 `Options.json` 实证一致（反编译时就看过）
+CrashUploader Enabled     Bool  value=true
+MinLogLevel               Dropdown  value="{=fgLroxa7}Information"
+```
+
+**有值域的例子**（`BattleSizeResized`）：
+
+```
+MountFleeChance               Float  value=0.8024691  range=[0, 1]
+ReinforcementWaveThresholdBeta Float  value=0.5        range=[0.1, 0.5]
+```
+
+⇒ **值域是真的**，说明 `MinValue`/`MaxValue` 取法正确。
+
+### 4. ★★ 本轮踩的两个坑（都值得记）
+
+| # | 坑 | 症状 | 根因与正解 |
+|---|---|---|---|
+| **1** | **类型全名靠推断** | `no_mcm`（"好像没装 MCM"），而 MCM 在正常跑 | `BaseSettingsProvider` 在 **`MCM.Abstractions`**，我一度从 `MCMSubModule`（在 `MCM.Implementation`）的赋值语句**误推**成 `MCM.Implementation.BaseSettingsProvider`。⇒ **正解：列多个候选全名 + 遍历所有程序集**（`MCM.Abstractions` / `MCM.Implementation` / `MCM`） |
+| **2** | **`Dropdown` 的 `ToString()` 给的是类型名** | `value="MCM.Common.Dropdown`1[System.String]"` —— **完全不是用户看到的选中项** | MCM 的 `Dropdown<T> : List<T>` 有 **`SelectedValue`**（反编译：`T SelectedValue => base[SelectedIndex]`）⇒ 取它。**判据用"名字以 Dropdown 开头"而不是硬编码类型**，避免泛型实例化差异 |
+
+**顺带修掉一处噪音**：`min`/`max` 原先无条件输出，导致 Bool 也报 `range=[0,0]`
+（读者会误以为"这个开关的取值范围是 0..0"）⇒ 改成**只在 `Integer`/`Float`/`FloatingInteger` 时输出**。
+
+★ **教训（与本项目一贯口径一致）**：**类型全名、以及"某个对象的 ToString 是不是人话"，都不能靠推断**
+—— 前者要列候选，后者要取语义字段。两次都是"看起来应该对"却静默给错答案。
+
+### 5. 与「零依赖」原则的一致性
+
+`build.ps1` **不加 MCM 引用**、`SubModule.xml` **不加 `DependedModule`** ——
+与 `PatchProbe` 完全同款：用反射 ⇒ `BlBridge.dll` 对 MCM **零引用** ⇒
+MCM 未装时**优雅退化**而不是加载失败。**只读**：不注册设置、不写值、**不碰它的 DI 容器**。
+
+### 6. 验收
+
+- **必跑自测全绿**：编码体检 · GABP 命名（7 条判据）· 派发一致（**48/48/48**）·
+  `bl_crash_selftest` · `bl_patches_selftest`。
+- ★ `bl_patches_selftest.py` 的**「保留键不变式」已扩到 `bl_mcm_settings`**
+  （新增两条样本：满参数 + 空参数）⇒ 新工具的参数命名**自动进闸门**。
+  `settingsId`/`summary`/`withValues`/`limit` 均不撞信封保留键。
+- **MCP 接线五处**：`TOOLS` 声明 · `call_tool` 派发 · `TOOL_GROUPS` · `gabp_names.json` 的 `tools` 段 · **`methods` 段**。
+
+### 7. 遗留
+
+1. **`bl_ui_extend`（UIExtenderEx）未做** —— 第三座桥。
+   ⚠️ 已探明它的 `UIExtender.GetAllRuntimes()` 是 **`internal`** ⇒ 需反射，具体取法**未实测**。
+2. **Harmony 运行时注入（写入档）未做**（需单独开关，会破坏"删模块即回退"）。
+3. **MCM 的「写」未做**（`SaveSettings` / `OverrideSettings` 都在 API 里，本轮**故意只做只读**）。
+4. ★ **三合一 C8 是否改用 MCM —— 仍未决策**。本轮拿到了决策依据（29 块 / 1225 项 /
+   单块最多 323 项），但**改用 MCM 意味着推翻已完成的 C4 + 部分 C8**，属大决策，**建议单独立项**。
+5. **`bl_mcm_settings` 未做"值域越界/类型不符"之类的语义校验**（当前只如实透出，不判断对错）。
+
+---
+
+## [2026-10-06] §五十一 `bl_ui_extensions`：三座桥收官（UIExtenderEx，11 模块 / 25 界面 / 59 补丁）
+
+> 执行者 dsh-agent。用户指令："继续作桥"。
+> 继 `bl_patches`（§四十八）、`bl_mcm_settings`（§五十）之后的**第三座桥，至此三座齐全**。
+
+### 1. 交付
+
+`src/UiExtendProbe.cs` + `CommandPump` 的 `get_ui_extensions` 分支 + MCP 工具 `bl_ui_extensions`。
+**只读 + 零依赖（反射）**，与 `PatchProbe` / `McmProbe` 同款。
+
+### 2. ★★ 实机结果
+
+```
+assembly    = Bannerlord.UIExtenderEx 2.13.3.0
+runtimeCount= 11 个模块
+movieTotal  = 25 个界面（27 条记录，含别名）
+patchTotal  = 59 个界面补丁
+mixinTotal  = 28 个 ViewModel mixin
+```
+
+**各模块**（movies / patches / mixins）：
+
+| 模块 | 界面 | 补丁 | mixin |
+|---|---|---|---|
+| `BellumCivile` | **13** | **25** | 9 |
+| `Bannerlord.EquipBestItem` | 1 | **13** | 1 |
+| `MutliLittleFixes` | 4 | 5 | 6 |
+| `com.andrei.byzantium1071.ui` | 2 | 4 | 2 |
+| `HarvestAndProduction` | 3 | 4 | 3 |
+| `RealisticWeather` | 2 | 4 | 1 |
+| `MCM.UI` | 1 | 3 | 1 |
+| `Bloodlust` | 1 | 1 | 1 |
+| `BellumCivile.NavalDLCPatch` / `RealisticWeatherNaval` / `HarvestAndProduction.WarSails` | 0 | 0 | 1~2 |
+
+### 3. ★ 界面层的「双重叠加」—— 与 `bl_patches` 同一类判据的**另一个层次**
+
+**2 个官方界面被多个 mod 同时改**：
+
+```
+EncyclopediaHeroPage  ← Bloodlust(1) + BellumCivile(4)
+KingdomManagement     ← MutliLittleFixes(2) + BellumCivile(5)
+```
+
+⇒ 这正是 `bl_patches` 在 **IL 层**发现的"78 个方法被多 owner 补"在**界面层**的对应物。
+**两层合起来才能完整回答"多个 mod 在同一处打架"**。
+
+**单 mod 改的界面（样例）**：
+`Inventory`（EquipBestItem **13 个补丁**，单 mod 最多）· `EncyclopediaClanPage`(3) ·
+`PoliciesPanel`(4) · `Options`(MCM.UI 3) · `CustomBattleScreen` / `NavalCustomBattleScreen`（RealisticWeather）·
+`MapBar` / `Map/MapBar`（byzantium1071）· `SettlementOverlay` · `ClanMembers` · `HeirSelectionPopup` …
+
+★ **注意 `MapBar` 与 `Map/MapBar` 同时出现**，且 `BellumCivile.NavalDLCPatch` 等模块 **`movies=0` 但 `mixins≥1`**
+—— 说明这两类扩展**独立**（有的只补 ViewModel，不碰 prefab），探针**分开统计**是对的。
+
+### 4. API 链路（反编译 `Bannerlord.UIExtenderEx.dll` v2.13.3 确认）
+
+```
+UIExtender.GetAllRuntimes()          (internal static, :391  ⇒ 必须反射 NonPublic)
+  → UIExtenderRuntime                (:539, internal class)
+      public readonly string ModuleName;
+      public readonly PrefabComponent PrefabComponent;
+      public readonly ViewModelComponent ViewModelComponent;
+  → PrefabComponent                  (:2692, internal class)
+      internal readonly ConcurrentDictionary<string, List<PrefabPatch>> MoviePatches;
+          // key = 界面(movie) 名；value = 该界面上的补丁列表
+      public IEnumerable<string> GetMoviesToPatch()          (:2872)
+  → PrefabPatch                      (:2694) internal sealed record PrefabPatch(Type Type, Action<XmlDocument> Patcher);
+  → ViewModelComponent               (:3514)
+      public readonly ConcurrentDictionary<Type, List<Type>> Mixins;
+```
+
+### 5. ★ 按前两轮的教训**预先规避**了三个坑（写进类注释）
+
+| 教训（来源） | 本轮做法 |
+|---|---|
+| **类型全名不靠推断**（`McmProbe` 栽在从"赋值处所在类"推全名 ⇒ 报 `no_mcm` 而 MCM 在跑） | **列候选全名 + 遍历程序集**（`Bannerlord.UIExtenderEx.UIExtender` / `…Attributes.UIExtender`） |
+| **`ToString()` 不假设是人话**（`McmProbe` 的 `Dropdown.ToString()` 给了类型名） | `PrefabPatch` 是 **record** ⇒ `ToString()` 会给 `PrefabPatch { Type = …, Patcher = … }` ⇒ **只取 `.Type` 字段**（要的是"哪个扩展类改了这个界面"） |
+| **"没有"与"是 0"要分开**（`bl_crash` 的 `no_cdb` 教训） | 显式给 `movieCount`/`patchTotal`；并加**反静默断言**：有 runtime 却零界面 ⇒ 返回 `warning`，免得被当成"没人扩展界面" |
+
+★ **效果**：本轮**一次构建就通过实机验证**（前两座桥分别烧了 8 轮和 2 轮）。
+⇒ **"先想清读法再写"确实比"边写边试"快**，这几轮的教训转化成了实际效率。
+
+### 6. 验收
+
+- **必跑自测全绿**：编码体检 · GABP 命名（7 条判据）· 派发一致（**49/49/49**）·
+  `bl_crash_selftest` · `bl_patches_selftest`（保留键不变式**新增两条** `bl_ui_extensions` 样本）。
+- MCP 接线**五处**：`TOOLS` 声明 · `call_tool` 派发 · `TOOL_GROUPS` · `gabp_names.json` 的
+  `tools` 段 · **`methods` 段**。
+- 参数 `module` / `moviesOnly` / `limit` **均不撞信封保留键**。
+
+### 7. ★ 三座桥的合起来看（本轮的真正产出）
+
+| 层 | 工具 | 实机数字 | 回答什么 |
+|---|---|---|---|
+| **IL 层** | `bl_patches` | 1194 被补方法 / **78** 个被多 owner 同时补 | 谁补了哪个方法、Transpiler 撞没撞 |
+| **设置层** | `bl_mcm_settings` | 29 块 / **1225** 项 | 全场 mod 的参数面 |
+| **界面层** | `bl_ui_extensions` | 11 模块 / 25 界面 / **59** 补丁 / 28 mixin | 谁改了哪个官方界面 |
+
+★ **这三层正是"90% 以上的 mod 都依赖的组件"的三个面** —— 用户那句判断现在有了完整的可观测面。
+★ 而**"双重叠加"这个三合一项目的核心风险，现在在 IL 层与界面层都能量化**，
+不再只是知识库 `bannerlord-mod-mechanism-merge` 里的理论。
+
+### 8. 遗留
+
+1. **Harmony 运行时注入（写入档）未做** —— 用户已同意"只读 + 可选的运行时注入"，
+   但写入会破坏"删模块即回退"，需单独开关。
+2. **MCM 的「写」未做**（`SaveSettings` / `OverrideSettings` / `ResetSettings` 在 API 里，故意只做只读）。
+3. **UIExtenderEx 的「写」未做**（它本就是给 mod 注册扩展用的 API；BlBridge 若要用它做控件，
+   需先解决 §五十一 之外的**设计问题**：这等于引入一个界面依赖）。
+4. ★ **三合一 C8 是否改用 MCM —— 仍未决策**（依据已备齐，属大决策，建议单独立项）。
+5. **三座桥都有"只读"，但都没有自测覆盖游戏侧读法**（
+   `bl_patches_selftest` 测的是**宿主侧参数透传**；游戏侧反射读法只能真机验）。
+   ⇒ 离线覆盖需要把反射逻辑抽成可测纯函数（**未做**，三座桥同此）。
+
+---
+
+## [2026-10-06] §五十二 ButterLib 的桥 —— 但它**不该是"读 ButterLib"**
+
+> 执行者 dsh-agent。用户问："ButterLib 的桥呢"。
+> 这条在 §四十八的遗留里就记着（"BlBridge 侧未接 ButterLib 的报告 —— 用户已定：下一层做"），
+> **本轮做了，但做法与前三座桥不同**，理由如下。
+
+### 1. ★★ 先否掉最直觉的做法：**读 ButterLib 的报告文件 —— 这条路根本不通**
+
+反编译 + 实测确认：**ButterLib 的崩溃报告不落盘**。
+
+```
+ExceptionReporter.Show(exception)          （Bannerlord.ButterLib.decompiled.cs:6306）
+  → CrashReportImGui.ShowAndWait(...)      ← 主路径：弹窗**等人操作**
+  → catch: new CrashReportWinForms(...).ShowDialog()   ← 降级也是弹窗
+```
+
+- `config.json` 里**没有**"自动写文件"的开关；
+- 4 个渲染器（ImGui / WinForms / Html / Zip）里，**只有 Html/Zip 能落盘，但 `Show()` 不走它们**
+  —— Html/Zip 是用户**手动导出**时才用的。
+
+⇒ **不是"没找对路径"，是它压根不写。**
+而 **BlBridge 是无人值守的**（弹窗 = 卡死整个流程）⇒ "接它的报告"这个方案**从根上不成立**。
+
+### 2. ★ 采用的方案：**等价能力的独立实现**（而且要**零 Harmony**）
+
+**关键发现**：`AppDomain.CurrentDomain.FirstChanceException` 是 **.NET 原生事件** ——
+
+- 它在**任何异常被抛出时**触发（**即使随后被 catch**）；
+- 任何程序集都能订阅，**不需要 patch 任何方法、不需要改 IL**。
+
+⇒ **与本项目"零 Harmony / 删模块即完全回退"的立场完全兼容**
+（我们没改任何别人的代码，只订阅了一个 .NET 事件；订阅是我们挂的，撤得也干净）。
+
+**★ 额外好处：不依赖 ButterLib 是否安装。** 这与用户"不依赖但会用"的定调一致。
+
+### 3. 交付
+
+`src/ExceptionProbe.cs` + `JsonlWriter.cs` 的**侧信道** + `SubModule` 三处接入 +
+`CommandPump` 的 `get_exceptions` + MCP 工具 `bl_exceptions`。
+
+#### 3.1 ★ 侧信道（`JsonlWriter` 的新增部分）
+
+**为什么必须新开一个写手**：主 `_writer` 是**战斗日志**，只在 mission 期间打开
+（`Open()` 由遥测行为调用）；而异常**随时会发生**（主菜单 / 加载期 / 战役里）——
+那些时刻 `_writer == null`，`Write()` 会**静默丢弃**。
+
+⇒ 新增 `OpenSide` / `WriteSide` / `CloseSide`：**独立文件**、模块加载时开、卸载时关、**追加模式**
+（`<LogDir>\exceptions.jsonl`）。★ **强制逐行 flush**（不跟随 `FlushEveryLine` 配置）——
+崩溃就发生在我们想记录的那些时刻，缓冲住等于没记。
+
+#### 3.2 ★ 照 AGENTS.md「主线程 tick 硬规则」的形状
+
+`FirstChanceException` 在**任何线程、任何异常**上触发，**可能极其频繁**
+（正常控制流也会大量抛）⇒ **回调里绝不做 I/O**：
+
+| 阶段 | 做什么 | 不做什么 |
+|---|---|---|
+| **回调**（任意线程） | 只造一个小结构**入队**（`ConcurrentQueue`，无锁） | ❌ 不做 I/O、❌ 不加锁、❌ 不抛异常 |
+| **主线程 tick**（`OnApplicationTick`） | `Drain(64)` 排空并写盘（独立 try，自隔离） | 每帧限量，异常风暴不拖垮帧率 |
+
+★ 三重保护：**环形上限 4096**（满了丢并**计数**，不阻塞）、**去重**（同 `(类型+栈首帧)` 只详细记一次，
+其余累加）、**丢弃必报**（`dropped > 0` 时显式 `warning`，不静默）。
+
+### 4. ★★ 实机结果：一装上就抓到有价值的异常
+
+```
+installed=true  seen=55  distinct=5  queued=0  dropped=0
+
+CryptographicException                 44 次
+FileNotFoundException                   8 次
+HarmonyLib.HarmonyException             1  ← ★ 补丁失败
+System.Reflection.AmbiguousMatchException 1  ← ★ 方法重载歧义
+HarmonyLib.HarmonyException             1  ← ★ PatchClassProcessor.ReportException
+```
+
+★★ **最后三条是"补丁没打上"的直接证据** ——
+`HarmonyException` + `AmbiguousMatchException` 说明**某个 mod 的补丁因为方法重载歧义而失败**。
+
+**这正是 `bl_patches` 看不到的一格**：
+`bl_patches` 回答"**谁补了哪个方法**"（结果），而 `bl_exceptions` 回答"**补的过程为什么失败**"（过程）。
+⇒ **两座桥互补**：一个看结果，一个看过程。
+
+### 5. ★★ 边界（如实写明，不含糊）
+
+| 场景 | 谁能抓到 |
+|---|---|
+| 托管异常（**含被 catch 掉的**） | ✅ `bl_exceptions`（FirstChance 比 BEW/ButterLib 的 Finalizer **更早、更全**） |
+| **JIT 期**失败（非法 IL） | ❌ **谁都抓不到** —— 不在任何方法体内 ⇒ 靠 `bl_crash --deep` 事后定位 |
+| **原生**崩溃（`0xC0000005` 等） | ❌ 托管事件看不到 ⇒ 靠 `bl_crash` + WER minidump |
+
+⇒ 与本项目既有的 `bl_crash` 形成**互补闭环**：
+`bl_crash` 管"**进程已死**"，`bl_exceptions` 管"**进程还活着**"。
+
+### 6. ★ 本轮踩的坑：`Jw.Esc` **只转义、不加引号**
+
+漏了外层引号 ⇒ 输出 `"type":System.IO.IOException` 这种**畸形 JSON**
+⇒ IPC 侧解析失败 ⇒ 客户端**一直等到超时**（而响应其实早就写好了）。
+
+**症状极具误导性**：看起来像"游戏主线程卡住"，实际是我自己的 JSON 写错了。
+（与 §四十八 那个"响应写好了但被判超时"是**同一类**：**响应侧的错误伪装成传输/环境问题**。）
+
+**正解**（项目既有写法，`TelemetryBehavior.cs:92`）：**引号手写**——
+`Append("\",\"key\":\"").Append(Jw.Esc(v)).Append('"')`。
+
+### 7. 验收
+
+- **必跑自测全绿**：编码体检 · GABP 命名 · 派发一致（**50/50/50**）· 主自测 ·
+  `bl_crash_selftest` · `bl_patches_selftest` · 指标自测。
+- **侧信道 JSON 合法性实测**：6 行，**畸形 0**。
+- MCP 接线**五处**：`TOOLS` 声明 · `call_tool` 派发 · `TOOL_GROUPS` ·
+  `gabp_names.json` 的 `tools` 段 · **`methods` 段**。
+
+### 8. ★ 四件套的完整分工（本轮的收尾认识）
+
+| 工具 | 管的时刻 | 手段 |
+|---|---|---|
+| `bl_exceptions` | 进程**还活着**时的托管异常 | FirstChance（零 Harmony） |
+| `bl_patches` | 谁补了哪个方法 / 撞没撞 | Harmony 只读内省 |
+| `bl_mcm_settings` / `bl_ui_extensions` | 全场参数面 / 界面改动面 | MCM / UIExtenderEx 只读内省 |
+| `bl_crash` | 进程**已死**（含原生崩溃） | WER minidump（+`--deep` 走 cdb） |
+
+### 9. 遗留
+
+1. **Harmony 运行时注入（写入档）未做**（需单独开关）。
+2. **MCM / UIExtenderEx 的「写」未做**。
+3. ★ **`bl_exceptions` 未做自测** —— 与 `bl_patches` 当初同样的缺口
+   （宿主侧参数透传可离线测；`FirstChance` 订阅与排空**只能真机验**）。
+4. **`exceptions.jsonl` 无轮转/上限** —— 追加模式会一直长（异常风暴场景需观察；
+   当前靠"去重只记首次"控制增长，**未加按大小轮转**）。
+5. **未验证 `dropped > 0` 的真实行为**（本机 `dropped=0`，环形上限未被压到）。
+6. ★ **是否要用 `bl_exceptions` 抓到的 `HarmonyException` 去定位"哪个 mod 的补丁失败"** —— 未做
+   （栈首帧已记，但没解析出完整的补丁目标）。
+
+---
+
+## [2026-10-06] §五十三 `bl_patch_failures`：把「补丁失败」从现象变成点名（两桥交叉）
+
+> 执行者 dsh-agent。用户指令："继续"（承接 §五十二 遗留第 6 条）。
+> 本轮把"**谁想补什么、为什么失败**"做成了工具，并**实测跑通了完整链路**。
+
+### 1. 交付
+
+`ExceptionProbe.PatchFailures()` + `CommandPump` 的 `get_patch_failures` + MCP 工具 `bl_patch_failures`。
+
+### 2. ★★ 实机：完整链路跑通（两座桥交叉）
+
+**桥 A —— `bl_patch_failures`**（异常侧，回答"想补谁、为什么失败"）：
+
+```
+targetClass  = TaleWorlds.CampaignSystem.CharacterDevelopment.TraitLevelingHelper
+targetMethod = OnIssueSolvedThroughQuest
+occurrences  = 2
+```
+
+**桥 B —— `bl_patches`**（补丁表侧，回答"这个类型上谁在打补丁"）：
+
+```
+AddTraitXp  ← owner=mendo.governorsgonnagov
+              class=MendoMods.GovernorsGonnaGovern.Patches.TraitLevelingHelperPatch
+```
+
+**★ 交叉结论**：失败的是 `TraitLevelingHelper.OnIssueSolvedThroughQuest`，
+而**该类型上的补丁 owner 是 `mendo.governorsgonnagov`**
+⇒ **线索指向 `GovernorsGonnaGovern`**。
+
+★ **这是单一工具得不到的结论**：
+
+| 单独用 | 只能知道 |
+|---|---|
+| 只用 `bl_patches` | "`OnIssueSolvedThroughQuest` **没被补**" —— **不知道为什么** |
+| 只用 `bl_exceptions` | "有个补丁失败、目标是 X" —— **不知道是谁** |
+| **两者交叉** | "**X 失败，且该类型上是 Y 在补**" ⇒ 可定位 |
+
+### 3. ★★ 本轮修掉一个**会误导的呈现**
+
+**症状**：同一个失败被报成 **2 条**，`failureCount: 2`、每条 `count: 1`
+⇒ **会让人误以为"有 2 个补丁失败了"**（实际只有 1 个）。
+
+**根因**（实测确认）：Harmony **同一个失败抛两次** ——
+
+```
+throwSite ① at HarmonyLib.PatchTools.GetOriginalMethod(HarmonyMethod attr)
+throwSite ② at HarmonyLib.PatchClassProcessor.ReportException(Exception, MethodBase)
+```
+
+而我们的去重键是 `(类型 + 栈首帧)` ⇒ 两条栈首帧不同 ⇒ 各记一次。
+
+**修法**：按 **语义键 `(targetClass, targetMethod)` 归并**，
+并把两个**抛出位置**一并呈现（`throwSites`）—— 现在输出：
+
+```
+failureCount = 1   rawRecords = 2      ← 归并正确
+  occurrences = 2
+     throwSite: PatchTools.GetOriginalMethod
+     throwSite: PatchClassProcessor.ReportException
+```
+
+★ **教训**：**"去重键选错"会制造出不存在的问题**（这里凭空多出一个"补丁失败"）。
+选键要选**语义**（目标），不是**实现细节**（哪一帧抛的）。
+
+### 4. ★★ 诚实标注：这是**线索**，不是**铁证**
+
+反编译确认（`Harmony.cs:6028`）：
+
+```csharp
+throw new HarmonyException("Ambiguous match for HarmonyMethod[" + attr.Description() + "]", ...);
+```
+
+⇒ **`HarmonyException` 只带"补丁想补的目标"，不带"发起补丁的 mod"**。
+
+所以交叉定位有**两种可能的误判**，已在工具输出里显式写明：
+
+1. **同类型上可能有多个 owner** —— 本机实测只有 1 个（`mendo.governorsgonnagov`），
+   若多个则无法区分；
+2. ★ **发起补丁的 mod 可能"完全没注册成功"** ⇒ 它在 `bl_patches` 里**一条都看不到**
+   ⇒ 那种情况下"该类型上的 owner"会**指错人**。
+
+★ 为降低第 2 种风险，本轮**做了一次额外验证**：
+`mendo.governorsgonnagov` **有 11 个补丁注册成功**（`ChangeRelationAction.ApplyPlayerRelation` /
+`ItemRoster.AddToCounts` / `GainRenownAction.Apply` …）
+⇒ 说明它的 `[HarmonyPatch]` 写法本身没问题，**"它想补这个但失败"的可能性因此更高**。
+
+⚠️ **即便如此仍不是铁证** —— 工具里明确写着
+"发起该补丁的 mod **不在异常里**……请把 targetClass 交给 `bl_patches` 反查"，
+**不假装它是归因结论**。
+
+### 5. 验收
+
+- **必跑自测全绿**：编码体检 · GABP 命名 · 派发一致（**51/51/51**）· 主自测 ·
+  `bl_patches_selftest`。
+- **实机验证**：`failureCount=1 / rawRecords=2` 归并正确；两桥交叉链路跑通。
+- MCP 接线**五处**：`TOOLS` 声明 · `call_tool` 派发 · `TOOL_GROUPS` ·
+  `gabp_names.json` 的 `tools` 段 · **`methods` 段**。
+
+### 6. ★ 现在的完整工具图（51 个工具里的"桥"一族）
+
+| 工具 | 回答 |
+|---|---|
+| `bl_exceptions` | 进程活着时的托管异常**统计**（总数 / 种类 / Top） |
+| **`bl_patch_failures`** | **哪个补丁失败了、想补谁、为什么**（+交叉线索） |
+| `bl_patches` | 谁补了哪个方法 / 撞没撞 |
+| `bl_mcm_settings` | 全场 mod 的参数面 |
+| `bl_ui_extensions` | 谁改了哪个官方界面 |
+| `bl_crash` | 进程已死时崩在哪（含原生崩溃） |
+
+### 7. 遗留
+
+1. ~~**`bl_patch_failures` 未做自测**~~ ✅ **已补（同日）** ——
+   做法：把解析逻辑**抽成独立纯函数** `src/HarmonyMessage.cs`（**无 TaleWorlds 依赖**），
+   于是它能被 `tools/jsontest`（那个只编纯 BCL 文件的测试架）**离线单测**。
+   ★ 这个"**为了让逻辑可测而先抽取依赖**"的动作本身就是收益：
+   留在 `ExceptionProbe` 里就只能真机验 —— 而它是**纯字符串处理**，没理由不覆盖。
+   新增 `tools/jsontest/HarmonyMessageTest.cs`（已注册进 `build_and_run.ps1` 与 `GuardTest.Main`），
+   **5 组判据**：① 实测样例（真机抓到那条）；② 无 `args=` 形态；③ null/空/无关文本 ⇒ **两个 null（不猜）**；
+   ④ ★ **`args` 带逗号**（多参数）不影响 class/methodname（最容易写错的一条：
+   若用 `Split(',')` 取第 2 段，class 会被截断）；⑤ ★ **注入故障对照**：
+   把 `class=` 拼成 `klass=` ⇒ 必须**解析不到**（证明 ①–④ 不是恒真）。
+   **C# 离线单测全绿**。
+2. **未处理"多 owner 同类型"的歧义呈现**（当前只列出 owner 集合）。
+3. **未处理"发起补丁的 mod 完全未注册"的情形** ——
+   那种情况下列表里没有它，工具会**给出可能指错人的线索**（已在 `note` 里警告）。
+4. **`CryptographicException`（44 次）来源仍未判读**。
+5. **Harmony 运行时注入 / MCM 与 UIExtenderEx 的「写」仍未做**。
