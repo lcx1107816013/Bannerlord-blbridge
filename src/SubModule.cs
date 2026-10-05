@@ -57,6 +57,16 @@ namespace BlBridge
                 // 我们复刻它属重复建设 ⇒ 面板（BattleSetup*，v0.8.14 删）与原型探针（v0.8.13 删）
                 // 都已退役。分工定格：**人用官方界面玩，AI 用端口调**（list_ui / open_ui / close_ui）。
                 WriteStatus("loaded", null, 0);
+                // v0.8.47：装运行时异常捕获（**FirstChance**，零 Harmony）。
+                //
+                // 为什么需要：ButterLib 的崩溃报告**不落盘**（只弹 ImGui/WinForms 窗口），
+                // 而 BlBridge 是**无人值守**的 ⇒ 弹窗会卡死整个流程；实测也没有"自动写文件"的开关。
+                // 所以自己订阅、落结构化 JSONL（`<LogDir>\exceptions.jsonl`，**追加**模式）。
+                // ★ 与 `bl_crash`（读 WER minidump）互补：那一半管"进程已死"，这一半管
+                //   "进程还活着但有人抛异常"。
+                // ⚠️ 边界（如实）：只记**托管**异常；**JIT 期失败**与**原生崩溃**抓不到
+                //   —— 那些不在任何方法体内，只能靠 dump（`bl_crash --deep`）。
+                ExceptionProbe.Install();
             }
             catch
             {
@@ -142,6 +152,11 @@ namespace BlBridge
             {
                 _cleanExit = true;
                 _missionInProgress = false;
+                // v0.8.47：卸掉 FirstChance 订阅并关侧信道 ——
+                // ★ 这是"**删模块即完全回退**"的一部分：订阅是我们自己挂的，撤得干净。
+                //   与本项目"零 Harmony"的立场一致（我们没改任何别人的代码，
+                //   只是订阅了一个 .NET 原生事件）。
+                ExceptionProbe.Uninstall();
                 // 传最近一场的真实事件数：第一版这里写死 0，把 lastBattleEvents 抹成了 0
                 WriteStatus("exited", _currentBattleFile, _lastBattleEventCount);
             }
@@ -179,6 +194,21 @@ namespace BlBridge
             // v0.8.10：看门狗必须挂在这里而不是 Mission tick —— mission tick 卡住时
             // 主线程仍在跑，这里能观察到「busy 但久无心跳」并强制收尾（见 ScenarioRunner.Watchdog）。
             ScenarioRunner.Watchdog();
+            // v0.8.47：排空异常队列（**I/O 只在这里做**）。
+            //
+            // ★ 为什么不在 FirstChance 回调里直接写：那个回调在**任何线程、任何异常**上触发，
+            //   可能极其频繁（正常控制流也会大量抛）。照 AGENTS.md「主线程 tick 硬规则」，
+            //   回调里只入队，写盘放到主线程。
+            // ★ 独立 try：**不能让它吃掉后面的东西**，也不该被前面某段抛异常而跳过
+            //   （看门狗已经在前一段自带 try，这里同理自隔离）。
+            // ★ 每帧限量：异常风暴时不让一帧写几千行把帧率拖垮（余下的下帧继续）。
+            try
+            {
+                ExceptionProbe.Drain(64);
+            }
+            catch
+            {
+            }
         }
 
         /// <summary>战斗结束时由 TelemetryBehavior 回调，刷新状态文件。</summary>

@@ -185,5 +185,99 @@ namespace BlBridge
         {
             return DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
         }
+
+        // ─────────────────────────────────────────────────────────────────
+        // 侧信道写手（v0.8.47）：**独立于战斗日志的常开文件**
+        // ─────────────────────────────────────────────────────────────────
+        //
+        // 为什么需要它：主 `_writer` 是**战斗日志**，只在 mission 期间打开
+        // （`Open()` 由遥测行为调用）。而异常**随时会发生** —— 主菜单、加载期、
+        // 战役里都可能有 —— 那些时刻 `_writer == null`，`Write()` 会**静默丢弃**。
+        //
+        // ⇒ 异常记录必须有自己的写手：模块加载时开、卸载时关，**全程打开**。
+        //   两者独立 ⇒ 谁也不会挤掉谁（战斗日志换场时不会关掉它）。
+
+        private static readonly object _sideLock = new object();
+        private static StreamWriter _sideWriter;
+        private static string _sideFile;
+        private static string _sideLastError;
+
+        /// <summary>侧信道文件路径（未打开时为空）。</summary>
+        public static string SideFile
+        {
+            get { lock (_sideLock) { return _sideFile; } }
+        }
+
+        /// <summary>侧信道最近一次错误（为空表示正常）。</summary>
+        public static string SideLastError
+        {
+            get { lock (_sideLock) { return _sideLastError; } }
+        }
+
+        /// <summary>
+        /// 打开侧信道（追加模式 —— 异常日志跨会话累积比"每次新建"更有用）。
+        /// 返回实际路径；失败返回 null 并记 `SideLastError`（**不抛**）。
+        /// </summary>
+        public static string OpenSide(string path, bool append)
+        {
+            lock (_sideLock)
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    FileStream fs = new FileStream(path,
+                        append ? FileMode.Append : FileMode.Create,
+                        FileAccess.Write, FileShare.ReadWrite);
+                    _sideWriter = new StreamWriter(fs, new UTF8Encoding(false));
+                    // ★ 侧信道**强制逐行 flush**：崩溃就发生在我们想记录的那些时刻，
+                    //   缓冲住就等于没记（这条不能跟随战斗日志的 FlushEveryLine 配置）。
+                    _sideWriter.AutoFlush = true;
+                    _sideFile = path;
+                    _sideLastError = null;
+                    return path;
+                }
+                catch (Exception ex)
+                {
+                    _sideWriter = null;
+                    _sideFile = null;
+                    _sideLastError = "OpenSide: " + ex.GetType().Name + ": " + ex.Message;
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>写侧信道一行（**无 writer 时静默返回**，与 `Write` 同语义）。</summary>
+        public static void WriteSide(string line)
+        {
+            lock (_sideLock)
+            {
+                if (_sideWriter == null) return;
+                try
+                {
+                    _sideWriter.WriteLine(line);
+                }
+                catch (Exception ex)
+                {
+                    _sideLastError = "WriteSide: " + ex.GetType().Name + ": " + ex.Message;
+                }
+            }
+        }
+
+        /// <summary>关侧信道（模块卸载）。</summary>
+        public static void CloseSide()
+        {
+            lock (_sideLock)
+            {
+                if (_sideWriter == null) return;
+                try
+                {
+                    _sideWriter.Flush();
+                    _sideWriter.Dispose();
+                }
+                catch { }
+                _sideWriter = null;
+            }
+        }
     }
 }
