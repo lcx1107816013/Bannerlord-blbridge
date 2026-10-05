@@ -43,6 +43,13 @@
 - ⚠️ `tools/check_repo_encoding.py` **查不出这一类**：它只管"UTF-8 无 BOM + LF"，
   而这里的问题是**读取方（PS 5.1）的假设**，不是文件本身的合规性。
   （`pwsh` 7+ 默认按 UTF-8 读无 BOM 文件，所以**在 `pwsh` 里测不出来** —— 必须用 `powershell.exe` 5.1 复现。）
+- ⚠️ **同一个坑还有第二个面**（2026-10-05 又踩到）：`Get-Content` **读数据文件**时，
+  PS 5.1 同样按 ANSI 解 UTF-8（无 BOM）。症状是 `ConvertFrom-Json` 报
+  `Invalid object passed in, ':' or '}' expected` —— 因为文件里的**中文串被读坏**成了非法 UTF-16。
+  **数据本身没问题**。⇒ **PS 5.1 里读任何 UTF-8 文本文件都要显式 `-Encoding UTF8`**：
+  ```powershell
+  $j = Get-Content bridge_status.json -Raw -Encoding UTF8 | ConvertFrom-Json
+  ```
 
 ### Gauntlet prefab 硬规则（2026-09-25 增，真机确证）
 
@@ -117,7 +124,16 @@ python tools\bl_check_clock_reset.py                 # 多轮日志「时钟同�
 python tools\bl_check_gabp_names.py --selftest       # GABP 命名表 ↔ 源码 method ↔ MCP 工具 三方一致（含注入故障对照组）
 python tools\bl_check_dispatch.py                    # MCP 工具 声明 ↔ 派发 ↔ 分组 一致（防"列得出却调不动"）
 python tools\bl_check_dispatch.py --selftest         # 上面那个的注入故障对照组（3 类，必须全抓到）
+python tools\bl_check_envelope.py --inject           # **真实响应**的信封不变式（游戏须跑过；含注入对照组）
 ```
+
+> **`bl_check_envelope.py` 补的洞（2026-10-05 增）**：`tools/jsontest/EnvelopeTest.cs` 验的是
+> `Protocol.Success/Failure` **构造出来的**信封 —— 它**从没见过一个真正走过文件 IPC 的响应**。
+> ⇒ "构造器没问题"与"真实响应没问题"曾是**两个互不相干的断言**。
+> 本脚本把**同一套不变式**（9 条）作用到 `commands/done/*.json` 里游戏**真正写出**的响应上。
+> **首次跑通**：12497 个真实响应 **0 违规**、`id` 与文件名 **0 不一致**，
+> 注入对照组 **192/192 全中**。
+> ⚠️ 它需要游戏跑过（`done/` 非空）；没有响应时退出码 **2**（环境不足），不算失败。
 
 ### 新增/删除 method 或 MCP 工具时的硬规则（2026-09-27 增）
 
