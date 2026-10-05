@@ -334,6 +334,18 @@
       "gabp": "bridge/triage_crash",
       "note": "宿主侧：解析 WER 落盘的 minidump（异常代码 / 崩溃模块+偏移 / 访问目标），并关联到 BlBridge 会话（pid 是否同一进程、崩时在打哪一场）；零依赖，无需 WinDbg/x64dbg"
     },
+    "bl_json_health": {
+      "gabp": "bridge/check_responses",
+      "note": "宿主侧只读：全量解析 commands\\done\\*.json，找畸形 JSON（Jw.Esc 只转义不加引号 ⇒ 键值边界丢失 ⇒ IPC 侧解析失败 ⇒ 客户端白等到超时，症状像「游戏主线程卡死」）。判据 stillLive = 最新 20 个文件里仍有畸形 ⇒ 缺陷仍活着，需对照 bl_build_check 看进程内 DLL 与磁盘源码"
+    },
+    "bl_ipc_replay": {
+      "gabp": "bridge/read_responses",
+      "note": "宿主侧只读：按 method（走动作账本 id->method 连接）或 grep（全量）检索 commands\\done 的历史响应，取回完整响应体。响应体自身不含 method，所以按工具检索必须先读账本；账本只覆盖一部分响应（↔ ledgerCoverage 如实报出），按 method 查不到时会提示改用 grep"
+    },
+    "bl_exception_detail": {
+      "gabp": "bridge/explain_exceptions",
+      "note": "宿主侧只读：解释 exceptions.jsonl 的记录口径并读明细。关键口径：行数!=出现次数（去重键=(类型|栈首帧)，只在首次出现落盘 ⇒ 实测 4 行 vs 真实 44 次）；seq 是排空那刻的全局快照不是序号（可被多条共享）；stackHead 只 1 帧且常是 BCL 抛助记帧 ⇒ 这类异常来源不可判定；t=session 分段=进程重启，跨段累加 seen 是错的；盲区=只记托管异常（JIT 期/原生崩溃要 bl_crash）"
+    },
     "bl_patches": {
       "gabp": "bridge/list_patches",
       "note": "游戏侧只读：反射调 Harmony 公开内省 API，回答「谁补了哪个方法」；conflicts 只列被 ≥2 个 owner 补的方法，transpilerClash 标出最危险的一类（改 IL，出错即崩溃）。不建 Harmony 实例、不 patch、不改 IL"

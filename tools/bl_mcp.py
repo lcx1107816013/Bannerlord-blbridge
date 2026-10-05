@@ -1429,6 +1429,84 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_json_health",
+        "description": ("**IPC 响应完整性体检（宿主侧，只读，不碰游戏）**：全量解析 "
+                        "`<日志目录>\\commands\\done\\*.json`，找出**畸形 JSON** 并给出原始上下文与字节偏移。"
+                        "为什么需要它：响应侧的 JSON 写坏了 ⇒ MCP 客户端**一直等到超时**，"
+                        "而响应其实早就写好了 ⇒ 症状看起来像「游戏主线程卡死」，"
+                        "根因却在 `Jw.Esc` **只转义、不加引号**（交接日志 §3.3 同一条；"
+                        "`src/PatchProbe.cs:325-331` 有源码侧同坑注释）。"
+                        "为什么单读一个文件发现不了：实测 12991 个响应里只有 5 个坏的（0.0385%），"
+                        "按文件名看不出异常、单文件读一次基本撞不上 ⇒ 只有**全量解析**才看得见。"
+                        "判据 `stillLive`：最新 20 个文件里还有畸形 ⇒ 缺陷**仍活着**（不是历史遗留），"
+                        "此时请对照 `bl_build_check` 看进程内 DLL 与磁盘源码是否一致。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dir": {"type": "string", "description": "要扫描的目录（默认 BlBridge 的 commands\\done）"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 的 logDir 同口径，用于推导 done 目录）"},
+                "limit": {"type": "integer", "description": "最多返回几条坏文件明细，默认 20"},
+            },
+        },
+    },
+    {
+        "name": "bl_ipc_replay",
+        "description": ("**IPC 响应缓存检索（宿主侧，只读，不碰游戏）**：从 "
+                        "`<日志目录>\\commands\\done\\` 的 **12991 份历史响应**里按条件捞回**完整响应体**。"
+                        "为什么通用手段不行：**响应体里不含 method 名**（只有 process/result/error/id）"
+                        "⇒ 想按工具名检索，**必须**先读动作账本 `commands/actions.jsonl` 拿 "
+                        "`id -> method` 映射再来取（实测 2490 条账本 id **全部**能连上响应）。"
+                        "本轮为了定位「`CryptographicException` 的 44 次在第几个响应里」，"
+                        "手工 grep 了 12991 个文件 —— 本工具把它变成一次调用。"
+                        "两种模式：`method=` 走账本（⚠️ 只覆盖有账本的那部分，"
+                        "实测 2490/12991 ≈ 19%，工具会如实报 `ledgerCoverage`）；"
+                        "`grep=` 在响应原文里搜（覆盖**全部**，但慢）。"
+                        "典型用法：查某次失败调用的**完整错误消息**（账本只记 code，响应有全文）、"
+                        "复盘上次会话某工具返回了什么。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string",
+                           "description": "按账本里的方法名过滤（如 get_patches / start_battle / get_exceptions）。"
+                                          "只在有账本记录的响应里找；查不到时会提示改用 grep"},
+                "grep": {"type": "string",
+                         "description": "在响应原文里做子串匹配（覆盖全部响应，不依赖账本）"},
+                "okOnly": {"type": "boolean",
+                           "description": "true=只看成功 / false=只看失败（按信封 ok；不传=都看）"},
+                "limit": {"type": "integer", "description": "最多返回几份响应明细，默认 5"},
+                "full": {"type": "boolean", "description": "是否带完整响应体（默认只带前 400 字符）"},
+                "newestFirst": {"type": "boolean", "description": "按文件时间倒序，默认 true"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 的 logDir 同口径）"},
+            },
+        },
+    },
+    {
+        "name": "bl_exception_detail",
+        "description": ("**异常采集口径说明 + 记录读取（宿主侧，只读，不碰游戏）**："
+                        "解释 `<日志目录>\\exceptions.jsonl` 的**记录口径**并读明细。"
+                        "为什么必需——该文件的口径**多处反直觉，直接读会得出错误结论**："
+                        "① **行数 != 出现次数**（去重键 =(类型|栈首帧)，且**只在首次出现时落盘**）"
+                        "⇒ 实测 `CryptographicException` 只有 4 行而真实 44 次；"
+                        "② `seq` 是**排空那刻的全局快照**、不是序号（**多条可共享同一 seq**）；"
+                        "③ `stackHead` **只有 1 帧**，且常是 BCL **抛助记帧**（如 "
+                        "`ThrowCryptographicException`，**与调用者无关**）⇒ 这类异常**来源不可判定**"
+                        "（源码注释称'排空时取完整栈'，但**该代码不存在**）；"
+                        "④ `t=session` 分段 = **游戏进程重启** ⇒ 跨段累加 `seen` 是错的；"
+                        "⑤ 盲区：**只记托管异常**，JIT 期失败与原生崩溃抓不到（那两类用 `bl_crash`）。"
+                        "频次请用 `bl_exceptions` 的 `top[].count`；历史响应见 `bl_ipc_replay`。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string",
+                         "description": "只看这个异常类型（子串匹配，如 Cryptographic / HarmonyException）"},
+                "limit": {"type": "integer", "description": "最多列几条明细，默认 20"},
+                "explain": {"type": "boolean",
+                            "description": "是否附口径说明（默认 true —— 本工具的主价值）"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 的 logDir 同口径）"},
+            },
+        },
+    },
+    {
         "name": "bl_build_check",
         "description": ("核对「源码 → 构建产物 → 部署文件 → 进程内 DLL」四段是否一致。用于回答三件事："
                         "① 改了代码没重新构建（stale_source）；② 构建了但没部署（stale_deploy）；"
@@ -1663,6 +1741,7 @@ TOOL_GROUPS = {
     "lab": [
         "bl_list_battles", "bl_analyze", "bl_read_events", "bl_run_batch", "bl_batch_report",
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
+        "bl_json_health", "bl_ipc_replay", "bl_exception_detail",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
     ],
     "desktop": [
@@ -2266,6 +2345,41 @@ def call_tool(name, args):
             path=args.get("path"),
             deep=bool(args.get("deep")),
             cdb=args.get("cdb"),
+        )
+
+    if name == "bl_json_health":
+        # 宿主侧工具：全量解析 commands\done\*.json，找畸形 JSON。
+        # **不碰游戏、不需要游戏在跑**（与 bl_crash 同类）。
+        import bl_json_health as _jh
+        return _jh.build_report(
+            directory=args.get("dir"),
+            log_dir=args.get("logDir"),
+            limit=int(args.get("limit") or 20),
+        )
+
+    if name == "bl_ipc_replay":
+        # 宿主侧工具：检索 commands\done\ 的历史响应（+ actions.jsonl 连接）。
+        # **不碰游戏、不需要游戏在跑**（与 bl_crash / bl_json_health 同类）。
+        import bl_ipc_replay as _rp
+        return _rp.build_report(
+            method=args.get("method"),
+            log_dir=args.get("logDir"),
+            limit=int(args.get("limit") or 5),
+            grep=args.get("grep"),
+            ok_only=args.get("okOnly"),
+            full=bool(args.get("full")),
+            newest_first=bool(args.get("newestFirst", True)),
+        )
+
+    if name == "bl_exception_detail":
+        # 宿主侧工具：解释 exceptions.jsonl 的口径并读明细。
+        # **不碰游戏、不需要游戏在跑**（与 bl_crash / bl_json_health / bl_ipc_replay 同类）。
+        import bl_exception_detail as _ed
+        return _ed.build_report(
+            log_dir=args.get("logDir"),
+            type_filter=args.get("type"),
+            limit=int(args.get("limit") or 20),
+            explain=bool(args.get("explain", True)),
         )
 
     if name == "bl_build_check":
