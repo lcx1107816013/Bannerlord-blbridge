@@ -4380,3 +4380,70 @@ if (agent != null && victimAgent.IsFriendOf(agent))
 
 > 与 §四十.5（`terrain`）的区别：`terrain` 是**托管侧确认无消费者**；
 > `randomTerrainSeed` 是**托管侧同样零消费者 + 实测指纹不变**，但 native 侧仍有未知面。
+
+---
+
+## [2026-10-05] §四十三 首次入库：v0.8.33–v0.8.45 的改动**按轮次切分，本轮单独成 commit**
+
+> 执行者 dsh-agent。用户指令："④提交"。
+> **背景（决定了这件事怎么做）**：仓库 `HEAD` 一直停在 **v0.8.32**（`af4cd0c`），
+> 其后 **v0.8.33 → v0.8.45 十几轮全部未提交**，且多文件与用户自己的 WIP **交叉**。
+
+### 1. 为什么不能"只提本轮的那几个 hunk"
+
+实测发现（**这条推翻了"只提我的 hunk"这个想法**）：
+- `build.ps1:166` 是 `Get-ChildItem $srcDir -Filter '*.cs'` —— **整目录编译**（工作区 38 个 `.cs`，HEAD 只有 30 个）；
+- 8 个**未跟踪**的 `src/*.cs` 全被引用（`ActionLedger` 6 次、`BattleEnv` 17 次、`TacticsCombatant` 9 次…），
+  而**已修改**的 `CommandPump.cs` 就在调 `ActionLedger.Record`。
+
+⇒ 只提交 on-disk 的已改文件、不提那些新文件，**仓库会编译不过**（不可接受的中间态）。
+所以"最小提交"的真实边界 = **本轮改动 + 全部编译必需依赖**（用户选的就是这条）。
+
+### 2. 提交内容（commit `0539337`，40 个文件，+9166 / −301）
+
+| 组 | 文件 |
+|---|---|
+| `src/` 已改 9 | BridgeConfig / BridgeConfigFile / BridgeProtocol / CommandPump / ScenarioRunner / SubModule / TelemetryBehavior / TimeControl / UiEntry |
+| `src/` 新增 8（编译必需） | ActionLedger / BattleEnv / TacticsCombatant / CampaignProbe / CampaignReadProbe / HotkeyBehavior / InventoryProbe / UiInspector |
+| `tools/` | jsontest 三新增（EnvelopeTest / LedgerGapTest / Shims）+ GuardTest + build_and_run.ps1 + bl_mcp/bl_cmd/bl_selftest/bl_common/bl_launch + 门禁三件（bl_check_dispatch / bl_check_gabp_names / gabp_names.json）+ bl_modules / bl_blockade |
+| 文档/模块/构建 | README / AGENTS / PROGRESS / .gitignore / build.ps1 / module/SubModule.xml / module/mcp/{README,manifest} |
+
+**明确未提交**（保持未跟踪，按约定）：
+`docs/*.md`（5 份前几轮的评估文档）、`module/mcp/AI-TUTORIAL.md`、`tools/l2probe/`（探针 WIP）。
+**备份文件**（`tools/bl_mcp.py.bak_20260927` / `.bak_predesc`）已进 `.gitignore`：
+原来只有 `*.bak_probe` 一条，而实际备份名带日期/词缀 ⇒ **漏网**（已补 `*.bak` / `*.bak_*`）。
+
+### 3. ★ 提交前的验证（不靠"看起来对"）
+
+| 判据 | 结果 |
+|---|---|
+| 十道门禁 | ✅ 全绿（见 §四十二.4 那张表 + `bl_check_clock_reset` 双侧） |
+| 暂存区干净度 | ✅ `docs/` / `l2probe` / `*.bak` **一个都没进**暂存区 |
+| **提交后的树 == 工作区** | ✅ 干净 worktree 检出 `0539337`，`src/*.cs` **38 个且逐字节一致** |
+| **提交后的树能跑门禁** | ✅ 在干净检出里跑 encoding / selftest / metrics / gabp / dispatch（含两个 `--selftest`）**全 OK** |
+
+### 4. ⚠️ 本轮踩到并已修的两个**我自己的脚本缺陷**（同一类："坏掉而无人知"）
+
+跑 `aiFriendlyFireMultiplier` 交错跑批的编排器（`E:\Document\blbridge-ff-ci\ff_interleave.py`，**刻意放仓库外**）：
+
+1. **20 场全失败仍然 `exit 0`** —— 调度方根本看不出跑批什么都没做。
+2. **`--tools` 显式给了不存在的路径 ⇒ 静默回退到默认仓库路径** ——
+   后果：我做**负对照**时它**真的跑了 2 场**（那 2 场数据合法，已分开报，见 §四十.6.3.1）。
+
+两处都已修：`--tools` 显式给了但不存在 ⇒ **直接报错、不回退**；一场都没成功 ⇒ **退出码 2**。
+> 这条与 §四十一（`ledger` 的两个缺口）是**同一类失效模式**：**不是坏掉，是坏掉而无人知**。
+> 本项目已有 §四十二.4 的纪律（"验证必须留下可复现入口"），本轮是它在**工具脚本**上的又一次现身。
+
+### 5. 顺带：`bl_check_clock_reset.py` 是 AGENTS.md 的**必跑项**，我先前漏了
+
+补跑后**双侧都对**（这正是该门禁的设计）：
+
+| 半边 | 结果 |
+|---|---|
+| 全量扫描（96 份多轮文件） | **PASS 85 / FAIL 11**，11 份全是 **v0.8.7 / v0.8.9** 的 `[受影响版本]` ⇒ **校验器有区分力** |
+| `--since 2026-10-05T08:34:32Z`（本轮新产物） | **3 份 v0.8.45 多轮文件全 PASS，0 失败** |
+
+⚠️ **过程中一条真实教训**：我第一次跑 `--since` 得到 **`exit=2`＋"未发现任何多轮日志"** ——
+因为我那 22 场**全是单轮**（没传 `rounds`），而该判据**只对多轮战斗有意义**
+（单轮不触发那类缺陷，跑它只会得到"假阳性通过"）。
+⇒ 补跑一场 `rounds=3` 后才拿到有效判据。**这条写在这里，免得下一个人以为"跑过了"就是"验过了"。
