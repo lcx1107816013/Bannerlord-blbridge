@@ -162,6 +162,41 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 ```
 然后：启动器勾选 **BlBridge Telemetry** → 启动游戏 → **重载一次 CodeBuddy 窗口**让 MCP 生效。
 
+### ★ 建议加装「骑砍四前置」（**软前置**，不是必需，但能多三座桥）
+
+BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官方四个
+（`Native` / `SandBoxCore` / `Sandbox` / `CustomBattle`），`build.ps1` **也不引用**它们的程序集。
+⇒ **不装四前置，BlBridge 的全部核心能力照常工作。**
+
+**但装上它们，会多出三座「诊断桥」** —— 因为这三个组件恰好是
+**90% 以上 mod 都会依赖**的基础设施，所以它们自己的状态就是重要的排查线索：
+
+| 建议加装 | 模块 Id | 装了它能多什么 | 不装会怎样 |
+|---|---|---|---|
+| **Harmony** | `Bannerlord.Harmony` | `bl_patches` / `bl_patch_failures` —— 谁给哪个方法打了补丁、有没有**多 owner 双重叠加**、补丁为什么失败 | 报 `no_harmony`，其余照常 |
+| **ButterLib** | `Bannerlord.ButterLib` | 其设置页会被 `bl_mcm_settings` 读到（它是"库也是界面"的典型） | 少一个可读的设置块 |
+| **UIExtenderEx** | `Bannerlord.UIExtenderEx` | `bl_ui_extensions` —— 哪个 mod 改了哪个**官方界面**、Prefab 补丁与 ViewModel mixin 各多少 | 报 `no_uiextenderex`，其余照常 |
+| **MCM** | `Bannerlord.MBOptionScreen` | `bl_mcm_settings` —— 全场 mod 的**参数面**（本机实测 29 块 / 1225 项） | 报 `no_mcm`，其余照常 |
+
+#### ★ 为什么是「软前置」而不是硬依赖（这是刻意的设计）
+
+| 判据 | 实测 |
+|---|---|
+| `SubModule.xml` 的 `DependedModules` | **只有官方四个**，不含四前置 |
+| `build.ps1` 引用它们的程序集吗 | ❌ **不引用** |
+| 那三座桥怎么读它们 | **运行时反射**（`PatchProbe.cs` 59 处 / `UiExtendProbe.cs` 25 处 / `McmProbe.cs` 17 处） |
+| 没装时 | **优雅退化**：显式报 `no_harmony` / `no_mcm` / `no_uiextenderex`，**绝不崩、也不静默** |
+
+★ **为什么刻意不做成硬依赖**：若在 `SubModule.xml` 里声明 `DependedModule`，
+那"**可选诊断**"就变成了"**没装就不给启动**" —— 与"找不到就优雅退化"**自相矛盾**，
+也让只想用 BlBridge 核心能力的人被迫多装四个前置。
+⇒ 实测证明：**什么都没加，照样跑通**（三座桥在四前置缺席时如实报错码）。
+
+> ⚠️ **加载顺序**：四前置在链条最前端且次序固定
+> （`Harmony → ButterLib → UIExtenderEx → MBOptionScreen → Native → …`），
+> 由引擎按 `DependedModules` 强制 —— **重排不解决问题**。
+> 另见知识库 `butr-mod-stack`（若你有那份共享知识库）。
+
 ---
 
 ## 四、用法 A：手动打一场（验证遥测）
@@ -181,7 +216,7 @@ python tools\register_mcp.py                                    # 登记 MCP（�
 
 ---
 
-## 六、MCP 工具（44 个）
+## 六、MCP 工具（57 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
