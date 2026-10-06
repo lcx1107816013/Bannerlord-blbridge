@@ -126,7 +126,150 @@ def audit(src=None, path=None):
     for n in declared:
         if n not in grouped:
             problems.append("C3 不在任何 TOOL_GROUPS 组里（设了 BLBRIDGE_TOOLSET 时会凭空消失）: %s" % n)
+    problems.extend(check_cli_entries(declared, src))
     return problems
+
+
+# ── C4：宿主侧工具模块必须有 CLI 入口（2026-10-06 新增）──────────────────
+#
+# ## 为什么加这条
+#
+# v0.8.47 新增的 3 个工具（`bl_json_health` / `bl_ipc_replay` / `bl_exception_detail`）
+# 并入时**只写了库函数**（`scan()` / `build_report()`），**没有 `main()`、
+# 没有 `__main__` 块、没有 `import sys`、没有 `sys.path` 处理**。
+# ⇒ 直接 `python tools/bl_json_health.py` **静默 exit=0，什么都不做**。
+#
+# ★ 危害不只是「CLI 不能用」——它让**性能测量得出虚假结论**：
+#   实测把 ~30ms（解释器启动）当成「全量解析 12991 个文件的耗时」，
+#   而真实是 **~705ms**，差 **23 倍**。两个并行测量者都独立复现了这个坑。
+#
+# ★ 为什么既有自测没抓到：三个工具的自测都**直接 `import` 调函数**，
+#   **完全绕过 CLI 路径** ⇒ 这个缺陷在自测里不可见。
+#   ⇒ 所以加这条**静态**闸门（扫源码文本），而不是再加一条运行时断言。
+#
+# ## 判据
+#
+# ⚠️ **2026-10-06 第一次写这判据时是假阳性**，必须记下来：
+#   初版只查文本里有没有 `sys.path` 字样，结果报了 `bl_crash.py`。
+#   但实测 `python tools/bl_crash.py` **exit=0 正常** —— 因为它的 `import bl_common`
+#   写在 **`main()` 函数体内**（不是模块级），且实跑时 cwd 恰为 `tools/`，
+#   `import` 也能成功。⇒ **文本匹配抓不住"import 的层级"与"cwd 恰好可见"**。
+#
+# ⇒ 改成**以实测为准**：
+#     1) **模块级** import 了同目录兄弟模块 ⇒ **必须**有 `sys.path` 处理
+#        （因为模块级 import 在解释器启动后立刻执行，此时 cwd 不可依赖）；
+#     2) 同时要求有 `def main(` 与 `__main__` 块（这两个是纯文本可判的，
+#        且没有假阳性风险）。
+#   不再要求"函数体内的 import"也配 `sys.path` —— 那会误报 `bl_crash.py`。
+
+BACKEND_IMPORT_RE = re.compile(r"^\s*import\s+(bl_[a-z_]+)\s+as\s+", re.M)
+# 模块级 import（行首无缩进）
+MODULE_LEVEL_SIBLING_RE = re.compile(r"^import\s+(bl_[a-z_]+)", re.M)
+CLI_EXEMPT = {"bl_rts"}          # 纯库，无 CLI 用途（历史如此）
+
+
+def backend_modules(src=None):
+    """从 bl_mcp.py 抽出被当作后端 import 的模块名（如 bl_crash / bl_json_health）。"""
+    src = read_source() if src is None else src
+    names = set()
+    for m in BACKEND_IMPORT_RE.finditer(src):
+        names.add(m.group(1))
+    return names
+
+
+def _cli_missing(mod, body):
+    """返回该模块缺的 CLI 要素列表（共 3 项，见上文判据）。"""
+    missing = []
+    if re.search(r"^import\s+bl_[a-z_]+", body, re.M) and "sys.path" not in body:
+        # 模块级 import 兄弟模块却没设 sys.path ⇒ CLI 直跑会 ModuleNotFoundError
+        missing.append("sys.path 处理（模块级 import 了兄弟模块）")
+    if not re.search(r"^def main\(", body, re.M):
+        missing.append("def main()")
+    if '__name__ == "__main__"' not in body and "__name__ == '__main__'" not in body:
+        missing.append('__main__ 块')
+    return missing
+
+
+def check_cli_entries(declared, src=None):
+    """C4：后端工具模块必须有 CLI 入口。返回问题清单。"""
+    import os as _os
+    src = read_source() if src is None else src
+    problems = []
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    checked = 0
+    for mod in sorted(backend_modules(src)):
+        if mod in CLI_EXEMPT:
+            continue
+        p = _os.path.join(here, mod + ".py")
+        if not _os.path.isfile(p):
+            problems.append("C4 后端模块文件不存在（%s）: %s.py" % (p, mod))
+            continue
+        # ⚠️ 这里**故意读原始文本**而不是 import —— 闸门要能在模块本身语法都坏时也报出来
+        try:
+            with io.open(p, "r", encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except OSError as exc:
+            problems.append("C4 读不到后端模块 %s.py: %s" % (mod, exc))
+            continue
+        checked += 1
+        missing = _cli_missing(mod, body)
+        if missing:
+            problems.append(
+                "C4 %s.py 缺 CLI 入口要素 %s —— 直接跑会**静默 exit=0 什么都不做**"
+                "（危害：会被当成「跑得很快」=> 性能结论虚假）" % (mod, missing))
+    if checked == 0:
+        problems.append("ENV: C4 没检查到任何后端模块（抽取为空不算通过）")
+    return problems
+
+
+def c4_selftest():
+    """C4 的对照组：注入「去掉 `__main__` 块」必须被抓到（证明判据不是恒真）。
+
+    不做真实文件改动 —— 用**内存里的假文本**喂同一个判据函数，
+    避免污染工作区（本项目纪律：验证不得污染被测对象）。
+    """
+    print()
+    print("-- C4 对照组（CLI 入口） --")
+    src = read_source()
+    mods = backend_modules(src)
+    print("   后端模块 %d 个: %s" % (len(mods), ", ".join(sorted(mods)) or "(空)"))
+    if not mods:
+        print("   [FAIL] 抽不到后端模块（判据失效）")
+        return False
+
+    # ① 真实源码必须零报错（对照组）
+    p = audit(src)
+    c4 = [x for x in p if x.startswith("C4")]
+    if c4:
+        print("   [FAIL] 真实源码 C4 报错 %d 条: %s" % (len(c4), c4[:3]))
+        return False
+    print("   [OK] 真实源码 C4 零报错（%d 个后端模块都合格）" % len(mods))
+
+    # ② 注入故障 A：去掉 `__main__` 块
+    probe = sorted(mods)[0]
+    import os as _os
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    with io.open(_os.path.join(here, probe + ".py"), "r", encoding="utf-8",
+                 errors="replace") as fh:
+        real = fh.read()
+    broken = real.replace('if __name__ == "__main__":', '# REMOVED', 1)
+    if broken == real:
+        print("   [FAIL] 注入 A 失败：%s.py 找不到 `__main__` 块" % probe)
+        return False
+    miss = _cli_missing(probe, broken)
+    okA = any("__main__" in m for m in miss)
+    print("   [%s] 注入 A（%s.py 去掉 __main__）=> 判据报 %s"
+          % ("OK" if okA else "FAIL", probe, miss))
+
+    # ③ 注入故障 B：模块级 import 兄弟模块 + 去掉 sys.path
+    broken2 = real.replace("sys.path.insert(0, HERE)", "# removed", 1)
+    miss2 = _cli_missing(probe, broken2)
+    has_modlevel = bool(re.search(r"^import\s+bl_[a-z_]+", broken2, re.M))
+    okB = (not has_modlevel) or any("sys.path" in m for m in miss2)
+    print("   [%s] 注入 B（%s.py 去掉 sys.path）=> 模块级兄弟 import=%s，判据报 %s"
+          % ("OK" if okB else "FAIL", probe, has_modlevel, miss2))
+
+    return okA and okB
 
 
 def selftest():
@@ -176,6 +319,12 @@ def selftest():
         print(("[OK] 故障3（漏分组）被抓到: %s" % hit[0]) if hit
               else ("[FAIL] 故障3（漏分组）没被抓到 -> %s" % p))
         ok = ok and bool(hit)
+
+    # ── C4 对照组（CLI 入口）：2026-10-06 新增 ──
+    # 缺陷现场：v0.8.47 三个新工具只写库函数、漏了 CLI 四要素
+    # ⇒ 直接跑静默 exit=0；而自测「直接 import 调函数」⇒ **绕过 CLI** ⇒ 抓不到。
+    # 所以这条闸门是**静态**的（扫源码文本），并自带注入对照证明判据不是恒真。
+    ok = c4_selftest() and ok
 
     print("结果: %s" % ("全部通过" if ok else "有故障没被抓到"))
     return 0 if ok else 1

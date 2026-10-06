@@ -10,7 +10,7 @@ BlBridge IPC 响应缓存检索（宿主侧，只读，仅标准库）。
 两者用 **`id` 精确连接**（实测：账本有 id 的 2490 条**全部**能在 done 里找到，
 `账本有但 done 无 = 0`）。
 
-⇒ 于是可以回答一类**此前只能靠手工 grep 才能回答**的问题：
+-> 于是可以回答一类**此前只能靠手工 grep 才能回答**的问题：
 
     · 上个会话那次 `get_patches` 的**完整响应**到底是什么？
     · 那次 `start_battle` 失败时游戏端回了什么 `code`？（账本只记 code，响应有全文）
@@ -21,18 +21,18 @@ BlBridge IPC 响应缓存检索（宿主侧，只读，仅标准库）。
 **响应体里不含 method 名**：`done/<id>.json` 只有 `process` / `result` / `error` /
 `protocolVersion` / `id`，**没有"我是哪个工具"**。想按工具名检索，
 **必须**先读账本拿到 `id -> method` 的映射，再去取响应。
-⇒ 手工得写两段脚本；只用 `read`/`grep` 根本做不到。
+-> 手工得写两段脚本；只用 `read`/`grep` 根本做不到。
 
 实测代价：本轮为了找「`CryptographicException` 的 44 次到底在第几个响应里」，
 **手工 grep 了 12991 个文件**才定位到。
 
-## ⚠️ 覆盖率边界（必须随结果一起报出）
+## [!] 覆盖率边界（必须随结果一起报出）
 
 账本只覆盖 **2490 / 12991 ≈ 19%** 的响应（其余 10501 个是账本启用前的历史，
 或游戏端未记账本的请求）。所以：
 
-    · 按 `method` 检索 ⇒ **只能在有账本的那 2490 个里找**
-    · 按 `id` / `file` / 内容检索 ⇒ 覆盖**全部** 12991 个
+    · 按 `method` 检索 -> **只能在有账本的那 2490 个里找**
+    · 按 `id` / `file` / 内容检索 -> 覆盖**全部** 12991 个
 
 本工具**如实报出** `covered` 与 `total`，**不把"账本里没找到"说成"没发生过"**。
 
@@ -45,9 +45,18 @@ BlBridge IPC 响应缓存检索（宿主侧，只读，仅标准库）。
 import io
 import json
 import os
+import sys
 import time
 
 import bl_common
+
+# [!] 把本目录加进 sys.path（见 `bl_analyze.py:25-27` 惯例）。
+#    `import bl_common` 在**被 import 成模块**时没问题（调用方已设好 path），
+#    但**直接跑 CLI** 时需要这一段 —— 否则 ModuleNotFoundError。
+#    ★ 2026-10-06 补：本文件最初并入时漏了 CLI 入口与 `import sys`。
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 
 def done_dir(log_dir=None):
@@ -56,12 +65,12 @@ def done_dir(log_dir=None):
 
 
 def _load_ledger(log_dir=None, method=None, ok_only=None, fail_only=False):
-    """读账本 → (entries, stats)，并可选按 method / 成败过滤。
+    """读账本 -> (entries, stats)，并可选按 method / 成败过滤。
 
     复用 `bl_common.load_actions`（它已处理坏行计数、非对象 JSON、`limit` 语义、
     `resultOk` 三态）—— **不重写解析器**，避免两套口径漂移。
 
-    ⚠️ `load_actions(path=..., limit=..., fail_only=...)` **没有 `log_dir` 参数**
+    [!] `load_actions(path=..., limit=..., fail_only=...)` **没有 `log_dir` 参数**
     —— 它只吃完整的账本**文件路径**（用 `bl_common.actions_path(log_dir)` 求）。
     这里实测踩过：直接传 `log_dir=` 会 `TypeError`。
     """
@@ -96,7 +105,7 @@ def build_report(method=None, log_dir=None, limit=5, grep=None,
 
     参数：
         method         按账本里的方法名过滤（如 "get_patches"）。
-                       ⚠️ 只在**有账本**的响应里找（见模块 docstring 的覆盖率边界）。
+                       [!] 只在**有账本**的响应里找（见模块 docstring 的覆盖率边界）。
         grep           在**响应原文**里做子串匹配（覆盖全部 12991 个，不依赖账本）。
         ok_only        True=只看成功 / False=只看失败 / None=都看（按**信封** ok）。
         fail_only      复用 load_actions 的 fail_only（语义与 CLI `--fail-only` 一致）。
@@ -126,8 +135,8 @@ def build_report(method=None, log_dir=None, limit=5, grep=None,
     ledger_total = len(_all_entries)
 
     # ── 决定候选集 ──────────────────────────────────────────
-    # 有 method/node 过滤 ⇒ 从账本出发（但只覆盖有账本的部分）
-    # 只有 grep        ⇒ 从磁盘全量出发（覆盖 100%）
+    # 有 method/node 过滤 -> 从账本出发（但只覆盖有账本的部分）
+    # 只有 grep        -> 从磁盘全量出发（覆盖 100%）
     from_ledger = bool(method) or ok_only is not None or fail_only
     if from_ledger:
         candidates = [(rid, os.path.join(d, rid + ".json")) for rid in ledger_by_id]
@@ -135,7 +144,7 @@ def build_report(method=None, log_dir=None, limit=5, grep=None,
         candidates = [(n[:-5], os.path.join(d, n)) for n in all_files]
 
     # grep：在响应原文里找子串（覆盖全部）
-    # ⚠️ `scannedFiles` 与 `matchedFiles` 必须分开报（2026-10-06 实测踩过）：
+    # [!] `scannedFiles` 与 `matchedFiles` 必须分开报（2026-10-06 实测踩过）：
     #    第一版只报"搜索范围 = len(candidates)"，那是 **grep 过滤之后**的数量，
     #    于是 `grep='"count":44'` 显示成"搜索范围: 3"——看着像只搜了 3 个文件，
     #    实际扫了全部 12991 个、命中 3 个。**口径混淆会把"扫全量"说成"只搜3个"。**
@@ -268,7 +277,7 @@ def _render(method, grep, ok_only, fail_only, items, total, ledger_total,
         if method:
             L.append("    注意：按 method 检索**只能覆盖有账本记录的响应**"
                      "（实测 2490/%d）。若你确定那次调用发生过，" % total)
-            L.append("    可能是它早于账本启用 ⇒ 请改用 grep= 在响应原文里搜（覆盖全部）。")
+            L.append("    可能是它早于账本启用 -> 请改用 grep= 在响应原文里搜（覆盖全部）。")
         return "\n".join(L)
 
     L.append("-" * 74)
@@ -299,3 +308,58 @@ def _render(method, grep, ok_only, fail_only, items, total, ledger_total,
             L.append("   原文头: %s" % it["rawHead"].replace("\n", " ")[:240])
         L.append("")
     return "\n".join(L)
+
+
+def main(argv=None):
+    """CLI 入口（与同目录 `bl_analyze.py` / `bl_crash.py` 同惯例）。
+
+    [!] **2026-10-06 补**：与 `bl_json_health.py` 同批并入时**漏了 CLI 入口**，
+    直接跑会静默 exit=0 什么都不做（详见 `bl_json_health.main` 的说明）。
+    同目录既有工具**全都有** `__main__`，所以这是不一致。
+
+    用法：
+        python tools/bl_ipc_replay.py --method get_patches --limit 3
+        python tools/bl_ipc_replay.py --grep '"count":44'
+        python tools/bl_ipc_replay.py --okOnly false --limit 5
+        python tools/bl_ipc_replay.py --method start_battle --okOnly false --full
+    退出码：找到匹配 => 0；没找到 => 1；目录不存在 => 2。
+    """
+    import argparse
+    import bl_common
+
+    bl_common.safe_streams()
+
+    ap = argparse.ArgumentParser(description="BlBridge IPC 响应缓存检索")
+    ap.add_argument("--method", default=None, help="按账本方法名过滤（只在有账本的响应里找）")
+    ap.add_argument("--grep", default=None, help="在响应原文里搜子串（覆盖全部，不依赖账本）")
+    ap.add_argument("--okOnly", default=None, choices=["true", "false"],
+                    help="true=只看成功 / false=只看失败（按信封 ok）")
+    ap.add_argument("--limit", type=int, default=5, help="最多返回几份响应明细")
+    ap.add_argument("--full", action="store_true", help="带完整响应体")
+    ap.add_argument("--oldestFirst", action="store_true", help="按时间正序（默认倒序）")
+    ap.add_argument("--logDir", default=None, help="日志目录")
+    ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    ok_only = None
+    if args.okOnly is not None:
+        ok_only = (args.okOnly == "true")
+
+    res = build_report(method=args.method, log_dir=args.logDir, limit=args.limit,
+                       grep=args.grep, ok_only=ok_only, full=args.full,
+                       newest_first=not args.oldestFirst)
+    if not res.get("ok"):
+        print(res.get("detail") or "检索失败")
+        return 2
+
+    if args.json:
+        out = dict(res)
+        out.pop("report", None)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+    else:
+        print(res["report"])
+    return 0 if res.get("returned") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

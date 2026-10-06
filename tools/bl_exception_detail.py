@@ -17,9 +17,9 @@ BlBridge 异常采集口径说明 + 记录读取（宿主侧，只读，仅标�
 **原因**（`src/ExceptionProbe.cs`）：
   * 去重键 = `(类型全名 + "|" + 栈首帧)`            —— `:194`
   * **只在 `count == 1` 时落盘**，之后只累加内存计数 —— `:198`
-  * ⇒ 同一键不论出现多少次，jsonl 里**永远只有 1 行**
+  * -> 同一键不论出现多少次，jsonl 里**永远只有 1 行**
 
-⇒ **jsonl 是"首次出现"明细通道，不是频率表。**
+-> **jsonl 是"首次出现"明细通道，不是频率表。**
    要频率必须读 `bl_exceptions` 的 `top[]`（内存态，进程内累积），
    或读 `commands/done/*.json` 里历史响应的 `count` 字段（见 `bl_ipc_replay`）。
 
@@ -38,24 +38,24 @@ BlBridge 异常采集口径说明 + 记录读取（宿主侧，只读，仅标�
 —— **这是 BCL 的抛助记帧，与调用者无关**。
 
 **原因**：回调里只取栈的**第一帧**（`:155-162`，"回调里不做大字符串操作"）。
-⚠️ 而 `:155` 的注释写"完整栈在主线程排空时按需再取" ——
+[!] 而 `:155` 的注释写"完整栈在主线程排空时按需再取" ——
 **但全文件 `StackTrace` 只出现一次**，排空路径里没有那段代码。
-⇒ **调用者信息在采集那一刻就被丢弃，事后无法恢复。**
+-> **调用者信息在采集那一刻就被丢弃，事后无法恢复。**
 
-⇒ **推论**：若某异常的 `stackHead` 落在 BCL 抛助记帧上（`ThrowXxxException`），
+-> **推论**：若某异常的 `stackHead` 落在 BCL 抛助记帧上（`ThrowXxxException`），
    **它的来源在当前数据里不可判定** —— 任何进一步归因都是编造。
 
 ### 坑 4：`t=session` 分段 = 游戏进程重启
 
 每个游戏进程启动会追加一条 `{"t":"session", ...}`，**并把内存计数清零**。
-⇒ 跨段累加 `seen` 是**错的**（那是多个进程各自的计数）。
+-> 跨段累加 `seen` 是**错的**（那是多个进程各自的计数）。
    实测：4 段 / 4 个 pid。
 
 ### 坑 5：采集有结构性盲区（不是"没抓到＝没发生"）
 
 `ExceptionProbe.cs:39` 自己写明：
   * **只记托管异常**（FirstChance，含**被 catch 掉的**）；
-  * **JIT 期失败**与**原生崩溃**结构上抓不到 ⇒ 那两类必须用 `bl_crash`（minidump）。
+  * **JIT 期失败**与**原生崩溃**结构上抓不到 -> 那两类必须用 `bl_crash`（minidump）。
 
 ### 坑 6：`dropped > 0` 时"计数仍准、明细不全"
 
@@ -73,20 +73,29 @@ import collections
 import io
 import json
 import os
+import sys
 import time
 
 import bl_common
+
+# [!] 把本目录加进 sys.path（见 `bl_analyze.py:25-27` 惯例）。
+#    `import bl_common` 在**被 import 成模块**时没问题（调用方已设好 path），
+#    但**直接跑 CLI** 时需要这一段 —— 否则 ModuleNotFoundError。
+#    ★ 2026-10-06 补：本文件最初并入时漏了 CLI 入口与 `import sys`。
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 # 硬编码的采集边界（源码 ExceptionProbe.cs 已核实，改源码时这里要同步）
 BLIND_SPOTS = (
     "只记**托管异常**（FirstChance，含被 catch 掉的）",
     "**JIT 期失败**抓不到（不在任何被 patch 的方法体内）",
-    "**原生崩溃**抓不到（托管处理器结构上不可见）⇒ 那两类用 bl_crash / WER minidump",
+    "**原生崩溃**抓不到（托管处理器结构上不可见）-> 那两类用 bl_crash / WER minidump",
 )
 MAX_QUEUED = 4096          # ExceptionProbe 的环形上限
 STACKHEAD_FRAMES = 1       # 只取第一帧（ExceptionProbe.cs:155-162）
 
-# "抛助记帧"的判据：栈首帧落在 BCL 的 ThrowXxxException 上 ⇒ 与调用者无关
+# "抛助记帧"的判据：栈首帧落在 BCL 的 ThrowXxxException 上 -> 与调用者无关
 _THROWER_HINTS = ("ThrowCryptographicException", "ThrowHelper",
                   "ThrowArgumentException", "ThrowIOException")
 
@@ -131,7 +140,7 @@ def read_records(path=None, log_dir=None):
 
 
 def _is_thrower_frame(head):
-    """判断 stackHead 是否落在 BCL 抛助记帧上（⇒ 来源不可判定）。"""
+    """判断 stackHead 是否落在 BCL 抛助记帧上（-> 来源不可判定）。"""
     if not head:
         return False
     return any(h in head for h in _THROWER_HINTS)
@@ -144,10 +153,10 @@ def build_report(log_dir=None, path=None, type_filter=None, limit=20, explain=Tr
         type_filter  只列这个类型（子串匹配，如 "Cryptographic"）。
         limit        最多列几条明细。
         explain      是否附口径说明（默认 True —— 本工具的主价值就在这）。
-                     ⚠️ `explain=False` 时 **`report` 是空串**（调用方只要机器字段）。
+                     [!] `explain=False` 时 **`report` 是空串**（调用方只要机器字段）。
                      所以**断言"文本里说了什么"必须开 explain**
                      —— 本工具自测 2026-10-06 踩过：用 `explain=False` 却断言 report
-                     内容 ⇒ 断言恒失败，且看着像功能缺失。
+                     内容 -> 断言恒失败，且看着像功能缺失。
     """
     records, stats = read_records(path=path, log_dir=log_dir)
 
@@ -164,7 +173,7 @@ def build_report(log_dir=None, path=None, type_filter=None, limit=20, explain=Tr
                 segments.append(cur)
             cur["events"].append(r)
 
-    # 按类型的**行数**统计（⚠️ 这不是频次！）
+    # 按类型的**行数**统计（[!] 这不是频次！）
     by_type = collections.Counter(e.get("type") for s in segments for e in s["events"])
     # 按 (type, stackHead) 组合
     by_key = collections.Counter(
@@ -217,7 +226,7 @@ def build_report(log_dir=None, path=None, type_filter=None, limit=20, explain=Tr
         # 口径元数据（给机器消费者，不必解析 report 文本）
         "semantics": {
             "rowsAreNotCounts": True,
-            "why": "去重键 =(类型|栈首帧)，只在 count==1 时落盘 ⇒ 同键永远只有 1 行",
+            "why": "去重键 =(类型|栈首帧)，只在 count==1 时落盘 -> 同键永远只有 1 行",
             "seqMeans": "排空那刻的全局 _totalSeen 快照，不是序号、不是该异常计数",
             "tickMeans": "该键首次排空时的 tickCounter，不是发生时刻",
             "stackHeadFrames": STACKHEAD_FRAMES,
@@ -264,7 +273,7 @@ def _render(stats, segments, by_type, by_key, shown, total_shown, per_seg,
              % STACKHEAD_FRAMES)
     L.append("   => 若某条的 stackHead 落在 `ThrowXxxException` 上，它的**来源在当前数据里不可判定**。")
     L.append("   => 源码注释称'排空时按需取完整栈'，但**该代码不存在**（全文件 StackTrace 仅 1 处）。")
-    L.append("5) `t=session` 分段 = **游戏进程重启**（内存计数随之清零）⇒ **跨段累加 seen 是错的**。")
+    L.append("5) `t=session` 分段 = **游戏进程重启**（内存计数随之清零）-> **跨段累加 seen 是错的**。")
     L.append("6) 采集有结构性盲区：")
     for b in BLIND_SPOTS:
         L.append("   - %s" % b)
@@ -306,7 +315,7 @@ def _render(stats, segments, by_type, by_key, shown, total_shown, per_seg,
 
     # ★ 尾部汇总：即使调用方**没按类型过滤**，也要把"哪些条目的来源不可判定"点出来。
     #   实测踩过（2026-10-06，本工具自测 ④ 抓到）：最初只在**明细行内**给提示，
-    #   而不过滤时读者更容易把整份列表当成"都是可归因的" ⇒ 必须在结尾再汇总一次。
+    #   而不过滤时读者更容易把整份列表当成"都是可归因的" -> 必须在结尾再汇总一次。
     undecidable = [it for it in shown if it["stackHeadIsThrower"]]
     if undecidable:
         types = sorted(set(it["type"] for it in undecidable))
@@ -319,3 +328,51 @@ def _render(stats, segments, by_type, by_key, shown, total_shown, per_seg,
         L.append("      · 补采集多帧栈（改 ExceptionProbe），或")
         L.append("      · 做 A/B：bl_launch_game 的 excludeModules（同一次启动只差一个模块）。")
     return "\n".join(L)
+
+
+def main(argv=None):
+    """CLI 入口（与同目录 `bl_analyze.py` / `bl_crash.py` 同惯例）。
+
+    [!] **2026-10-06 补**：与另两个新工具同批并入时**漏了 CLI 入口**，
+    直接跑会静默 exit=0（详见 `bl_json_health.main` 的说明）。
+
+    用法：
+        python tools/bl_exception_detail.py                          # 全部口径 + 明细
+        python tools/bl_exception_detail.py --type Cryptographic
+        python tools/bl_exception_detail.py --noExplain              # 只要机器字段
+        python tools/bl_exception_detail.py --json
+    退出码：读到文件 => 0；文件不存在 => 1。
+    """
+    import argparse
+    import bl_common
+
+    bl_common.safe_streams()
+
+    ap = argparse.ArgumentParser(description="BlBridge 异常采集口径说明 + 记录读取")
+    ap.add_argument("--type", default=None, help="只看这个异常类型（子串匹配）")
+    ap.add_argument("--limit", type=int, default=20, help="最多列几条明细")
+    ap.add_argument("--noExplain", action="store_true", help="不附口径说明（只要机器字段）")
+    ap.add_argument("--path", default=None, help="直接指定 exceptions.jsonl 路径")
+    ap.add_argument("--logDir", default=None, help="日志目录")
+    ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    res = build_report(log_dir=args.logDir, path=args.path, type_filter=args.type,
+                       limit=args.limit, explain=not args.noExplain)
+    if args.json:
+        out = dict(res)
+        out.pop("report", None)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+    else:
+        # [!] explain=False 时 report 是空串（设计如此）-> 这里兜一句，
+        #    避免"跑完什么也不打印"被误读成"没读到文件"。
+        if args.noExplain and not res.get("report"):
+            print(json.dumps({k: v for k, v in res.items() if k != "report"},
+                             ensure_ascii=False, indent=1))
+        else:
+            print(res.get("report") or "")
+    return 0 if res.get("exists") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

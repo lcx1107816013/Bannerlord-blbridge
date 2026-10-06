@@ -47,7 +47,18 @@ IPC 侧 json 解析失败 -> 客户端**一直等到超时**，而响应其实�
 import io
 import json
 import os
+import sys
 import time
+
+# [!] 必须把本目录加进 sys.path —— 否则**直接跑 CLI**（`python tools/bl_json_health.py`）
+#    时 `import bl_common` / `import bl_analyze` 会 ModuleNotFoundError
+#    （被 import 成模块时不会有问题，所以只有 CLI 路径踩得到）。
+#    这是本项目既有惯例，见 `bl_analyze.py:25-27`。
+#    ★ 2026-10-06 补：本文件最初并入时**漏了这段 + 漏了 `import sys` + 漏了 `main()`**，
+#      三缺叠加 -> 直接跑**静默 exit=0 什么都不做**（两个并行测量者都独立复现）。
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
 
 
 def default_done_dir(log_dir=None):
@@ -205,3 +216,56 @@ def build_report(directory=None, log_dir=None, limit=20):
     out["badTruncated"] = max(0, res["malformed"] - len(out["bad"]))
     out["report"] = "\n".join(lines)
     return out
+
+
+def main(argv=None):
+    """CLI 入口（与同目录 `bl_analyze.py` / `bl_crash.py` / `bl_blockade.py` 同惯例）。
+
+    [!] **本函数是 2026-10-06 补的，补的是一个我自己引入的缺陷**：
+    最初并入仓库时只写了 `scan()` / `build_report()` 两个**库函数**，
+    **没有 `main()`、没有 `__main__` 块** -> 直接 `python tools/bl_json_health.py`
+    会**什么都不做、静默 exit=0**（只是解释器启动开销，约 30ms）。
+
+    危害不只是"CLI 不能用"：它会让**性能测量得出虚假结论** ——
+    实测有人（包括我自己）把 30ms 当成"全量解析 12991 个文件的耗时"，
+    而真实耗时约 **705ms**（冷缓存首次 1.17s），差 **23 倍**。
+    -> 两个并行测量者都独立复现了这个坑（2026-10-06 A/B 双路）。
+    同目录既有工具**全都有** `__main__`（`bl_crash` / `bl_blockade` / `bl_analyze`），
+    所以这是**不一致**，不是设计选择。
+
+    用法：
+        python tools/bl_json_health.py                 # 默认扫 BlBridge 的 commands\\done
+        python tools/bl_json_health.py --dir <path>
+        python tools/bl_json_health.py --json
+        python tools/bl_json_health.py --limit N
+    退出码：发现畸形 JSON => 1（可做闸门）；全好 => 0；目录不存在 => 2。
+    """
+    import argparse
+    import bl_common
+
+    bl_common.safe_streams()          # 输出统一 UTF-8（见 safe_streams docstring）
+
+    ap = argparse.ArgumentParser(description="BlBridge IPC 响应完整性体检")
+    ap.add_argument("--dir", default=None,
+                    help="要扫描的目录（默认 BlBridge 的 commands\\done）")
+    ap.add_argument("--logDir", default=None, help="日志目录（用于推导 done 目录）")
+    ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    ap.add_argument("--limit", type=int, default=20, help="最多几条坏文件明细")
+    args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    res = build_report(directory=args.dir, log_dir=args.logDir, limit=args.limit)
+    if not res.get("ok"):
+        print(res.get("detail") or "扫描失败")
+        return 2
+
+    if args.json:
+        out = dict(res)
+        out.pop("report", None)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+    else:
+        print(res["report"])
+    return 1 if res.get("malformed") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
