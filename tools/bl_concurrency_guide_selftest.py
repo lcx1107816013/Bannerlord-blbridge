@@ -157,6 +157,57 @@ def test_missing_ledger():
           "报告如实报账本为空")
 
 
+def test_4b_group():
+    """★ v0.8.47：`4b` 小模型窄工具面组必须存在、且**成本不退化**。
+
+    ## 为什么锁这条
+    `BLBRIDGE_TOOLSET=4b` 是为 4B 级模型准备的窄面（10 个工具）。
+    它靠**名字**引用工具 ⇒ 一旦有人给某个工具改名，**不会报错**、
+    只会让该工具**从这个组里静默消失**（4B 于是缺能力但不自知）。
+    ⇒ 用「组内每个名字都真实存在于 TOOLS」当机器闸门。
+
+    另锁一条**成本上限**：整组 `tools/list` 字节数不得超过阈值。
+    理由：这个组的**全部意义**就是"小到 4B 能用"；
+    若将来往组里加工具导致它膨胀，**功能还在、目的已失**（静默劣化）。
+    """
+    print("\n⑦ `4b` 窄工具面（小模型专用）")
+    import json as _json
+    import bl_mcp as _m
+
+    if "4b" not in _m.TOOL_GROUPS:
+        check(False, "`4b` 组存在", "缺该组 ⇒ BLBRIDGE_TOOLSET=4b 会抛未知组名")
+        return
+    check(True, "`4b` 组存在")
+
+    names = _m.TOOL_GROUPS["4b"]
+    declared = set(t["name"] for t in _m.TOOLS)
+    missing = [n for n in names if n not in declared]
+    check(not missing,
+          "组内 %d 个名字都真实存在于 TOOLS（改名不会让它静默消失）" % len(names),
+          "不存在的名字: %s" % missing)
+
+    # 成本上界（实测 14,752 字节；留 15% 余量）
+    sel = [t for t in _m.TOOLS if t["name"] in names]
+    b = len(_json.dumps(sel, ensure_ascii=False).encode("utf-8"))
+    check(len(sel) == len(names), "组内工具都能在 TOOLS 里取到", (len(sel), len(names)))
+    check(b <= 17000,
+          "整组 %d 字节 <= 17000（防静默膨胀；实测 %d）" % (b, b), b)
+
+    # ② 关键能力必须在（用户明确"开战测试"属 mod 测试）
+    for must in ("bl_start_battle", "bl_wait_for_state", "bl_crash", "bl_status"):
+        check(must in names, "含必备工具 %s" % must, names)
+
+    # ③ 零争用工具应占多数（宿主侧不碰 pending/，4B 并发安全）
+    try:
+        tmap = G.tool_method_map()
+        host = [n for n in names if tmap.get(n) == []]
+        check(len(host) >= 5,
+              "组内至少 5 个是**零争用**宿主侧（实测 %d 个：%s）"
+              % (len(host), ", ".join(host)), host)
+    except Exception as exc:                       # noqa: BLE001
+        check(False, "能解析工具→通道方法", exc)
+
+
 def main():
     bl_common.safe_streams()
     print("=" * 88)
@@ -168,6 +219,7 @@ def main():
         test_budget()
         test_unknown_vs_host()
         test_missing_ledger()
+        test_4b_group()
     finally:
         shutil.rmtree(CASE, ignore_errors=True)
         shutil.rmtree(os.path.join(HERE, "_blcg_nodir"), ignore_errors=True)

@@ -1772,6 +1772,43 @@ TOOL_GROUPS = {
     "desktop": [
         "bl_desktop_windows", "bl_desktop_screenshot", "bl_desktop_click", "bl_desktop_key",
     ],
+    # ── ★ v0.8.47：`4b` —— 为小模型（4B 级）准备的窄工具面 ──────────────
+    #
+    # ## 为什么单独成组
+    #
+    # 全量 55 个工具的 `tools/list` = **59,973 字节 ≈ 17,428 token**（实测）。
+    # 4B 级模型上下文预算小、且**工具选择能力弱** ⇒ 塞全量基本不可用。
+    #
+    # 本组按**真实用途**挑选（用户 2026-10-06 明确：mod 测试 / 查 bug / 只读分析现状），
+    # 实测 **10 个工具 = 5,048 字节 ≈ 1,420 token（占全量 8%）**。
+    #
+    # ## 选材依据（不是拍脑袋，见 `bl_concurrency_guide` 的实测分档）
+    #
+    #   ① **零争用优先**：宿主侧工具不碰 `pending/`，8 路并发实测总墙钟 0.24s
+    #      ⇒ `bl_crash` / `bl_status` / `bl_analyze` / `bl_list_battles` / `bl_read_events`
+    #   ② **诊断核心**：查 bug 的四件套（崩溃 / 异常 / 补丁失败）
+    #   ③ **开战必须有**：用户明确"开战测试属于 mod 测试"
+    #      ⚠️ 但 `bl_start_battle` **单工具就 8,278 字节（2,400 tok）**——
+    #         32 个属性里 **24 个是实验/调试专用**（说明合计 4,469 字节）。
+    #         本组**只做工具过滤、不改 schema**（用户裁定："先不砍"）
+    #         ⇒ 强模型看全量时行为**一个字节不变**。
+    #   ④ **统计**：`bl_concurrency_guide` 判 `bl_start_battle` 为 **HEAVY（p90 605ms）**
+    #      ⇒ 4B 调它时**不要并发**（纪律见该工具）。
+    #
+    # ## 边界（如实）
+    #
+    #   · 本组**只影响 `tools/list` 暴露面**，不改变任何工具的行为；
+    #   · **不默认启用** —— 用 `BLBRIDGE_TOOLSET=4b` 显式切换；
+    #   · `bl_wait_for_state` 必须与 `bl_start_battle` 同组（开战后的配套等待）。
+    "4b": [
+        # ① 零争用（宿主侧，不占串行泵）
+        "bl_status", "bl_crash", "bl_exceptions", "bl_patch_failures",
+        "bl_list_battles", "bl_analyze", "bl_read_events",
+        # ② 游戏内只读（轻通道，p90 ≤ 1ms）
+        "bl_battle_status",
+        # ③ 开战 + 配套等待（HEAVY，勿并发）
+        "bl_start_battle", "bl_wait_for_state",
+    ],
 }
 
 
