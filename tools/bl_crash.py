@@ -108,23 +108,69 @@ def _crash_dir():
     return os.path.join(os.environ.get("LOCALAPPDATA", ""), "CrashDumps")
 
 
+def _blbridge_crash_dir(log_dir=None):
+    """BlBridge 自己落的 dump 目录：`<LogDir>\\crashes`（B2 / v0.8.48 起）。
+
+    ★ 为什么必须单独认这个目录：WER 的 dump **缺 `MemoryInfoList`**（实测 0/6 份），
+    而 BlBridge 落的**带页保护**（flags 含 `0x800`）⇒ 两者**信息量不同**，
+    报告里必须能**分清哪份是哪份**，不能混为一谈。
+    """
+    if log_dir is None:
+        try:
+            from bl_common import default_log_dir
+            log_dir = default_log_dir()
+        except Exception:  # noqa: BLE001
+            log_dir = os.path.join(os.path.expanduser("~"), "Documents",
+                                   "Mount and Blade II Bannerlord", "BlBridge")
+    return os.path.join(log_dir, "crashes")
+
+
 def _wer_dirs():
     pd = os.environ.get("ProgramData", r"C:\ProgramData")
     return [os.path.join(pd, "Microsoft", "Windows", "WER", "ReportArchive"),
             os.path.join(pd, "Microsoft", "Windows", "WER", "ReportQueue")]
 
 
-def list_dumps(name_filter="Bannerlord", log_dir=None):
+def _minidump_flags(path):
+    """读 minidump 头部的 flags（第 6 个 DWORD）。失败返回 None。
+
+    ★ 用途：区分 **BlBridge 落的 dump（含 `0x800` = 有页保护）** 与 **WER 的（不含）**。
+    实测 WER = `0x200121`、BlBridge = `0x201921`，**只差 `0x800` 那一位**。
+    """
+    try:
+        # ⚠️ 用内置 `open` 而非 `io.open`：本文件**没有** `import io`
+        #    （它与 `bl_mcp.py` 不同 —— 那边 import 了 io，照抄会 NameError）。
+        with open(path, "rb") as fh:
+            head = fh.read(32)
+    except OSError:
+        return None
+    if len(head) < 32 or head[:4] != b"MDMP":
+        return None
+    try:
+        return struct.unpack_from("<I", head, 24)[0]
+    except struct.error:
+        return None
+
+
+MINIDUMP_WITH_FULL_MEMORY_INFO = 0x00000800
+
+
+def list_dumps(name_filter="Bannerlord", log_dir=None, include_blbridge=True):
     """列出可用 dump，新的在前。
 
-    ⚠️ 两个来源都要看，它们**不是同一件事**（实测本机两者都有，且时间戳能对上）：
-      - `%LOCALAPPDATA%\\CrashDumps\\<exe>.<pid>.dmp` —— ★ **文件名带 pid**，
+    ⚠️ **三个来源不是同一件事**，报告里必须分清（实测本机前两者都有）：
+
+      - `%LOCALAPPDATA%\\CrashDumps\\<exe>.<pid>.dmp` —— WER 落的，★ **文件名带 pid**，
         这是与 BlBridge 状态文件对接的关键（能回答"崩的是不是桥接的那个进程"）；
+        ⚠️ **实测 0/6 份带 `MemoryInfoList`** ⇒ **没有页保护**；
+      - **`<LogDir>\\crashes\\blbridge-*.dmp`** —— ★ **BlBridge 自己落的（B2 / v0.8.48）**，
+        显式带 `MiniDumpWithFullMemoryInfo(0x800)` ⇒ **有页保护**，
+        这是区分"模块外内存是 JIT 还是 Harmony detour"的**唯一**依据；
       - WER `ReportArchive\\AppCrash_*\\` —— 目录里有 `Report.wer`，
         含**已解析好的**崩溃签名（`Sig[3] 故障模块` / `Sig[6] 异常代码`），
         可用来**交叉验证**本工具的解析结果。
 
-    返回 [{path, pid, exe, size, mtime, source}]，pid 可能为 None（WER 那份）。
+    返回 [{path, pid, exe, size, mtime, source, flags, hasMemoryInfo}]。
     """
     out = []
     for p in glob.glob(os.path.join(_crash_dir(), "*.dmp")):
@@ -142,8 +188,37 @@ def list_dumps(name_filter="Bannerlord", log_dir=None):
             st = os.stat(p)
         except OSError:
             continue
+        fl = _minidump_flags(p)
         out.append({"path": p, "pid": pid, "exe": exe, "size": st.st_size,
-                    "mtime": st.st_mtime, "source": "CrashDumps"})
+                    "mtime": st.st_mtime, "source": "CrashDumps",
+                    "flags": fl,
+                    "hasMemoryInfo": (fl is not None
+                                      and bool(fl & MINIDUMP_WITH_FULL_MEMORY_INFO))})
+
+    # ★ BlBridge 自己落的（B2）：**信息量更大**（带页保护），所以单独一个 source 标记。
+    # ⚠️ 刻意**不套 name_filter**：`blbridge-*.dmp` 的文件名里不含 exe 名（如 Bannerlord），
+    #    套了就会被默认过滤挡掉 —— 而它恰恰是我们最想要的那份。
+    if include_blbridge:
+        bb = _blbridge_crash_dir(log_dir)
+        for p in glob.glob(os.path.join(bb, "*.dmp")):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            fl = _minidump_flags(p)
+            # 文件名形如 `blbridge-native-pid1234-20261006-183000.dmp`
+            pid = None
+            m = re.search(r"-pid(\d+)-", os.path.basename(p))
+            if m:
+                pid = int(m.group(1))
+            out.append({"path": p, "pid": pid,
+                        "exe": "Bannerlord(BlBridge)",
+                        "size": st.st_size, "mtime": st.st_mtime,
+                        "source": "BlBridge",
+                        "flags": fl,
+                        "hasMemoryInfo": (fl is not None
+                                          and bool(fl & MINIDUMP_WITH_FULL_MEMORY_INFO))})
+
     out.sort(key=lambda d: d["mtime"], reverse=True)
     return out
 
@@ -247,6 +322,30 @@ def _md_string(data, rva):
         return ""
 
 
+def _read_exception_sidecar(path):
+    """读 BlBridge 落的同名 sidecar（`<dump>.exception.json`）。失败返回 None。
+
+    ★ 为什么需要它（真机 + 探针实测的硬结论）：
+    BlBridge 在崩溃回调里**不能**把异常上下文交给 `dbghelp` ——
+    传非零 `ExceptionParam` 会让它**内部访问违规**（dump 变 **0 字节**）。
+    九种可能已逐个排除（结构体布局=24 正确 / flags / ClientPointers /
+    ThreadId / 分配位置 / 指针有效性 / 参数畸形 / dbghelp 版本 / 崩溃来源）。
+    ⇒ 改成**传 NULL 写 dump**（照样带 `MemoryInfoList`）+ **自己解引用
+    `EXCEPTION_POINTERS`** 落 sidecar。
+    ⇒ 所以对 BlBridge 的崩溃 dump，"异常码/故障地址"在 sidecar 里，
+      **读它就等于读 `Exception(6)` 流**。
+    """
+    sp = path + ".exception.json"
+    if not os.path.isfile(sp):
+        return None
+    try:
+        with open(sp, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def parse_dump(path, want_stack=False):
     """解析一份 minidump，返回结构化结果。**不抛异常**：坏文件也返回带 error 的 dict。
 
@@ -255,6 +354,9 @@ def parse_dump(path, want_stack=False):
       2. 读模块表 ⇒ 把地址映射成 `模块名+偏移`（★ 这是"崩在谁身上"的答案）；
       3. 可选：穷人的栈回溯 —— 扫 RSP 附近的指针，挑出落在已知模块内的值，
          按栈顺序给出"调用链上出现过哪些模块"。**不需要调试器也不需要 pdb**。
+
+    ★ 无 `Exception(6)` 流时**回退到 sidecar**（`<dump>.exception.json`，
+    由 BlBridge 自己解引用 `EXCEPTION_POINTERS` 写出）—— 见 `_read_exception_sidecar`。
     """
     out = {"file": os.path.basename(path), "path": path}
     try:
@@ -356,6 +458,54 @@ def parse_dump(path, want_stack=False):
             pass
     out["exception"] = exc
 
+    # ★ 回退：没有 `Exception(6)` 流时，读 BlBridge 落的 sidecar。
+    #   为什么必须有这一步：BlBridge 的崩溃 dump **天然没有 Exception(6)** ——
+    #   它在崩溃回调里不能把异常上下文交给 dbghelp（传了会让 dbghelp
+    #   **内部访问违规**、dump 变 0 字节；九种可能已逐个排除）。
+    #   ⇒ 它改成"传 NULL 写 dump + 自己解引用 EXCEPTION_POINTERS 落 sidecar"。
+    #   ⇒ 不读 sidecar 的话，我们**自己落的崩溃 dump 会说"无法归因"** ——
+    #     那等于白丢了最关键的崩溃签名（WER 那份反而有）。
+    if exc is None:
+        sc = _read_exception_sidecar(path)
+        if sc:
+            try:
+                code = int(str(sc.get("exceptionCode", "0")).replace("0x", ""), 16)
+            except (ValueError, TypeError):
+                code = 0
+            exc_addr = 0
+            try:
+                exc_addr = int(str(sc.get("exceptionAddress", "0")).replace("0x", ""), 16)
+            except (ValueError, TypeError):
+                pass
+            exc = {
+                "thread_id": sc.get("threadId"),
+                "code": "0x%08X" % code,
+                "code_hex": code,
+                "name": EXC_NAMES.get(code, "(未收录的异常代码)"),
+                "flags": sc.get("exceptionFlags"),
+                "address": exc_addr,
+                "address_hex": "0x%016X" % exc_addr,
+                "address_symbol": addr_mod(exc_addr),
+                "nparams": sc.get("numberParameters", 0),
+                # ★ 来源标注：这不是 dump 里的流，是 sidecar ⇒ 报告里要能看出来
+                "from_sidecar": True,
+                "sidecar": path + ".exception.json",
+            }
+            if sc.get("accessType"):
+                exc["access_type"] = {"read": "读", "write": "写"}.get(
+                    sc.get("accessType"), sc.get("accessType"))
+            if sc.get("accessTarget"):
+                try:
+                    tgt = int(str(sc["accessTarget"]).replace("0x", ""), 16)
+                    exc["access_target"] = "0x%016X" % tgt
+                    exc["access_target_symbol"] = (addr_mod(tgt)
+                                                   or "未映射（野指针 / 空指针附近）")
+                except (ValueError, TypeError):
+                    pass
+            if sc.get("contextRip"):
+                exc["registers"] = {"Rip": str(sc["contextRip"])}
+            out["exception"] = exc
+
     # 归因：崩溃地址落在谁身上？落不到任何模块 = 跳到了非法地址（本身是强信号）
     if exc:
         out["blame"] = exc.get("address_symbol") or "不在任何已加载模块内（跳转到非法地址）"
@@ -375,7 +525,6 @@ def parse_dump(path, want_stack=False):
         out["blame"] = None
         out["family"] = None
         out["escalate"] = "无异常流（可能是手动 dump 或进程被强杀）⇒ 无崩溃签名可归因"
-
     # ── 穷人的栈回溯（可选）──────────────────────────────────────────
     # 思路：x64 栈上散布着返回地址。扫 RSP 起 8KB，把落在**已知模块**范围内的
     # 8 字节值挑出来，按出现顺序即"调用链上出现过哪些模块"。
@@ -464,7 +613,15 @@ CDB_TIMEOUT_SEC = 120
 #   !pe             —— 托管异常对象（类型 + Message + 托管栈）；对 0xE0434352 是主力
 #   !clrstack       —— 托管调用栈；对原生访问违规也常有值（CLR 自己记着）
 #   !analyze -v     —— 拿 FAILURE_BUCKET_ID / SYMBOL_NAME / MODULE_NAME
-_cdb_script = (" .loadby sos clr; .ecxr; !pe; !clrstack; !analyze -v; q ")
+# ★ 原生调用链（2026-10-06 加）：原脚本只有 `!pe`/`!clrstack`（**都是托管**），
+#   所以原生崩溃拿不到原生栈。实测三条原生命令都可用（6 份 dump 全测过）：
+#     `.ecxr; kv`      —— 崩溃线程原生栈（仅在异常上下文**可用**时有效；实测 1/6 份）
+#     `~*kv`           —— **所有**线程原生栈（**永远有**，实测 1400~1770 帧/份）
+#     `.ecxr; dps @rsp`—— 栈内存扫描兜底（上下文退化时的补充信号）
+#   ⚠️ 顺序有讲究：`~*kv` 要在 `.ecxr` **之后**跑一次、且它自己会切当前线程，
+#      所以把 `.ecxr` 再重申一次，保证 `dps @rsp` 仍在故障上下文里。
+_cdb_script = (" .loadby sos clr; .ecxr; !pe; !clrstack; kv; ~*kv; "
+               ".ecxr; dps @rsp L120; !analyze -v; q ")
 
 
 def find_cdb():
@@ -523,6 +680,182 @@ def find_cdb():
     return which("cdb")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ── 原生调用链（native stack）· 由 patch_bl_crash_native.py 注入 ──
+#
+# ## 设计（每条都对应一个实测结论）
+#
+# 1. **两档来源，且如实标注**：`ctxUsable=True` 时用 `.ecxr; kv`（崩溃线程精确）；
+#    退化时用 `~*kv` + 故障地址规则。**绝不把"全线程筛出的"说成"崩溃线程的"**。
+#
+# 2. **故障地址规则**（退化档的主力）：`~*kv` 每帧是
+#       `Child-SP  RetAddr : args : Call Site`
+#    若某帧的 `RetAddr == 异常记录的 ExceptionAddress`，那条 call 就是要调崩溃点
+#    ⇒ **崩溃点 = 下一帧的 Call Site**。
+#    实测：5/6 份 dump **恰好 1 条线程**含该地址（判据唯一）；
+#          定位结果与知识库独立吻合（含一份知识库原记"属主未定案"的）。
+#
+# 3. **不依赖寄存器**。退化档 `rip=0`、GPR 全 0，但上面的规则只用
+#    "异常地址" + "栈上返回地址"，**不需要任何寄存器** ⇒ 对 WER dump 尤其有效。
+#
+# 4. **帧判据要收紧**：要求 `Child-SP` 与 `RetAddr` 都是
+#    `8位十六进制`反引号`8位十六进制`，否则会把 `!analyze` 的杂行当成帧。
+#    （托管栈那边踩过同类坑：只判 `!` 且含 `+` 会把 `SYMBOL_NAME:` 收进来。）
+# ══════════════════════════════════════════════════════════════════════
+
+# `Child-SP  RetAddr : args : Call Site`（序号列可选 —— `.ecxr;kv` 无序号，`~*kv` 有）
+_NATIVE_FRAME_RE = re.compile(
+    r"^\s*(?:[0-9a-fA-F]{2}\s+)?"
+    r"([0-9a-fA-F]{8}`[0-9a-fA-F]{8})\s+"
+    r"([0-9a-fA-F]{8}`[0-9a-fA-F]{8})\s*:(.*)$")
+# 线程头：`# 3  Id: 6ffc.1234 Suspend: 1 Teb: ...`
+_THREAD_HDR_RE = re.compile(r"^\s*#?\s*(\d+)\s+Id:\s*([0-9a-fA-F.`]+).*$")
+# `r` 输出里的 rip
+_RIP_RE = re.compile(r"rip=([0-9a-fA-F`]+)")
+# 任何 GPR
+_GPR_RE = re.compile(r"\b(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r[89]|r1[0-5])=([0-9a-fA-F`]+)")
+
+
+def _hexnorm(addr):
+    """0x00007FF7D6D6345B -> '00007ff7`d6d6345b'（cdb 的写法）。"""
+    return ("%016x" % addr)[:8] + "`" + ("%016x" % addr)[8:]
+
+
+def _split_threads(lines):
+    """把 `~*kv` 输出按线程切开：返回 [ {idx, id, frames:[{sp,ret,site}]} ]。"""
+    threads, cur = [], None
+    for ln in lines:
+        m = _THREAD_HDR_RE.match(ln)
+        if m and "Id:" in ln:
+            cur = {"idx": m.group(1), "id": m.group(2), "frames": []}
+            threads.append(cur)
+            continue
+        fm = _NATIVE_FRAME_RE.match(ln)
+        if fm and cur is not None:
+            site = fm.group(3).rsplit(":", 1)[-1].strip()
+            if site and site not in ("0x0", "0x00000000`00000000", ""):
+                cur["frames"].append({"sp": fm.group(1), "ret": fm.group(2),
+                                      "site": site})
+    return threads
+
+
+def _ctx_usable(lines):
+    """异常上下文是否可用。
+
+    判据（实测）：**`rip` 非 0 且至少一个非 rsp 的 GPR 非 0**。
+    ⚠️ 不能只看 rip：本机 dump 28540 的 `rip=0` 但 `r10` 有值，
+       而 48356 的 `rip` 与多数 GPR 都有效。两者差别在**GPR 的丰度**。
+    实测：退化档 GPR 非零 0~2/28；可用档 26/28。
+    """
+    rip = None
+    gprs = []
+    for ln in lines:
+        if rip is None:
+            m = _RIP_RE.search(ln)
+            if m:
+                rip = m.group(1)
+        gprs.extend(_GPR_RE.findall(ln))
+    if rip is None and not gprs:
+        return None
+    rip_zero = (rip is None) or (rip.strip("0`") == "")
+    nonzero = [k for k, v in gprs if k.lower() != "rsp" and v.strip("0`") != ""]
+    # 可用 = rip 非 0，**且**非 rsp 的 GPR 里至少 3 个非 0（实测可用档 26/28）
+    return (not rip_zero) and len(nonzero) >= 3
+
+
+def _find_crash_site(threads, exc_addr_hex):
+    """用"故障地址 == 某帧 RetAddr"定位崩溃点。返回 (thread, caller, site, idx)。"""
+    if not exc_addr_hex:
+        return None
+    tgt = exc_addr_hex.lower()
+    for th in threads:
+        fr = th["frames"]
+        for i, f in enumerate(fr):
+            if f["ret"].lower() == tgt:
+                caller = f["site"]
+                site = fr[i + 1]["site"] if i + 1 < len(fr) else None
+                return th, caller, site, i
+    return None
+
+
+def _exc_address_hex(path):
+    """从 minidump 的 Exception 流拿故障地址（零依赖，纯标准库）。
+
+    流内布局：ThreadId(4)+Alignment(4) 之后是 EXCEPTION_RECORD：
+      Code(4) Flags(4) ExceptionRecord(8) ExceptionAddress(8)
+      NumberParameters(4) __unusedAlignment(4) ExceptionInformation[15]
+    ⇒ ExceptionAddress 在流内偏移 8+16 = 24。
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if data[:4] != b"MDMP":
+        return None
+    try:
+        (_v, n, dir_rva, _c, _t, _f) = struct.unpack_from("<IIIIII", data, 4)
+        for i in range(n):
+            st, _sz, rva = struct.unpack_from("<III", data, dir_rva + i * 12)
+            if st != 6:
+                continue
+            base = rva + 8
+            addr = struct.unpack_from("<Q", data, base + 16)[0]
+            return _hexnorm(addr) if addr else None
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
+def _parse_native(out, lines, dump_path=None):
+    """把原生栈解析进 out。**只填，不删**；拿不到就留空。"""
+    dump_path = dump_path or out.get("path")
+    usable = _ctx_usable(lines)
+    out["ctxUsable"] = usable
+
+    # ── 档 1：上下文可用 ⇒ `.ecxr; kv` 的帧就是崩溃线程的（精确）──
+    if usable:
+        # `.ecxr; kv` 的帧没有线程头；用 `!clrstack` 之后的第一段裸帧。
+        # 简化且稳的做法：取**第一段**连续帧（`.ecxr; kv` 在脚本里排在最前）。
+        first = []
+        started = False
+        for ln in lines:
+            fm = _NATIVE_FRAME_RE.match(ln)
+            if fm:
+                started = True
+                site = fm.group(3).rsplit(":", 1)[-1].strip()
+                if site and site not in ("0x0", ""):
+                    first.append({"sp": fm.group(1), "ret": fm.group(2), "site": site})
+                continue
+            if started and _THREAD_HDR_RE.match(ln):
+                break
+        if len(first) >= 3:
+            out["nativeFrames"] = first[:40]
+            out["nativeSource"] = "ecxr_kv"
+            return
+
+    # ── 档 2：退化 ⇒ 用故障地址在 `~*kv` 里定位崩溃线程 ──
+    exc_hex = _exc_address_hex(dump_path) if dump_path else None
+    threads = _split_threads(lines)
+    hit = _find_crash_site(threads, exc_hex) if exc_hex else None
+    if hit:
+        th, caller, site, idx = hit
+        out["crashCaller"] = caller
+        out["crashSite"] = site
+        out["nativeSource"] = "all_threads"
+        out["nativeThread"] = th["idx"]
+        out["nativeFaultAddr"] = exc_hex
+        # 只留崩溃线程、且**从崩溃点往上**的帧（栈底是线程启动，噪音大）
+        frames = th["frames"]
+        lo = max(0, idx - 6)
+        out["nativeFrames"] = frames[lo:idx + 8]
+        return
+
+    # ── 兜底：都失败，如实留空（不编）──
+    out["nativeSource"] = None
+    out["nativeFaultAddr"] = exc_hex
+
+
 def run_cdb_deep(path, cdb=None, timeout=CDB_TIMEOUT_SEC, symbol_cache=None):
     """跑 `cdb` 解一份 dump，返回结构化结果。**永不抛异常**。
 
@@ -543,7 +876,13 @@ def run_cdb_deep(path, cdb=None, timeout=CDB_TIMEOUT_SEC, symbol_cache=None):
     out = {"ok": False, "cdb": None, "seconds": None, "bucket": None,
            "symbol": None, "module": None, "image": None, "exceptionType": None,
            "message": None, "managedStack": [], "readAddress": None,
-           "reason": None, "rawTail": ""}
+           "reason": None, "rawTail": "",
+           # ★ 原生调用链（2026-10-06 加）
+           "nativeFrames": [],      # [{sp, ret, site}]
+           "crashSite": None,       # 由"故障地址=某帧 RetAddr ⇒ 下一帧"定出
+           "crashCaller": None,     # 发出那个 call 的帧
+           "nativeSource": None,    # "ecxr_kv" | "all_threads" | None
+           "ctxUsable": None}       # 异常上下文是否可用（rip≠0 且 GPR 非全 0）
 
     cdb = cdb or find_cdb()
     if not cdb:
@@ -552,6 +891,7 @@ def run_cdb_deep(path, cdb=None, timeout=CDB_TIMEOUT_SEC, symbol_cache=None):
                          "--accept-source-agreements")
         return out
     out["cdb"] = cdb
+    out["path"] = path   # ★ 原生解析需要 dump 路径
 
     sym = symbol_cache or os.path.join(os.environ.get("TEMP", "."), "blbridge_symbols")
     cmd = [cdb, "-z", path,
@@ -617,7 +957,18 @@ def run_cdb_deep(path, cdb=None, timeout=CDB_TIMEOUT_SEC, symbol_cache=None):
         uniq.append(f)
     out["managedStack"] = uniq[:20]
 
-    out["ok"] = bool(out["bucket"] or out["symbol"] or out["managedStack"])
+    # ── ★ 原生调用链解析（2026-10-06 加）─────────────────────────────
+    # 顺序（如实）：先判上下文可用性 → 可用就信 `.ecxr; kv`；否则用故障地址
+    # 在 `~*kv` 里定位崩溃线程。两者都失败就**如实留空**，不编。
+    try:
+        _parse_native(out, lines)
+    except Exception as _e:  # noqa: BLE001
+        # 解析失败绝不能拖垮 deep（deep 的价值不只是原生栈）
+        out["nativeSource"] = None
+        out["nativeParseError"] = repr(_e)
+
+    out["ok"] = bool(out["bucket"] or out["symbol"] or out["managedStack"]
+                     or out["nativeFrames"])
     if not out["ok"]:
         out["reason"] = ("no_output —— cdb 跑了 %ss 但没解析出崩溃点"
                          "（可能不是崩溃转储，或符号完全拿不到）" % out["seconds"])
@@ -721,10 +1072,16 @@ def build_report(limit=8, latest=False, pid=None, want_stack=False, path=None,
     ⚠️ deep 是**可选升级**：找不到 cdb 时**不报错**，只在结果里给出 reason 与安装命令。
     """
     if path:
+        _fl = _minidump_flags(path)
         dumps = [{"path": path, "pid": None, "exe": os.path.basename(path),
                   "size": os.path.getsize(path) if os.path.exists(path) else 0,
                   "mtime": os.path.getmtime(path) if os.path.exists(path) else 0,
-                  "source": "explicit"}]
+                  "source": "explicit",
+                  # ★ 显式路径也要判页保护 —— 否则用 --path 指定 BlBridge 的 dump 时，
+                  #   报告里反而看不到"它有页保护"这个最关键的事实。
+                  "flags": _fl,
+                  "hasMemoryInfo": (_fl is not None
+                                    and bool(_fl & MINIDUMP_WITH_FULL_MEMORY_INFO))}]
     else:
         dumps = list_dumps(log_dir=log_dir)
     if pid is not None:
@@ -740,6 +1097,15 @@ def build_report(limit=8, latest=False, pid=None, want_stack=False, path=None,
         parsed = parse_dump(d["path"], want_stack=want_stack)
         parsed["mtime"] = d.get("mtime")
         parsed["pid"] = d.get("pid")
+        # ★ B2（v0.8.48）：把**来源**与**页保护**带进每份结果。
+        #   ⚠️ 这三行是必须要的：`parse_dump` 只返回 minidump 内容，
+        #   不带 `list_dumps` 加的那些元信息 ⇒ 不显式搬运的话，
+        #   报告里那份 dump 的 `source`/`flags`/`hasMemoryInfo` 全是 None，
+        #   于是"BlBridge 落的有页保护"这个**最关键的事实**在报告里看不到
+        #   （本轮实测踩到：汇总显示 0/7，而 list_dumps 明明说 True）。
+        parsed["source"] = d.get("source")
+        parsed["flags"] = d.get("flags")
+        parsed["hasMemoryInfo"] = d.get("hasMemoryInfo")
         parsed["correlate"] = correlate({**d, **parsed}, status)
         if deep:
             parsed["deep"] = deep_for(d["path"], cdb=cdb)
@@ -758,6 +1124,15 @@ def build_report(limit=8, latest=False, pid=None, want_stack=False, path=None,
         } if status else None,
         "crashes": items,
         "werSignatures": read_wer_signature()[:limit] if not path else [],
+    }
+    # ★ B2（v0.8.48）：页保护汇总。
+    #   为什么单独算：`hasMemoryInfo` 决定"模块外内存的属主能不能判"，
+    #   而这个事实**在每份 dump 上是独立的**（BlBridge 落的有、WER 落的没有）。
+    out["pageProtection"] = {
+        "total": len(items),
+        "withMemoryInfo": sum(1 for c in items if c.get("hasMemoryInfo")),
+        "fromBlBridge": sum(1 for c in items if c.get("source") == "BlBridge"),
+        "fromWer": sum(1 for c in items if c.get("source") == "CrashDumps"),
     }
     # 一句话结论：给"这几次崩溃是不是同一个 bug"一个直接答案
     #
@@ -791,6 +1166,16 @@ def fmt(report):
         L.append("异常代码: %s   ⇒ %s"
                  % (", ".join(report["distinctCodes"]),
                     "**同一个 bug**" if report.get("sameBug") else "**不止一个 bug**（需分别处理）"))
+    # ★ B2（v0.8.48）：页保护汇总。放在头部是因为它决定**能不能**判"模块外内存"的属主
+    #   （JIT 代码 vs Harmony detour）—— 全文最关键的元信息之一。
+    _mi = report.get("pageProtection") or {}
+    if _mi.get("total"):
+        L.append("页保护  : %d/%d 份带 MemoryInfoList（%d 份来自 BlBridge，%d 份来自 WER）"
+                 % (_mi.get("withMemoryInfo", 0), _mi.get("total", 0),
+                    _mi.get("fromBlBridge", 0), _mi.get("fromWer", 0)))
+        if _mi.get("withMemoryInfo", 0) == 0:
+            L.append("          ⚠ 全都没有 ⇒ **分不清**模块外内存是 JIT 还是 detour；"
+                     "BlBridge 落盘（v0.8.48）可补上这一位")
     if report.get("distinctBuckets"):
         L.append("崩溃指纹: %d 种" % len(report["distinctBuckets"]))
         for b in report["distinctBuckets"]:
@@ -800,6 +1185,18 @@ def fmt(report):
         e = c.get("exception")
         L.append("")
         L.append("■ %s  (%.1f MB)  pid=%s" % (c["file"], c.get("size", 0) / 1048576, c.get("pid")))
+        # ★ 来源与**页保护**（B2 / v0.8.48）：这是"模块外内存是 JIT 还是 detour"
+        #   能否判定的**唯一**依据，所以放在最前面，一眼可见。
+        _src = c.get("source")
+        _has_mi = c.get("hasMemoryInfo")
+        if _src is not None:
+            _flags = c.get("flags")
+            _fl = ("0x%X" % _flags) if _flags else "?"
+            if _has_mi:
+                L.append("   来源 : %s  flags=%s  ✅ **有页保护（MemoryInfoList）**" % (_src, _fl))
+            else:
+                L.append("   来源 : %s  flags=%s  ⚠ **无页保护**（缺 0x800）⇒ "
+                         "分不清 JIT 与 detour" % (_src, _fl))
         if c.get("error"):
             L.append("   ✗ %s" % c["error"])
             continue
@@ -807,6 +1204,10 @@ def fmt(report):
             L.append("   ⚠ 无异常流 —— 无法归因（手动 dump / 被强杀）")
         else:
             L.append("   异常 : %s  %s" % (e["code"], e["name"]))
+            # ★ 标注来源：dump 里的 `Exception(6)` 流，还是 BlBridge 的 sidecar
+            if e.get("from_sidecar"):
+                L.append("   来源 : ⓘ 异常信息来自 **sidecar**（非 dump 内的 Exception 流）—— "
+                         "BlBridge 自己解引用了 EXCEPTION_POINTERS")
             L.append("   归属 : %s" % (e.get("address_symbol") or "⚠ " + (c.get("blame") or "?")))
             L.append("   地址 : %s" % e["address_hex"])
             if e.get("access_type"):
@@ -850,6 +1251,28 @@ def fmt(report):
                     L.append("   读址 : %s" % dp["readAddress"])
                 for f in (dp.get("managedStack") or [])[:6]:
                     L.append("     ↳ %s" % f)
+                # ── ★ 原生调用链（2026-10-06 加）──────────────────────
+                if dp.get("crashSite"):
+                    L.append("   崩溃点(原生): %s" % dp["crashSite"])
+                if dp.get("crashCaller"):
+                    L.append("   发起 call   : %s" % dp["crashCaller"])
+                nf = dp.get("nativeFrames") or []
+                if nf:
+                    src = dp.get("nativeSource")
+                    # ★ 档位必须如实标注 —— 退化档是"全线程筛出"，
+                    #   与"崩溃线程精确"可信度不同，不能混为一谈。
+                    if src == "ecxr_kv":
+                        L.append("   原生栈 : （崩溃线程·上下文可用·精确）")
+                    elif src == "all_threads":
+                        L.append("   原生栈 : （**由全线程筛出**：故障地址 %s 命中线程 #%s；"
+                                 "上下文退化，故非直接读取）"
+                                 % (dp.get("nativeFaultAddr") or "?", dp.get("nativeThread")))
+                    else:
+                        L.append("   原生栈 : （来源未知）")
+                    for f in nf[:10]:
+                        L.append("     ↳ %s" % f["site"])
+                elif dp.get("nativeSource") is None:
+                    L.append("   原生栈 : ⚠ 未取到（上下文不可用且故障地址未在任何线程栈上命中）")
             else:
                 # ⚠️ **环境问题**与**没有崩溃**必须分清 —— 否则会把"没装调试器"读成"没崩"
                 L.append("   ── deep 未取到 ──")

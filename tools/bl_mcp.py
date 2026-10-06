@@ -1547,6 +1547,40 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "bl_dump",
+        "description": ("按需让**游戏进程自己**写一份 minidump（B2 / v0.8.48）。"
+                        "与 WER 的 dump 的关键差别：**显式带 MiniDumpWithFullMemoryInfo(0x800)** "
+                        "⇒ 有 MemoryInfoList（页保护 r/w/x）—— 那是区分「模块外那段内存」"
+                        "是 JIT 代码还是 Harmony detour 的**唯一**依据。"
+                        "实测：WER 的 6 份 dump **全都没有**这一位；BlBridge 落的都有。"
+                        "★ 不崩也能调（实测健康进程写出的 dump 同样带页保护），"
+                        "所以它能覆盖 bl_crash 结构上覆盖不到的「卡住/僵死但进程还活着」。"
+                        "成本实测：只多 0.02 MB / 0 ms（MemoryInfoList 流仅 ~17 KB）；"
+                        "fullMemory=true 才加 FullMemory（**49 MB / 25 倍**，默认 false）。"
+                        "先跑 bl_status 确认游戏在跑；落盘目录见返回的 path。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fullMemory": {"type": "boolean", "default": False,
+                               "description": "是否附带 FullMemory（49 MB / 25 倍，默认 false）"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_crash_test",
+        "description": ("**受控崩溃**：让游戏进程显式崩一次（纯 SEH 0xC0000005），"
+                        "用于验收 B2 的崩溃落盘路径。**游戏会真的崩掉**。"
+                        "★ 双重安全闸门（缺一不可）：① 必须显式调本工具；"
+                        "② 必须设环境变量 BLBRIDGE_ALLOW_CRASH_TEST=1（**默认关**）⇒ 发布版不可能误崩。"
+                        "为什么用 RaiseException 而不是抛托管异常：实测四条崩溃路径里它**最难覆盖**"
+                        "（托管钩子不触发、只有 Win32 顶层过滤器触发）；验它通过，更容易的路径自然没问题。"
+                        "调用后：先返回 aboutToCrash=true 的响应，**随后**进程崩溃 ⇒ "
+                        "用那个响应可区分「主动崩」与「随机崩」。"
+                        "⚠️ 已知覆盖不到 Environment.FailFast(0xC0000409)，那类继续走 WER。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "bl_run_batch",
         "description": ("按计划文件批量跑 N 场 AI 对 AI 战斗（阶段 2④「一条命令跑 N 场」）。"
                         "支持换边双跑：plan 里两个 config 的 attacker/defender 对调即可。"
@@ -1768,6 +1802,8 @@ TOOL_GROUPS = {
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
+        # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
+        "bl_dump", "bl_crash_test",
     ],
     "desktop": [
         "bl_desktop_windows", "bl_desktop_screenshot", "bl_desktop_click", "bl_desktop_key",
@@ -2418,6 +2454,18 @@ def call_tool(name, args):
             log_dir=args.get("logDir"),
             limit=int(args.get("limit") or 20),
         )
+
+    if name == "bl_dump":
+        # B2（v0.8.48）：让**游戏进程自己**写一份带页保护的 minidump。
+        resp = send_command("dump_now", {"fullMemory": bool(args.get("fullMemory"))})
+        return resp
+
+    if name == "bl_crash_test":
+        # B2（v0.8.48）：受控崩溃（验收用）。**游戏会真的崩掉。**
+        # 双重闸门在 C# 侧（Dispatch 里判 CrashDump.CrashTestAllowed）——
+        # ⚠️ 环境变量是**游戏进程**的（由启动脚本设），不是本 MCP 进程的，
+        #    所以这里**不重复判**，只如实转发 C# 的拒绝理由。
+        return send_command("crash_test", {})
 
     if name == "bl_ipc_replay":
         # 宿主侧工具：检索 commands\done\ 的历史响应（+ actions.jsonl 连接）。

@@ -58,6 +58,17 @@ namespace BlBridge
             }
         }
 
+        /// <summary>
+        /// B2：`crash_test` 的**延迟崩溃**标志。
+        ///
+        /// 为什么不在 `Dispatch` 里直接崩：那一刻响应还没落盘（`WriteResponse` 在
+        /// `HandleOne` 末尾）、账本也还没记 ⇒ 外部会**永远等不到响应**，
+        /// 无法区分"是我们主动崩的"还是"随机崩溃"，验收就没有对照。
+        ///
+        /// ⇒ 置标志 → `HandleOne` 照常写响应与账本 → **写完再崩**。
+        /// </summary>
+        private static bool _pendingCrash;
+
         /// <summary>必须在游戏主线程调用（引擎对象只能在主线程访问）。</summary>
         public static void Pump()
         {
@@ -176,6 +187,24 @@ namespace BlBridge
             RecordLedger(id, ledgerMethod, ledgerBytes, raw, response, ledgerStartedUtc);
             WriteResponse(id, response);
             SafeDelete(path);
+
+            // ★ B2：受控崩溃的**真正触发点**。
+            //
+            // 放在这里（响应已落盘、账本已记）是刻意的：外部能先读到
+            // `aboutToCrash:true` 的响应，据此确认"这次崩溃是我们主动造的"，
+            // 而不是随机崩溃 —— 否则验收没有对照。
+            //
+            // ⚠️ 只有 `crash_test` 且环境变量闸门已开时才会走到这里（见 Dispatch）。
+            if (_pendingCrash)
+            {
+                _pendingCrash = false;
+                CrashDump.RaiseNativeCrash();      // 纯 SEH ⇒ 只有 Win32 钩子会触发
+                // 正常情况下不会执行到这里（进程已死）；若返回说明 RaiseException 没生效，
+                // 那么如实写 RGL，不留"以为崩了其实没崩"的状态。
+                ActionLedger.ExceptionToRgl("CommandPump.crash_test",
+                    new InvalidOperationException(
+                        "crash_test 调了 RaiseException(0xC0000005) 但进程没崩 —— 需复查钩子"));
+            }
         }
 
         /// <summary>
@@ -219,6 +248,68 @@ namespace BlBridge
             if (method == "status")
             {
                 return Protocol.Success(id, ScenarioRunner.StatusJson());
+            }
+            // ── B2：崩溃落盘（v0.8.48）────────────────────────────────────────
+            // 三个方法刻意放在 `status` 旁边：它们都是**诊断**用途，且零游戏依赖
+            // （不碰 TaleWorlds 任何 API ⇒ 在哪个状态下都能调）。
+            if (method == "dump_status")
+            {
+                return Protocol.Success(id, CrashDump.StatusJson());
+            }
+            if (method == "dump_now")
+            {
+                // 按需写一份**当前进程**的 dump（健康进程也能调，不崩、零游戏副作用）。
+                //
+                // 为什么值得有：实测**健康进程写出的 dump 同样带 `MemoryInfoList`**
+                // （2.0 MB / 36 ms，flags 与崩溃路径完全相同）⇒ 它覆盖 `bl_crash`
+                // 现在**结构上覆盖不到**的一类问题：**"卡住/僵死但进程还活着"**
+                // （那时既没有 WER dump，也还没崩）。
+                //
+                // 参数（可选）：fullMemory=true ⇒ 加 `MiniDumpWithFullMemory`
+                //（**49 MB / 25 倍**，默认 false —— 它解决的是"要看内存内容"，与 B2 目标不同）
+                bool fullMemory = Jmini.Bool(raw, "fullMemory", false);
+                string path;
+                string err = CrashDump.WriteNow(fullMemory, out path);
+                if (err != null)
+                {
+                    return Protocol.Failure(id, "dump_failed", err, false);
+                }
+                return Protocol.Success(id, "{\"path\":" + Protocol.Q(path)
+                    + ",\"fullMemory\":" + Jw.B(fullMemory)
+                    + ",\"note\":" + Protocol.Q(
+                        "本 dump 带 MemoryInfoList（页保护）；bl_crash 可直接读，"
+                        + "或用 dump_streams.py 核对 stream 16 是否存在") + "}");
+            }
+            if (method == "crash_test")
+            {
+                // ★ **受控崩溃**（验收 B2 用）：显式造一次纯 SEH 原生异常。
+                //
+                // 为什么用 `RaiseException` 而不是抛托管异常：实测四条路径里
+                //   `RaiseException` 是**最难的那条**（托管钩子不触发、只有 Win32 钩子触发）
+                // ⇒ 验它通过，更容易的托管路径自然也没问题。
+                //
+                // 双重安全闸门（缺一不可，发布版**不可能**误崩）：
+                //   ① 必须显式调本 method（没有默认触发路径）；
+                //   ② 必须设环境变量 `BLBRIDGE_ALLOW_CRASH_TEST=1`（**默认关**）。
+                if (!CrashDump.CrashTestAllowed)
+                {
+                    return Protocol.Failure(id, "crash_test_disabled",
+                        "受控崩溃被闸门拦住：需显式设置环境变量 "
+                        + "BLBRIDGE_ALLOW_CRASH_TEST=1（默认关，防误崩）", false);
+                }
+                // ★ 先把"即将崩溃"写进响应（外部据此对账：收到 ok=true ⇒ 确认是本次
+                //   主动崩的，不是随机崩溃），**再**崩。
+                // ⚠️ 但**不能在这里崩** —— 此刻响应还没落盘（`WriteResponse` 在
+                //   `HandleOne` 末尾）、账本也还没记。所以这里只**置标志**，
+                //   真正的崩溃放在 `HandleOne` 写完响应与账本之后（见 `_pendingCrash`）。
+                _pendingCrash = true;
+                return Protocol.Success(id, "{\"aboutToCrash\":true"
+                    + ",\"exceptionCode\":\"0xC0000005\""
+                    + ",\"trigger\":\"RaiseException(SEH)\""
+                    + ",\"dumpDir\":" + Protocol.Q(SubModule.DumpDir)
+                    + ",\"note\":" + Protocol.Q(
+                        "本响应落盘后进程立即崩溃；BlBridge 的 dump 应落在 dumpDir，"
+                        + "文件名带 blbridge-native- 前缀，且**只有 1 份**（去重生效）") + "}");
             }
             if (method == "start_battle")
             {

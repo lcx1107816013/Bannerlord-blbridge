@@ -1,0 +1,119 @@
+# NOTICE
+
+BlBridge
+Copyright (c) 2026 BlBridge contributors — MIT (see `LICENSE`).
+
+This file records **which third-party projects were adapted, what was taken, and when**.
+It is derived from this repository's own provenance records:
+
+- `docs/lessons-from-bannerlord-gabs.md` §四 "抄录记账（MIT 署名）"
+- `docs/gabp-naming.md` §五 "抄录记账（MIT 署名）"
+
+The `LICENSE` file carries the corresponding copyright notices and the MIT text.
+
+---
+
+## 1. BUTR/Bannerlord.GABS — MIT
+
+Source: <https://github.com/BUTR/Bannerlord.GABS>
+Copyright (c) 2026 Vitaly Mikhailov
+License: MIT
+
+### 1.1 Code adapted (implementation bodies)
+
+| Upstream | What was taken | Where it landed here | Date |
+|---|---|---|---|
+| `Tools/InventoryTools.cs` | `inventory/get_inventory` implementation body (reading `MainParty.ItemRoster` + `Hero.MainHero.Gold`, plus the `no_campaign` / `no_main_party` precondition checks) | `src/InventoryProbe.cs` (shipped in v0.8.36) | 2026-09-27 |
+| `core/list_saves` / `core/load_save` | implementation bodies — `MBSaveLoad.GetSaveFiles()` (name / isCorrupted / full `meta` key-values) and `LoadSaveGameData(name)` + `MBGameManager.StartNewGame(new SandBoxGameManager(result))` for loading a save by name without going through the save-selection screen | `bl_list_saves` / `bl_load_save` control-channel methods (v0.8.36) | 2026-09-27 |
+| `core/skip_video` | implementation body | `skip_video` control-channel method | 2026-09-27 |
+| `Tools/CoreTools.cs` | `core/wait_for_state` waiting semantics (500 ms polling, secondary `ScreenManager.TopScreen` "Loading" check) and `core/check_blockers` attribution vocabulary | wait strategy (`bl_wait_for_state`, `bl_launch.ps1`) | 2026-09-27 |
+| `Tools/MenuTools.cs` | campaign GameMenu read/select approach (relocate option id at execution time; action + waiter paired) | reference for future campaign-layer methods | 2026-09-27 |
+| `Tools/GauntletUITools.cs` (read-only surface) | `ui/get_screen` / `ui/get_viewmodel_property` | `bl_get_screen` / `bl_get_viewmodel_property` | 2026-09-27 |
+| `launch-bannerlord.ps1` | pre-launch `engine_config.txt` `safely_exited` normalization (not adopted; recorded for reference) | — | 2026-09-27 |
+
+### 1.2 Documentation knowledge adopted
+
+From the upstream `AGENTS.md` / `README.md`:
+
+- the "all game API calls must return to the main thread" rule with its
+  `Campaign.Current != null` / `Mission.Current != null` precondition checks;
+- the "actions and waiters come in pairs; never `sleep`" convention;
+- the Gauntlet `click_widget` XAML-binding pitfall;
+- the "never enter 3D mission scenes" hard constraint.
+
+Recorded in `docs/lessons-from-bannerlord-gabs.md`, `docs/thread-model-comparison.md`,
+`docs/l2-api-drift-1.4.8.md`, `docs/gabp-naming.md`.
+
+### 1.3 Approach explicitly NOT adopted
+
+Upstream's versioned assembly names, runtime tool registration + static proxy tools,
+required `Bannerlord.Harmony` / `ButterLib` / `MCM` dependencies, and the
+`Beta_Debug` / `Stable_Debug` + NuGet build system were **evaluated and not adopted**
+(see `docs/lessons-from-bannerlord-gabs.md` §三). No upstream dependency was introduced.
+
+---
+
+## 2. pardeike/GABP — MIT
+
+Source: <https://github.com/pardeike/GABP>
+Copyright (c) 2025 Andreas Pardeike
+License: MIT
+
+| What was taken | Where it landed here | Date |
+|---|---|---|
+| The `<category>/<verb>` naming shape, the `gabp/1` method vocabulary (`ping` / `get_state` / `wait_for_state` / `list` / `open`), and the protocol-reserved namespace list | `docs/gabp-naming.md`, `tools/gabp_names.json` | 2026-09-27 |
+
+**No dependency was introduced**: the files above are plain text plus a pure
+Python-standard-library checker (`tools/bl_check_gabp_names.py`).
+
+---
+
+## 3. Referenced at runtime by reflection — no code adapted
+
+### 3.1 RTSCamera / MissionLibrary
+
+Source: <https://github.com/lzh-mb-mod/RTSCamera> — MIT, Copyright (c) 2020 Li Zhenhuan
+
+**No RTSCamera code was copied into this project.** The project's own record
+(`tools/bl_rts.py`, `src/CameraFollow.cs`, `src/CameraSpeed.cs`) states the policy as
+"we only act as a parameter administrator for it; we do not touch its code".
+
+Verified against the actual source tree:
+
+| Check | Result |
+|---|---|
+| `using MissionSharedLibrary…` / `using RTSCamera…` (compile-time reference) | **none** |
+| `GetMethod(` / `Invoke(` / `GetProperty(` (runtime reflection) | used in `CameraFollow.cs`, `CameraSpeed.cs` |
+| Any RTSCamera implementation body reproduced here | **none** |
+
+What the project actually does:
+
+1. `tools/bl_rts.py` reads and writes RTSCamera's **configuration file**
+   (`Configs/RTSCamera/RTSCameraConfig.xml`) only.
+2. `src/CameraFollow.cs` / `src/CameraSpeed.cs` locate RTSCamera's **public API**
+   (`MissionSharedLibrary.Utilities.Utility.BeforeSetMainAgent` / `AfterSetMainAgent`,
+   `MissionLibrary.Controller.Camera.ACameraControllerManager`) by name and call it via
+   reflection. This is deliberate: a compile-time reference would make BlBridge fail to
+   load when RTSCamera is absent.
+
+Upstream documentation (its own source and decompiled local copy) was **read to learn the
+public API contract and the required call order** — that is interoperability, not copying.
+The upstream MIT notice is recorded here **for transparency**, even though no RTSCamera
+code is distributed with this project.
+
+---
+
+## 4. No dependencies introduced
+
+Per `docs/lessons-from-bannerlord-gabs.md` §四 and `docs/gabp-naming.md` §五,
+**none of the adaptations above introduced a runtime or build dependency, and none
+changed game-side behaviour.** BlBridge's design principle is "patch no methods and
+keep zero third-party dependencies", so that deleting the module fully reverts it.
+
+---
+
+## 5. Third-party names
+
+Project names and links above identify the origin of adapted material only.
+Nothing in this NOTICE grants any trademark or endorsement rights, and this project
+is **not affiliated with or endorsed by** any of the projects listed.

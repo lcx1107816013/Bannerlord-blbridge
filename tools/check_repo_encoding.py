@@ -33,7 +33,12 @@ import bl_common  # noqa: E402
 TEXT_EXT = (".py", ".cs", ".md", ".json", ".xml", ".ps1", ".txt", ".cfg", ".ini", ".yml", ".yaml",
             ".rsp",     # Roslyn 响应文件（纯文本的编译参数表）—— tools/l2probe/_refs.rsp
             ".sh", ".bat", ".cmd", ".sql", ".tsv", ".csv")
-TEXT_NAMES = (".gitignore", ".gitattributes", ".editorconfig")
+TEXT_NAMES = (".gitignore", ".gitattributes", ".editorconfig",
+              # 2026-10-06：发布合规新增的两个**无后缀**文本文件。
+              # ⚠️ 是**本脚本的覆盖面自检**逼出来的 —— 它报
+              #    「LICENSE / NOTICE 的后缀不在覆盖集合内 ⇒ 体检从没查过它们，
+              #     而你会看到『全部合规』，那是假的」。这正是那条自检的用途。
+              "LICENSE", "NOTICE")
 
 # 明确**不是**文本、因而不做编码检查的后缀（二进制/产物）。
 # 有了它，下面那条"覆盖面自检"才能区分「故意不查」与「忘了加」——

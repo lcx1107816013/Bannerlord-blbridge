@@ -51,6 +51,24 @@
       "needs": "any",
       "note": "回的是推演状态机 + 双方存活数 + 战果"
     },
+    "dump_status": {
+      "gabp": "bridge/dump_status",
+      "kind": "read",
+      "needs": "any",
+      "note": "B2 崩溃落盘的自检：装没装、落了几份、上次结果、flags、闸门状态"
+    },
+    "dump_now": {
+      "gabp": "bridge/dump_now",
+      "kind": "write",
+      "needs": "any",
+      "note": "按需写一份当前进程的 minidump（带 0x800 页保护）；不崩、零游戏副作用"
+    },
+    "crash_test": {
+      "gabp": "bridge/crash_test",
+      "kind": "write",
+      "needs": "any",
+      "note": "受控崩溃（纯 SEH），验收 B2 用；双重闸门：显式调用 + BLBRIDGE_ALLOW_CRASH_TEST=1"
+    },
     "start_battle": {
       "gabp": "battle/start",
       "kind": "write",
@@ -234,6 +252,14 @@
     "bl_status": {
       "gabp": "bridge/get_status",
       "note": "模块 / 日志 / 会话身份，含崩溃判定"
+    },
+    "bl_dump": {
+      "gabp": "bridge/dump_now",
+      "note": "按需写当前进程 dump（带页保护）；可选 fullMemory"
+    },
+    "bl_crash_test": {
+      "gabp": "bridge/crash_test",
+      "note": "受控崩溃（验收用，双重闸门，默认关）"
     },
     "bl_list_battles": {
       "gabp": "telemetry/list_battles"

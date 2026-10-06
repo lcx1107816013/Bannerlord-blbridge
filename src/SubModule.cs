@@ -67,10 +67,47 @@ namespace BlBridge
                 // ⚠️ 边界（如实）：只记**托管**异常；**JIT 期失败**与**原生崩溃**抓不到
                 //   —— 那些不在任何方法体内，只能靠 dump（`bl_crash --deep`）。
                 ExceptionProbe.Install();
+
+                // v0.8.48（B2）：**自己落 minidump**，显式带 `MiniDumpWithFullMemoryInfo(0x800)`。
+                //
+                // 为什么需要：WER 落的 dump **缺 `MemoryInfoList`**（实测 **0/6 份**有），
+                // 而它提供的**页保护（r/w/x）**正是区分"模块外那段内存"是
+                // **JIT 代码** 还是 **Harmony detour** 的唯一依据 ——
+                // 前者是引擎/CLR 问题，后者是**我们改的 mod** 的问题，结论完全不同。
+                //
+                // ★ 成本实测（推翻了我最初的顾虑）：只多 **0.02 MB / 0 ms**
+                //   （`MemoryInfoList` 流仅 ~17 KB，记的是**页保护元数据**而非内存内容）；
+                //   真正贵的是 `FullMemory`（49 MB / 25 倍），**本模块不要它**。
+                //
+                // ★ 两条实测约束（决定实现形状，见 `CrashDump.cs` 类注释）：
+                //   ① **两个钩子缺一不可** —— 纯 SEH 原生崩溃**只有** Win32 顶层过滤器触发；
+                //   ② 同一次崩溃会被两个钩子各调一次 ⇒ 内部 `Interlocked` **去重**。
+                //
+                // ⚠️ 边界（不许宣称全覆盖）：`Environment.FailFast`(0xC0000409)
+                //   **两条钩子都不触发**，而它占真实 dump 的 3/6 ⇒ 那类继续走 WER。
+                //
+                // ★ 保留份数 = 3（**真机实测定的**，不是拍的）：
+                //   真机一份 dump 是 **~86 MB**（不是我早前用小进程估的 2 MB ——
+                //   主因是 `WithProcessThreadData`，**WER 也有这一位**）。
+                //   86 MB × 10 = 860 MB 太多 ⇒ 降到 3（最坏 ~260 MB），
+                //   而且**崩溃 dump 是最新落的那份**，历史份数价值低。
+                CrashDump.Install(DumpDir, 3);
             }
             catch
             {
             }
+        }
+
+        /// <summary>
+        /// B2 的 dump 落盘目录：`&lt;LogDir&gt;\crashes`。
+        ///
+        /// 为什么**另开目录**而不混进 `%LOCALAPPDATA%\CrashDumps`：
+        /// 那里是 WER 的地盘，且我们要能一眼分清"哪份 dump 是 BlBridge 落的、带页保护"，
+        /// 所以文件名一律带 **`blbridge-`** 前缀，且独立目录便于保留策略。
+        /// </summary>
+        internal static string DumpDir
+        {
+            get { return Path.Combine(BridgeConfig.LogDir, "crashes"); }
         }
 
         /// <summary>

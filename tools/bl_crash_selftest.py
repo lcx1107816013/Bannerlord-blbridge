@@ -347,6 +347,142 @@ def main():
         check("distinctBuckets" in repA or True, "（单份无法验多指纹，改验字段存在性）")
         check(repA.get("sameBug") is True, "单份 ⇒ sameBug=True")
 
+        # ── ⑫ B2 页保护判据（v0.8.48）──
+        #
+        # 为什么单独一组：`hasMemoryInfo` 决定"模块外内存的属主能不能判"
+        # （JIT 代码 vs Harmony detour），而它是**逐份 dump 独立**的事实。
+        # ⚠️ 本轮实测踩到过一个真 bug：`build_report` 重建 items 时**漏搬**
+        #    `source`/`flags`/`hasMemoryInfo` ⇒ 汇总恒显示 0/N，
+        #    而 `list_dumps` 明明返回 True ⇒ 报告里最关键的事实**静默丢失**。
+        #    这组就是钉住那条搬运。
+        print("\n⑫ B2 页保护：flags 解析 + 字段搬运（防'报告里静默丢失'）")
+        d_bb = write_tmp(make_dump(0xC0000005, 0x00007FF7D6D6345B, mods, access=(0, 0x1B8)))
+        d_wer = write_tmp(make_dump(0xC0000005, 0x00007FF7D6D6345B, mods, access=(0, 0x1B8)))
+        paths.append(d_bb)
+        paths.append(d_wer)
+        # 直接改头部 flags 字段（minidump 头第 6 个 DWORD，偏移 24）
+        import struct as _st
+        with open(d_bb, "r+b") as fh:
+            fh.seek(24)
+            fh.write(_st.pack("<I", 0x201921))      # ★ 含 0x800（BlBridge 档）
+        with open(d_wer, "r+b") as fh:
+            fh.seek(24)
+            fh.write(_st.pack("<I", 0x200121))      # ★ 不含 0x800（WER 实测值）
+
+        fA = bl_crash._minidump_flags(d_bb)
+        fB = bl_crash._minidump_flags(d_wer)
+        check(fA == 0x201921, "_minidump_flags 读到 0x201921", hex(fA or 0))
+        check(fB == 0x200121, "_minidump_flags 读到 0x200121", hex(fB or 0))
+        check(bool(fA & bl_crash.MINIDUMP_WITH_FULL_MEMORY_INFO) is True,
+              "含 0x800 ⇒ 判为有页保护")
+        check(bool(fB & bl_crash.MINIDUMP_WITH_FULL_MEMORY_INFO) is False,
+              "不含 0x800 ⇒ 判为无页保护")
+
+        # ★ 关键回归：走 build_report（不是 list_dumps）时字段必须还在
+        repBB = bl_crash.build_report(path=d_bb)
+        c0 = (repBB.get("crashes") or [{}])[0]
+        check(c0.get("hasMemoryInfo") is True,
+              "build_report 未丢失 hasMemoryInfo（本轮踩过的坑）", repr(c0.get("hasMemoryInfo")))
+        check(c0.get("flags") == 0x201921,
+              "build_report 未丢失 flags", repr(c0.get("flags")))
+        pp = repBB.get("pageProtection") or {}
+        check(pp.get("withMemoryInfo") == 1 and pp.get("total") == 1,
+              "pageProtection 汇总正确（1/1）", repr(pp))
+
+        repW = bl_crash.build_report(path=d_wer)
+        ppW = repW.get("pageProtection") or {}
+        check(ppW.get("withMemoryInfo") == 0 and ppW.get("total") == 1,
+              "WER 档汇总为 0/1", repr(ppW))
+        # 报告文本里必须**看得见**这个事实（不能只在 JSON 里）
+        check("有页保护" in bl_crash.fmt(repBB), "报告文本里出现「有页保护」")
+        check("无页保护" in bl_crash.fmt(repW), "WER 档报告文本里出现「无页保护」")
+
+        # ── ⑬ B2 sidecar 回退（v0.8.48）──
+        #
+        # 为什么这组必须存在：BlBridge 的崩溃 dump **天然没有 `Exception(6)` 流** ——
+        # 它在崩溃回调里**不能**把异常上下文交给 dbghelp（传了会让 dbghelp
+        # **内部访问违规**、dump 变 **0 字节**；九种可能已逐个排除）。
+        # ⇒ 改成"传 NULL 写 dump（照样带 MemoryInfoList）+ 自己解引用
+        #   EXCEPTION_POINTERS 落 sidecar"。
+        # ⇒ 若 bl_crash 不读 sidecar，**我们自己落的崩溃 dump 会说"无法归因"**，
+        #   白丢最关键的崩溃签名（而 WER 那份反而有）。这组钉住那条回退。
+        print("\n⑬ B2 sidecar：无 Exception(6) 流时回退读 <dump>.exception.json")
+        pS = write_tmp(make_dump(0xC0000005, 0x00007FF849DB483A, mods, access=(0, 0x1B8)))
+        paths.append(pS)
+        # 把 Exception(6) 流"抹掉"太麻烦 ⇒ 直接造一份**没有异常流**的 dump 更稳：
+        # 用 bl_crash 自己的口径确认它没有异常流，然后写 sidecar 再解析。
+        base = bl_crash.parse_dump(pS)
+        check(base.get("exception") is not None,
+              "（前置）合成 dump 本来有异常流", str(bool(base.get("exception"))))
+
+        # 关键：构造"无异常流 + 有 sidecar"的场景。
+        # `make_dump` 总会带异常流，所以这里直接测 **sidecar 读取函数**与**合并逻辑**
+        import json as _json
+        sidecar = pS + ".exception.json"
+        _json.dump({"exceptionCode": "0xC0000005",
+                    "exceptionAddress": "0x00007FF849DB483A",
+                    "exceptionFlags": "0x80",
+                    "numberParameters": 2,
+                    "accessType": "read",
+                    "accessTarget": "0x1B8",
+                    "contextRip": "0x00007FF849DB483A",
+                    "threadId": 4242,
+                    "source": "BlBridge.CrashDump.ReadExceptionPointers"},
+                   open(sidecar, "w", encoding="utf-8"))
+        paths.append(sidecar)
+
+        sc = bl_crash._read_exception_sidecar(pS)
+        check(sc is not None and sc.get("exceptionCode") == "0xC0000005",
+              "_read_exception_sidecar 能读出 sidecar", repr(sc)[:80])
+        check(bl_crash._read_exception_sidecar(pS + ".nonexistent") is None,
+              "sidecar 不存在 ⇒ 返回 None（不是异常）")
+        # 坏 sidecar 不能把解析带崩
+        bad = write_tmp(b"not json at all")
+        paths.append(bad)
+        badside = bad + ".exception.json"
+        open(badside, "w", encoding="utf-8").write("{ this is not json")
+        paths.append(badside)
+        check(bl_crash._read_exception_sidecar(bad) is None,
+              "坏 sidecar ⇒ 返回 None（静默降级，不抛）")
+
+        # 真·无异常流的 dump：把 stream 目录里的 6 号流类型改掉
+        #   （改目录里的 StreamType 为 0xFFFF ⇒ parse_dump 认不出 ⇒ exc=None）
+        pN = write_tmp(make_dump(0xC0000005, 0x00007FF849DB483A, mods, access=(0, 0x1B8)))
+        paths.append(pN)
+        with open(pN, "r+b") as fh:
+            head = fh.read(32)
+            n = int.from_bytes(head[8:12], "little")
+            dr = int.from_bytes(head[12:16], "little")
+            for i in range(n):
+                fh.seek(dr + i * 12)
+                st = int.from_bytes(fh.read(4), "little")
+                if st == 6:
+                    fh.seek(dr + i * 12)
+                    fh.write((0xFFFF).to_bytes(4, "little"))
+                    break
+        noExc = bl_crash.parse_dump(pN)
+        check(noExc.get("exception") is None,
+              "（前置）改掉流类型后确实没有异常流", repr(noExc.get("exception")))
+        # 现在给它配 sidecar ⇒ 应回退成功
+        open(pN + ".exception.json", "w", encoding="utf-8").write(
+            _json.dumps({"exceptionCode": "0xC0000005",
+                         "exceptionAddress": "0x00007FF849DB483A",
+                         "numberParameters": 2, "accessType": "read",
+                         "accessTarget": "0x1B8"}))
+        paths.append(pN + ".exception.json")
+        withSc = bl_crash.parse_dump(pN)
+        exc2 = withSc.get("exception")
+        check(exc2 is not None, "★ 无异常流 + 有 sidecar ⇒ 回退解析出异常", repr(exc2)[:90])
+        if exc2:
+            check(exc2.get("code") == "0xC0000005", "sidecar 异常码正确", repr(exc2.get("code")))
+            check(exc2.get("from_sidecar") is True, "标了 from_sidecar（报告里能看出来源）")
+            check("DB483A" in (exc2.get("address_hex") or ""),
+                  "sidecar 故障地址正确", repr(exc2.get("address_hex")))
+            check(exc2.get("access_type") == "读", "sidecar 访问类型翻译正确")
+        # 报告里必须看得见"来自 sidecar"
+        repS = bl_crash.build_report(path=pN)
+        check("sidecar" in bl_crash.fmt(repS), "报告文本里出现「sidecar」")
+
     finally:
         _deep_cache_clear = getattr(bl_crash, "_deep_cache", None)
         if _deep_cache_clear is not None:
