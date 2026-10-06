@@ -1507,6 +1507,31 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_concurrency_guide",
+        "description": ("**并发纪律（宿主侧，只读，不碰游戏）**：告诉你**哪些工具能并发、最多几路**。"
+                        "为什么需要：**所有走游戏通道的工具共用同一条串行泵**"
+                        "（`commands/pending/` → 游戏主线程 `Array.Sort` 后逐个 `HandleOne`）。"
+                        "三路实测结论：① 并发提交**可行**（`pending/` 深度实测 max=8）；"
+                        "② 执行**严格串行**（`seq` 单调、**游戏执行序 == 文件名序**）；"
+                        "③ 但代价**不会立刻线性外溢**——游戏端一次轮询把整批捞走，"
+                        "单次成本远小于 250ms 周期时开销藏进周期里；"
+                        "★ 外溢判据：**N × 单次耗时 >= 250ms** 才开始外溢。"
+                        "本工具**两次派发都从现场取数**（工具→方法来自解析 `bl_mcp.py` 的闭包；"
+                        "耗时来自实测账本的分位数），所以**不会随工具改名/负载变化而腐化**。"
+                        "★ 用 **p90 而非中位数**判重（实测 `skip_video` 双峰：p50=1ms 但 p90=459ms，"
+                        "只看中位数会误判成轻工具）。"
+                        "分档：HEAVY(p90>=100ms，**不要并发**) / MEDIUM(>=20ms，上限见 budget) / "
+                        "LIGHT(<20ms，可自由并发) / HOST(不走通道，**零争用**) / "
+                        "UNKNOWN(走通道但无实测 ⇒ 保守按 MEDIUM)。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool": {"type": "string", "description": "只看某个工具（如 bl_start_battle）"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 的 logDir 同口径）"},
+            },
+        },
+    },
+    {
         "name": "bl_build_check",
         "description": ("核对「源码 → 构建产物 → 部署文件 → 进程内 DLL」四段是否一致。用于回答三件事："
                         "① 改了代码没重新构建（stale_source）；② 构建了但没部署（stale_deploy）；"
@@ -1741,7 +1766,7 @@ TOOL_GROUPS = {
     "lab": [
         "bl_list_battles", "bl_analyze", "bl_read_events", "bl_run_batch", "bl_batch_report",
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
-        "bl_json_health", "bl_ipc_replay", "bl_exception_detail",
+        "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
     ],
     "desktop": [
@@ -2381,6 +2406,12 @@ def call_tool(name, args):
             limit=int(args.get("limit") or 20),
             explain=bool(args.get("explain", True)),
         )
+
+    if name == "bl_concurrency_guide":
+        # 宿主侧工具：从源码闭包推导「工具→通道方法」，从实测账本取耗时分位。
+        # **不碰游戏、不需要游戏在跑**（与 bl_build_check / bl_json_health 同类）。
+        import bl_concurrency_guide as _cg
+        return _cg.build_report(log_dir=args.get("logDir"), tool=args.get("tool"))
 
     if name == "bl_build_check":
         return {"ok": True, "buildCheck": build_check()}

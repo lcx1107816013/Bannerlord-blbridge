@@ -346,6 +346,10 @@
       "gabp": "bridge/explain_exceptions",
       "note": "宿主侧只读：解释 exceptions.jsonl 的记录口径并读明细。关键口径：行数!=出现次数（去重键=(类型|栈首帧)，只在首次出现落盘 ⇒ 实测 4 行 vs 真实 44 次）；seq 是排空那刻的全局快照不是序号（可被多条共享）；stackHead 只 1 帧且常是 BCL 抛助记帧 ⇒ 这类异常来源不可判定；t=session 分段=进程重启，跨段累加 seen 是错的；盲区=只记托管异常（JIT 期/原生崩溃要 bl_crash）"
     },
+    "bl_concurrency_guide": {
+      "gabp": "bridge/get_concurrency_limits",
+      "note": "宿主侧只读：并发纪律（哪些工具能并发、最多几路）。所有通道工具共用同一条串行泵；实测并发提交可行（pending 深度 max=8）但执行严格串行（seq 单调 = 文件名序）——代价不立刻线性外溢，游戏端一次轮询捞走整批，外溢判据 N×单次耗时>=250ms。工具→方法映射由解析 bl_mcp.py 闭包得出，耗时取账本分位数 ⇒ 不随改名/负载腐化；用 p90 而非中位数判重（skip_video 双峰 p50=1ms/p90=459ms）"
+    },
     "bl_patches": {
       "gabp": "bridge/list_patches",
       "note": "游戏侧只读：反射调 Harmony 公开内省 API，回答「谁补了哪个方法」；conflicts 只列被 ≥2 个 owner 补的方法，transpilerClash 标出最危险的一类（改 IL，出错即崩溃）。不建 Harmony 实例、不 patch、不改 IL"
