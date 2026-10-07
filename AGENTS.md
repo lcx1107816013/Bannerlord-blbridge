@@ -136,8 +136,31 @@ python tools\bl_check_clock_reset.py                 # 多轮日志「时钟同�
 python tools\bl_check_gabp_names.py --selftest       # GABP 命名表 ↔ 源码 method ↔ MCP 工具 三方一致（含注入故障对照组）
 python tools\bl_check_dispatch.py                    # MCP 工具 声明 ↔ 派发 ↔ 分组 一致（防"列得出却调不动"）
 python tools\bl_check_dispatch.py --selftest         # 上面那个的注入故障对照组（3 类，必须全抓到）
+python tools\bl_check_deploy_consistency.py          # 部署产物 ↔ 源码 一致性（哈希 + 逐文件 + 关键符号双编码）
+python tools\bl_check_deploy_consistency.py --selftest  # 上面那个的反向对照（注入缺失符号必须报警）
+python tools\bl_check_deploy_consistency.py --strict-drift  # ★ 把"部署副本 mcp/*.py ↔ 仓库 tools/*.py 不一致"**升为 FAIL**
+                                                    #   （默认只作 note：现场走仓库 tools/、漂移不阻塞当前工作。
+                                                    #    发布前 / 交给别人之前建议开 —— 已知代价是"会误导从 Modules\\
+                                                    #    跑工具的人"：旧副本跑 build_check 只有 UTF-16 逻辑、对类型名假阴性）
+python tools\baddataspec\run_selftest.py             # 坏数据判据离线对照（49 项，含"合法 0 数量/匪帮"不许报）
 python tools\bl_check_envelope.py --inject           # **真实响应**的信封不变式（游戏须跑过；含注入对照组）
 ```
+
+> **`bl_check_deploy_consistency.py` 补的洞（2026-10-08 增）**：本轮出现过一个**假阻塞** ——
+> "部署的 DLL 不含 `get_hero` ⇒ 必须先重新部署"。它由两个错因叠加，两个都是本项目反复防的那类：
+> ① 用 `Get-ChildItem -Filter 'BlBridge.dll'` 列目录时**漏掉了** `BlBridge.dll.bak_*`
+>   （该 filter 匹配不到带后缀的名字）⇒ 一份 `.bak` 被当成"唯一的那一份"；
+> ② **只查一种编码**：`get_hero` 是**字面量**（在 `#US`/UTF-16LE），ASCII/UTF-8 搜**必然**搜不到
+>   ⇒ 与 `ab13ec9` 修的是同一个洞的镜像面。
+>
+> 判据（三段 + 双向对照）：**A** 部署 DLL 的 sha256 是否等于**与它同目录**的 `build_manifest.json`；
+> **B** 清单 `sources` 逐文件 vs 磁盘 `src/`（点名差异文件）；**C** 关键符号
+> （`get_hero`/`scan_bad_data`/`unsupported_in_campaign` 是字面量，`IsCampaignActive` 是方法名
+> ⇒ 两种都放，**只查一种会在这里立刻暴露**）。
+> `--selftest` 注入 4 类故障 + 断言"字面量对 UTF-8-only 假阴性、方法名对 UTF-16-only 假阴性"。
+> ⚠️ **A 段刻意只与"同目录"的清单对账**：实测仓库 `out\BlBridge.dll`（`6470FC1E`）与部署的
+> `4EC10B4F` **源码哈希完全相同、仅 builtUtc 不同** ⇒ **同日重编也会产出不同字节**（构建非确定性）
+> ⇒ 拿仓库 `out/` 的清单当基准会得到**假的 stale 结论**。
 
 > **`bl_check_envelope.py` 补的洞（2026-10-05 增）**：`tools/jsontest/EnvelopeTest.cs` 验的是
 > `Protocol.Success/Failure` **构造出来的**信封 —— 它**从没见过一个真正走过文件 IPC 的响应**。

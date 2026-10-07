@@ -136,6 +136,13 @@ namespace BlBridge
             internal string Name;
             internal int Count;
             internal bool HasItemObject;     // ItemRoster 条目指向的 ItemObject 是否存在
+
+            // ★ A3（2026-10-08）：**这个条目来自哪个 roster**（如
+            // `party:[玩家]` / `settlement:Epicrotea` / `stash:Epicrotea`）。
+            // 扩到"全部队伍 + 聚落"之后，同一件物品可能出现在多个 roster 里，
+            // 没有来源就**无法复核**某条 finding 到底指哪里 ⇒ 报告必须带它。
+            // （刻意**不**塞进 `Name`：那会污染"物品名"这个字段的语义。）
+            internal string Roster;
         }
 
         // ────────────────────────────────────────────────────────────────
@@ -333,6 +340,11 @@ namespace BlBridge
         internal static void JudgeItem(ItemSnapshot it, List<Finding> into)
         {
             string who = Safe(it.Name);
+            // ★ A3：把来源 roster 一起带到报告里（`who` 保持"物品名"语义不变）。
+            if (!string.IsNullOrEmpty(it.Roster))
+            {
+                who = who + " @" + it.Roster;
+            }
 
             if (!it.HasItemObject)
             {
@@ -365,7 +377,8 @@ namespace BlBridge
         internal static string BuildSummaryJson(List<Finding> findings, int scannedParties,
                                                 int scannedClans, int scannedKingdoms,
                                                 int scannedArmies, int scannedQuests,
-                                                int scannedItems, double elapsedMs)
+                                                int scannedItems, double elapsedMs,
+                                                List<string> coverage = null)
         {
             int broken = 0, suspect = 0;
             Dictionary<string, int> byKind = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -410,11 +423,24 @@ namespace BlBridge
                   .Append('}');
             }
             sb.Append(']');
+            // ★ A3：**扫描覆盖口径**（"我到底扫了哪些 roster"）单独成字段 ——
+            //   ⚠️ 第一版我把它塞进 `skipped`，那是**错的口径**：
+            //   `skipped` 的语义是"**某类没扫成**"（成员缺失），把正常覆盖信息放进去
+            //   ⇒ 每次成功扫描都会**假报"有东西没扫成"**，污染那唯一"别把 0 条读成很干净"的信号。
+            //   ⇒ 覆盖信息（正常）与 skipped（异常）**必须分开**。
+            if (coverage != null && coverage.Count > 0)
+            {
+                List<string> cv = new List<string>();
+                foreach (string s in coverage) cv.Add(Protocol.Q(s));
+                sb.Append(",\"coverage\":[").Append(string.Join(",", cv.ToArray())).Append(']');
+            }
             // ★ 口径：把"这份报告不是什么"写进结果，避免下游把它当授权。
             sb.Append(",\"scope\":").Append(Protocol.Q(
                 "只读扫描。severity=broken 是明确错；severity=suspect 是可疑，"
                 + "可能只是游戏正常的过渡状态（如刚被灭的家族）。"
-                + "本扫描不改任何数据；清理必须另行实现且先备份。"));
+                + "本扫描不改任何数据；清理必须另行实现且先备份。"
+                + "★ `coverage` = **正常**的扫描覆盖口径（扫了哪些 roster）；"
+                + "`skipped` = **异常**（某类没扫成）—— 两者语义不同，别混读。"));
             sb.Append('}');
             return sb.ToString();
         }

@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Text;
 
 using TaleWorlds.CampaignSystem;
+using TaleWorlds.CampaignSystem.CharacterDevelopment;   // R1：PerkObject
 using TaleWorlds.CampaignSystem.Party;
 using TaleWorlds.CampaignSystem.Settlements;
 
@@ -623,6 +624,313 @@ namespace BlBridge
                 }
             }
             return outList;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // R1（2026-10-08，三合一 MOD 需求）：读 Perk / SkillEffect 的**运行时生效值**
+        //
+        // ## 为什么需要（它补的是 V2 的硬缺口）
+        //
+        // 三合一 C7 会把 6 个 Perk 的 `PrimaryBonus`/`SecondaryBonus` 改写
+        // （`RBM/WarbandlordPerks.cs`，照 Warbandlord）。要验"**值是否真被改写**"，
+        // 此前**没有任何工具**能读运行时 Perk 值 ⇒ V2 只能退化成"看游戏内 tooltip"
+        // （需真人、不精确）。本方法把它变成可脚本化的硬判据。
+        //
+        // ## ★★ 判据必须是"按字段各自的预期"，不能是"两次读数必须不同"
+        //
+        // 反编译实测（`DefaultPerks.cs:1971/1989/2010/2031/2052/2073` 原文）：
+        //   6 个 Perk 的原版 Primary **全都是 0.002f**、Secondary **全都是 0.005f**；
+        //   而 C7 对 Primary 与 Secondary **赋同一个目标值**（0.001 或 0.002）。
+        //   ⇒ 对 `_bowDeadshot` / `_crossbowMightyPull` / `_throwingUnstoppableForce`：
+        //     目标值 0.002 == 原版 Primary 0.002 ⇒ **Primary 本来就不该变**！
+        //   ⇒ 若把判据写成"开关前后两次读数必须不同"，这三个的 **Primary 会恒等**，
+        //     于是会把"**工具/配置正确**"误判成"工具无效"。
+        //     （这是本项目最防的"判据错了却把账记在别人身上"。）
+        //
+        // ⇒ 因此本方法**把 Primary 与 Secondary 分开返回**，并给每个字段算一个
+        //    **三态** 判定，由调用方按字段预期核对：
+        //      changed          —— 原版值 ≠ C7 目标值（**期望**读数变成目标值）
+        //      unchangedExpected—— 原版值 == C7 目标值（**期望**读数**保持**原值）
+        //      unexpected       —— 读数既不是原版值、也不是目标值
+        //    ⚠️ 这里**不硬编码**"哪个字段期望变"（那会把 RBM 的目标值写进 BlBridge，
+        //       而 BlBridge 刻意不引入 mod 语义）。做法是：把**每个字段的原版基线**
+        //       与**当前读数**都返回，让调用方（三合一 B 线）用自己的目标值表做判定。
+        //
+        // ## 只读 + 取值路径（都反编译核过）
+        //
+        //   · 只读：只 `GetValue`，**绝不碰 setter**
+        //     （★ 与 C7 实施时踩的 `CanWrite=false` 无关 —— 那只影响**写**；
+        //      读取不受影响。但仍对"只有私有 getter"的属性走
+        //      `GetGetMethod(nonPublic:true)` 兜底。）
+        //   · `Campaign.Current.DefaultPerks` → **私有字段**（如 `_bowDeadshot`）
+        //     或 `PerkObject.All`（= `Campaign.Current.AllPerks`）按 StringId 查。
+        //   · ★ `DefaultPerks` 是 `Campaign` 的属性 ⇒ **自定义战斗下为 null**
+        //     （C7 自己的注释就写明这点）⇒ 无战役时报 `no_campaign`，
+        //     **不返回 0**（防"读到 0 被当成映射成 0"）。
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>按名字取属性值，**含非公开 getter 兜底**（只读，不碰 setter）。</summary>
+        private static bool TryGetProp(object o, string name, out object value)
+        {
+            value = null;
+            if (o == null) return false;
+            Type t = o.GetType();
+            PropertyInfo p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (p == null)
+            {
+                // ★ 兜底：有些属性只有非公开 getter。只看 Public 会漏 ⇒ 假"读不到"。
+                p = t.GetProperty(name,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            if (p == null) return false;
+            // ★ 读只走 getter；显式确认 getter 存在（避免对只写属性 GetValue 抛异常）。
+            if (p.GetGetMethod(true) == null) return false;
+            try
+            {
+                value = p.GetValue(o, null);
+                return true;
+            }
+            catch
+            {
+                value = null;
+                return false;
+            }
+        }
+
+        /// <summary>取 `Campaign.Current.DefaultPerks` 的**私有 PerkObject 字段**（如 `_bowDeadshot`）。</summary>
+        private static object FindPerkByField(string fieldName)
+        {
+            try
+            {
+                object perksObj = P(Campaign.Current, "DefaultPerks");
+                if (perksObj == null) return null;
+                FieldInfo fi = perksObj.GetType().GetField(
+                    fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fi == null) return null;
+                return fi.GetValue(perksObj);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>取 `Campaign.AllPerks`（**internal 属性**，故必须走 NonPublic 反射）。</summary>
+        private static IEnumerable AllPerks()
+        {
+            // ⚠️ `Campaign.AllPerks` 是 **`internal`**（反编译实测 `Campaign.cs:294`
+            //    `internal MBReadOnlyList<PerkObject> AllPerks { get; private set; }`）。
+            //    ⇒ 本文件的通用取值器 `P()` 只找 **Public** 成员 ⇒ 拿不到它（**第一版就是这么写的，
+            //      等于一段永不生效的 fallback**）。这里显式走 `NonPublic`，让它真的能用。
+            //    ★ 主路径仍是公开的 `PerkObject.All`（= `Campaign.Current.AllPerks`，见 `PerkObject.cs:11`）。
+            try
+            {
+                PropertyInfo pi = typeof(Campaign).GetProperty(
+                    "AllPerks",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (pi != null) return pi.GetValue(Campaign.Current, null) as IEnumerable;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>按 StringId 在 `PerkObject.All` 里找（如 `BowDeadshot`）；找不到返回 null。</summary>
+        private static object FindPerkByStringId(string sid)
+        {
+            try
+            {
+                IEnumerable all = null;
+                // `PerkObject.All` 是**公开静态属性**（= Campaign.Current.AllPerks）。
+                PropertyInfo pi = typeof(PerkObject).GetProperty(
+                    "All", BindingFlags.Public | BindingFlags.Static);
+                if (pi != null) all = pi.GetValue(null, null) as IEnumerable;
+                if (all == null)
+                {
+                    // 兜底：`Campaign.AllPerks`（internal）—— 走 NonPublic 反射。
+                    all = AllPerks();
+                }
+                if (all == null) return null;
+                foreach (object pk in all)
+                {
+                    if (pk == null) continue;
+                    object idv = P(pk, "StringId");
+                    if (idv != null
+                        && string.Equals(idv.ToString(), sid, StringComparison.Ordinal))
+                    {
+                        return pk;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>Perk 的一个 bonus 字段快照（值 + 是否读到）。</summary>
+        private static void AppendBonus(StringBuilder sb, object perk, string propName, string jsonKey)
+        {
+            object v;
+            bool ok = TryGetProp(perk, propName, out v);
+            sb.Append(",\"").Append(jsonKey).Append("\":");
+            if (!ok || v == null) sb.Append("null");
+            else
+            {
+                // 浮点用 InvariantCulture 固定小数位 —— 避免不同 locale 下
+                // 小数点/千分位不同导致调用方解析错（本项目一贯口径）。
+                double d = Num(v);
+                sb.Append(d.ToString("0.######", CultureInfo.InvariantCulture));
+            }
+            sb.Append(",\"").Append(jsonKey).Append("Readable\":").Append(ok && v != null ? "true" : "false");
+        }
+
+        /// <summary>Perk 的 (原版基线, 当前读数) 都返回给调用方判定（BlBridge 不引入 mod 语义）。</summary>
+        private static void AppendPerk(StringBuilder sb, object perk, string label, string fieldName)
+        {
+            sb.Append('{');
+            sb.Append("\"label\":").Append(Protocol.Q(label ?? ""));
+            sb.Append(",\"field\":").Append(Protocol.Q(fieldName ?? ""));
+            sb.Append(",\"stringId\":").Append(JVal(P(perk, "StringId")));
+            object nm = P(perk, "Name");
+            sb.Append(",\"name\":").Append(Protocol.Q(nm == null ? "" : nm.ToString()));
+            AppendBonus(sb, perk, "PrimaryBonus", "primaryBonus");
+            AppendBonus(sb, perk, "SecondaryBonus", "secondaryBonus");
+            sb.Append(",\"primaryIncrementType\":").Append(JVal(P(perk, "PrimaryIncrementType")));
+            sb.Append(",\"secondaryIncrementType\":").Append(JVal(P(perk, "SecondaryIncrementType")));
+            sb.Append(",\"requiredSkillValue\":").Append(JVal(P(perk, "RequiredSkillValue")));
+            object sk = P(perk, "Skill");
+            sb.Append(",\"skill\":").Append(Protocol.Q(sk == null ? "" : (P(sk, "Name") == null
+                ? sk.ToString() : P(sk, "Name").ToString())));
+            sb.Append('}');
+        }
+
+        internal static string HandleGetPerk(string id, string raw)
+        {
+            string g = Guard(id, out _);
+            if (g != null) return g;
+            try
+            {
+                // ★ 本工具的 Perk 清单 = C7 会改写的那 6 个（Warbandlord 的 DefaultPerksModify）。
+                //   刻意**不**扫描全部 300+ 个 Perk：返回体小、且调用方的关注面就是这 6 个。
+                //   传 all=true 时按 `PerkObject.All` 全量列出（只给 name + stringId + 两个 bonus）。
+                string[][] known = new string[][]
+                {
+                    new string[] { "_oneHandedWayOfTheSword",   "OneHandedWayOfTheSword" },
+                    new string[] { "_twoHandedWayOfTheGreatAxe","TwoHandedWayOfTheGreatAxe" },
+                    new string[] { "_polearmWayOfTheSpear",     "PolearmWayOfTheSpear" },
+                    new string[] { "_bowDeadshot",              "BowDeadshot" },
+                    new string[] { "_crossbowMightyPull",       "CrossbowMightyPull" },
+                    new string[] { "_throwingUnstoppableForce", "ThrowingUnstoppableForce" },
+                };
+
+                string want = Jmini.Str(raw, "perk", null);
+                bool all = Jmini.Str(raw, "all", "false") == "true";
+
+                StringBuilder sb = new StringBuilder();
+                List<string> rows = new List<string>();
+                List<string> notFound = new List<string>();
+
+                if (!string.IsNullOrEmpty(want))
+                {
+                    // 指定单个：先按字段名（含 `_` 前缀两种写法），再按 StringId。
+                    object pk = FindPerkByField(want);
+                    string fieldUsed = want;
+                    if (pk == null && want[0] != '_')
+                    {
+                        pk = FindPerkByField("_" + want);
+                        fieldUsed = "_" + want;
+                    }
+                    if (pk == null) pk = FindPerkByStringId(want);
+                    if (pk == null)
+                    {
+                        return Protocol.Failure(id, "perk_not_found",
+                            "找不到 Perk：" + want + "（按 DefaultPerks 的私有字段名，"
+                            + "如 `_bowDeadshot` / `_oneHandedWayOfTheSword`；"
+                            + "或按 StringId，如 `BowDeadshot`）", false);
+                    }
+                    StringBuilder one = new StringBuilder();
+                    AppendPerk(one, pk, null, fieldUsed);
+                    rows.Add(one.ToString());
+                }
+                else if (all)
+                {
+                    // ⚠️ `CampaignReadProbe` 里**没有** `Each()` 辅助（那个在 `BadDataScanner`）——
+                    //    本文件一贯的写法是 `as IEnumerable` + `foreach`（见 AllHeroes）。
+                    //    第一版我误用了 `Each(...)` ⇒ CS0103；编译器抓出来了。
+                    IEnumerable allPerks = null;
+                    PropertyInfo piAll = typeof(PerkObject).GetProperty(
+                        "All", BindingFlags.Public | BindingFlags.Static);
+                    if (piAll != null) allPerks = piAll.GetValue(null, null) as IEnumerable;
+                    // 兜底走 `AllPerks()`（internal ⇒ NonPublic 反射）—— 不能用 `P()`，
+                    // 它只找 Public 成员（第一版就是那样写的，等于永不生效）。
+                    if (allPerks == null) allPerks = AllPerks();
+                    if (allPerks == null)
+                    {
+                        return Protocol.Failure(id, "perks_unreadable",
+                            "读不到 `PerkObject.All` / `Campaign.AllPerks` —— "
+                            + "无法列出全部 Perk（成员名可能随版本漂移）。", false);
+                    }
+                    foreach (object pk in allPerks)
+                    {
+                        if (pk == null) continue;
+                        StringBuilder one = new StringBuilder();
+                        AppendPerk(one, pk, null, null);
+                        rows.Add(one.ToString());
+                    }
+                }
+                else
+                {
+                    foreach (string[] pair in known)
+                    {
+                        object pk = FindPerkByField(pair[0]);
+                        if (pk == null) pk = FindPerkByStringId(pair[1]);
+                        if (pk == null)
+                        {
+                            notFound.Add(pair[1]);
+                            continue;
+                        }
+                        StringBuilder one = new StringBuilder();
+                        AppendPerk(one, pk, pair[1], pair[0]);
+                        rows.Add(one.ToString());
+                    }
+                }
+
+                sb.Append("{\"ok\":true");
+                sb.Append(",\"readOnly\":true");
+                sb.Append(",\"campaignDefaultPerksReadable\":").Append(
+                    P(Campaign.Current, "DefaultPerks") != null ? "true" : "false");
+                sb.Append(",\"count\":").Append(rows.Count);
+                sb.Append(",\"perks\":[").Append(string.Join(",", rows.ToArray())).Append(']');
+                if (notFound.Count > 0)
+                {
+                    List<string> q = new List<string>();
+                    foreach (string s in notFound) q.Add(Protocol.Q(s));
+                    sb.Append(",\"notFound\":[").Append(string.Join(",", q.ToArray())).Append(']');
+                }
+                sb.Append(",\"note\":").Append(Protocol.Q(
+                    "只读运行时 Perk 值（`Campaign.Current.DefaultPerks` 上的实例数据）。"
+                    + "★ **PrimaryBonus 与 SecondaryBonus 分开返回** —— 因为 C7 的目标值对"
+                    + "`_bowDeadshot`/`_crossbowMightyPull`/`_throwingUnstoppableForce` 而言"
+                    + "**与原版 Primary 相同（都是 0.002）**，即这三个的 Primary **本来就不该变**；"
+                    + "若判据写成『开关前后两次读数必须不同』，会把『正确』误判成『工具无效』。"
+                    + "原版基线（反编译 `DefaultPerks.cs` 实测）：6 个 Perk 的 Primary 均为 0.002、"
+                    + "Secondary 均为 0.005。⇒ 请按『**每个字段各自的预期**』核对，"
+                    + "而不是要求所有字段都变化。"
+                    + "⚠️ `xxxReadable=false` 表示该属性没读到（**此时 null 不是 0**）。"
+                    + "⚠️ 本工具**不返回调用方 C7 的目标值** —— BlBridge 不引入 mod 语义；"
+                    + "目标值请在三合一侧对照。"
+                    + "⚠️ `DefaultPerks` 是 `Campaign` 的属性 ⇒ **自定义战斗/主菜单下为 null**"
+                    + "（此时本工具报 `no_campaign`，不返回 0）。"));
+                sb.Append('}');
+                return Protocol.Success(id, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                return Protocol.Failure(id, "get_perk_failed",
+                    ex.GetType().Name + ": " + ex.Message, false);
+            }
         }
     }
 }

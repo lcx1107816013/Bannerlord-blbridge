@@ -133,6 +133,8 @@ namespace BlBridge
             int scannedParties = 0, scannedClans = 0, scannedKingdoms = 0;
             int scannedArmies = 0, scannedQuests = 0, scannedItems = 0;
             List<string> skipped = new List<string>();
+            // ★ A3：**正常**的扫描覆盖口径（扫了哪些 roster）—— 与 skipped（异常）分开。
+            List<string> coverage = new List<string>();
 
             // ── 部队 ─────────────────────────────────────────────────────────
             if (want("party"))
@@ -267,16 +269,85 @@ namespace BlBridge
                 }
             }
 
-            // ── 物品（玩家队伍的 ItemRoster）──────────────────────────────────
+            // ── 物品（★ A3：扩到**全部队伍 + 聚落**，不再只扫玩家队伍）──────────
+            //
+            // ## 为什么要扩（原状 = 只扫 `MainParty.ItemRoster`）
+            //
+            // 旧版只扫玩家队伍，于是"其他队伍/聚落的坏物品"**结构性扫不到** ——
+            // 而这类恰恰更值得扫：AI 队伍的物品是引擎自己发的，
+            // 玩家队伍的物品经过大量买卖/战利品路径，两者的坏数据成因不同。
+            // 报告里"物品 0 条"若只覆盖一个队伍，会被误读成"整档物品都干净"。
+            //
+            // ## ★ 两条必须守住的口径
+            //
+            // ① **不能只报总条数**：口径必须写清"扫了几个 roster"，
+            //    否则"扩了范围"与"没扩"在报告上看起来一样（本项目的教训：
+            //    数量类结论要能逐条列举，不能只给个数）。
+            // ② **数量读取沿用已修正的 `GetItemNumber(ItemObject)`**（见其方法注释）——
+            //    曾因传索引导致**全档误报 60 条"数量≤0"**，是"静默错"的典型。
+            //
+            // ⚠️ 仍然**只读**：只调 `GetItemAtIndex`（取元素）与 `GetItemNumber`（读数量），
+            //    不调任何 Add/Remove/RemoveIf。`ItemRoster` 的写入口在 §2.3 有表，
+            //    本文件**一个都不用**。
             if (want("item"))
             {
-                object main = Hero.MainHero;
-                object mainParty = P(main, "PartyBelongedTo");
-                object roster = P(mainParty, "ItemRoster");
-                if (roster == null) { skipped.Add("MainParty.ItemRoster=null"); }
+                // 口径记账：每个被扫到的 roster 记一行（谁 + 几条），便于对照"扩了范围"。
+                List<string> itemRosterScope = new List<string>();
+
+                // 待扫 roster 收集器：统一走同一个扫描循环 ⇒ 口径一致、不会漏改。
+                List<KeyValuePair<string, object>> rosters = new List<KeyValuePair<string, object>>();
+
+                // ① 全部队伍（含玩家队伍 —— 它本来就在 MobileParties 里）。
+                object parties = null;
+                try { parties = Campaign.Current.MobileParties; } catch { }
+                if (parties == null) { skipped.Add("MobileParties=null（队伍物品未扫）"); }
                 else
                 {
+                    foreach (object mp in Each(parties))
+                    {
+                        object r = P(mp, "ItemRoster");
+                        if (r == null) continue;
+                        string label = S(mp, "Name");
+                        if (string.IsNullOrEmpty(label)) label = S(mp, "StringId");
+                        bool isMain = B(mp, "IsMainParty");
+                        rosters.Add(new KeyValuePair<string, object>(
+                            "party:" + (isMain ? "[玩家]" : "") + (label ?? "?"), r));
+                    }
+                }
+
+                // ② 全部聚落：`Settlement.ItemRoster`（= Party.ItemRoster）+
+                //     ★ `Settlement.Stash`（城镇/城堡的**储备库**，与 ItemRoster 是**两个** roster）。
+                //     实测依据：`Settlement.ItemRoster => Party.ItemRoster`（反编译），
+                //     且 `public readonly ItemRoster Stash;` 是**独立字段** ⇒ 必须分别扫。
+                object settles = null;
+                try { settles = Campaign.Current.Settlements; } catch { }
+                if (settles == null) { skipped.Add("Settlements=null（聚落物品未扫）"); }
+                else
+                {
+                    foreach (object s in Each(settles))
+                    {
+                        string label = S(s, "Name");
+                        if (string.IsNullOrEmpty(label)) label = S(s, "StringId");
+                        // ⚠️ 村庄没有 ItemRoster（其 Party 可能为 null）⇒ 取到 null 就跳过，
+                        //    这不算"扫不到"，是**该聚落本就没有**这类 roster。
+                        object sr = P(s, "ItemRoster");
+                        if (sr != null)
+                        {
+                            rosters.Add(new KeyValuePair<string, object>("settlement:" + (label ?? "?"), sr));
+                        }
+                        object stash = P(s, "Stash");
+                        if (stash != null)
+                        {
+                            rosters.Add(new KeyValuePair<string, object>("stash:" + (label ?? "?"), stash));
+                        }
+                    }
+                }
+
+                foreach (KeyValuePair<string, object> entry in rosters)
+                {
+                    object roster = entry.Value;
                     int n = CountOf(roster);
+                    itemRosterScope.Add(entry.Key + "(" + n + ")");
                     for (int i = 0; i < n; i++)
                     {
                         scannedItems++;
@@ -285,7 +356,10 @@ namespace BlBridge
                         catch { }
                         BadDataSpec.ItemSnapshot its = new BadDataSpec.ItemSnapshot
                         {
+                            // ★ A3：`Name` 保持"物品名"，来源 roster 走**单独的** `Roster` 字段
+                            //   （不塞进 Name —— 那会污染"物品名"的语义，且让判据难以离线对照）。
                             Name = item == null ? null : (S(item, "Name") ?? S(item, "StringId")),
+                            Roster = entry.Key,
                             // ⚠️ 真机实测修正（2026-10-07）：`GetItemNumber` 的签名是
                             //    **`GetItemNumber(ItemObject item)`** —— 收的是**物品对象**，
                             //    不是索引！第一版传了 index，`MethodInfo.Invoke` 找不到匹配
@@ -297,6 +371,13 @@ namespace BlBridge
                         BadDataSpec.JudgeItem(its, findings);
                     }
                 }
+
+                // 口径记账：扫描覆盖信息走**独立的 coverage 字段**（**不是** skipped）——
+                // ⚠️ 第一版塞进 `skipped` 是**错的口径**：`skipped` 的语义是"某类没扫成"（异常），
+                //   把正常覆盖信息放进去 ⇒ 每次成功扫描都**假报"有东西没扫成"**。
+                itemRosterScope.Sort(StringComparer.Ordinal);
+                coverage.Add("item: 共扫 " + rosters.Count + " 个 roster —— "
+                             + string.Join("; ", itemRosterScope.ToArray()));
             }
 
             // ── 出报告 ───────────────────────────────────────────────────────
@@ -309,7 +390,7 @@ namespace BlBridge
             }
             StringBuilder sb = new StringBuilder(BadDataSpec.BuildSummaryJson(
                 findings, scannedParties, scannedClans, scannedKingdoms,
-                scannedArmies, scannedQuests, scannedItems, ms));
+                scannedArmies, scannedQuests, scannedItems, ms, coverage));
             // 注入 skipped：**扫描不了的类别必须显式说**，
             // 否则"某一类异常导致整类 0 条"会被误读成"这一类很干净"。
             if (skipped.Count > 0)

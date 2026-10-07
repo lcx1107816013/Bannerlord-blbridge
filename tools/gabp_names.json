@@ -258,6 +258,12 @@
       "kind": "read",
       "needs": "campaign",
       "note": "B7（隔壁项目需求）· 只读**运行时**英雄血量：hitPoints/maxHitPoints/overflow/isOverflow/isWounded/isDead/isAlive/clan/party。补真实缺口：C6-④「溢出修复」的验收判据就是比较当前与最大血量，而此前 get_entity 读的是静态索引库（预计算表、非运行时）、bl_list_parties 无 hp 字段、RBM 的 Debug.Print 也不落盘。overflow = hitPoints - maxHitPoints（>0 即要夹回的量）。hpReadable=false 时 hp/max 的 0 不是真值。**不提供 woundedLimit** —— Hero.WoundedLimit 在 1.4.8 实测不存在。"
+    },
+    "get_perk": {
+      "gabp": "campaign/get_perk",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "R1（2026-10-08，隔壁项目需求）· 只读**运行时** Perk 生效值：Campaign.Current.DefaultPerks 上 6 个 Perk（C7 会改写的那批）的 primaryBonus/secondaryBonus 及 Readable 标志。补真实缺口：三合一 C7 改写 Perk bonus，验『值真的被改写』此前只能用游戏内 tooltip（需真人、不精确）。★ Primary 与 Secondary **分开返回** —— 原版基线（反编译 DefaultPerks.cs:1971/1989/2010/2031/2052/2073）Primary 全 0.002、Secondary 全 0.005，而 C7 对 Primary/Secondary 赋同一目标值（0.001 或 0.002）⇒ 对 _bowDeadshot/_crossbowMightyPull/_throwingUnstoppableForce 而言 Primary **本来就不该变**（目标 0.002 == 原版 0.002）；故判据必须按**每字段各自预期**核对，写成『开关前后两次读数必须不同』会把正确误判成工具无效。不返回调用方目标值（BlBridge 不引入 mod 语义）。DefaultPerks 是 Campaign 属性 ⇒ 自定义战斗/主菜单下为 null ⇒ 报 no_campaign，不返回 0。"
     }
   },
   "tools": {
@@ -491,6 +497,10 @@
     "bl_scan_bad_data": {
       "gabp": "campaign/scan_bad_data",
       "note": "坏数据扫描（**只读**，需战役上下文）：死部队/空家族/无效物品/卡死任务/损坏军团。**只报不改** —— 清理必须另行实现且先备份（写新档、不覆盖原档）。返回按 kind 分组，每条带 severity/code/subject/detail/**evidence**（判据事实，便于人工复核）。⚠️ severity 两档意义不同：broken=结构上不可能正常（活跃部队无 PartyComponent、已结束任务仍登记在 QuestManager）；suspect=可疑，可能只是正常过渡态（刚被灭的家族），**不可作为自动清理依据**。⚠️ **skipped 非空表示某类没扫成** —— 别把『0 条』读成『很干净』。"
+    },
+    "bl_get_perk": {
+      "gabp": "campaign/get_perk",
+      "note": "只读运行时 Perk 生效值（需战役上下文）：C7 会改写的那 6 个 Perk 的 primaryBonus/secondaryBonus + Readable 标志，Primary 与 Secondary **分开返回**。★ 原版基线实测 Primary 全 0.002 / Secondary 全 0.005，而 C7 对 Primary/Secondary 赋同一目标值 ⇒ `_bowDeadshot`/`_crossbowMightyPull`/`_throwingUnstoppableForce` 的 **Primary 本来就不该变**（目标 0.002 == 原版 0.002）；判据必须按**每字段各自预期**核对，写成『两次读数必须不同』会把正确误判成工具无效。不返回调用方目标值（BlBridge 不引入 mod 语义）。DefaultPerks 是 Campaign 属性 ⇒ 自定义战斗/主菜单下为 null ⇒ 报 `no_campaign`，不返回 0。"
     }
   }
 }

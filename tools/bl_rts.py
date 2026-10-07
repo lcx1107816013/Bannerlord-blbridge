@@ -114,6 +114,23 @@ def apply(edits, dry_run=False, allow_missing=False, path=None):
     text, bom = _read_text(path)
     lines = text.splitlines()
 
+    # ★★ 行尾风格必须**保留原样**（2026-10-08 修；与 bl_mcp.apply_config 同一缺陷）。
+    #   实测：真实 `RTSCameraConfig.xml` 是 **CRLF + BOM**（3343 B / 57 个 CRLF）；
+    #   旧写路径无条件用 "\n" 拼回 ⇒ **静默把整个文件改成 LF-only**，
+    #   而返回里只说"改了 N 个键" ⇒ **报告与事实不符**。
+    _raw = io.open(path, "rb").read()
+    _n_crlf = _raw.count(b"\r\n")
+    _n_lf = _raw.count(b"\n") - _n_crlf
+    if _n_crlf > 0 and _n_lf == 0:
+        line_ending, newline = "CRLF", "\r\n"
+    elif _n_crlf == 0 and _n_lf > 0:
+        line_ending, newline = "LF", "\n"
+    elif _n_crlf == 0 and _n_lf == 0:
+        line_ending, newline = "none", "\n"
+    else:
+        line_ending = "mixed"
+        newline = "\r\n" if _n_crlf >= _n_lf else "\n"
+
     info = {}
     for idx, line in enumerate(lines):
         m = _LINE_RE.match(line)
@@ -155,9 +172,10 @@ def apply(edits, dry_run=False, allow_missing=False, path=None):
     backup = path + ".bak_" + time.strftime("%Y%m%d_%H%M%S")
     shutil.copy2(path, backup)
 
-    body = "\n".join(new_lines)
-    if text.endswith("\n") and not body.endswith("\n"):
-        body += "\n"
+    # ★ 按原文件行尾拼回（不是硬编码 "\n"）。
+    body = newline.join(new_lines)
+    if _raw.endswith(b"\n"):
+        body += newline
     data = body.encode("utf-8")
     if bom:
         data = b"\xef\xbb\xbf" + data
@@ -173,7 +191,35 @@ def apply(edits, dry_run=False, allow_missing=False, path=None):
     os.replace(tmp, path)
 
     check = read(list(want.keys()), path=path)
-    return dict(result, ok=True, backup=backup, verified=check)
+    # ★ 写后**字节级**事实（与 bl_mcp.apply_config 同口径）：行尾/BOM 是否守住、字节增量。
+    _after = io.open(path, "rb").read()
+    _a_crlf = _after.count(b"\r\n")
+    _a_lf = _after.count(b"\n") - _a_crlf
+    if _a_crlf > 0 and _a_lf == 0:
+        after_ending = "CRLF"
+    elif _a_crlf == 0 and _a_lf > 0:
+        after_ending = "LF"
+    elif _a_crlf == 0 and _a_lf == 0:
+        after_ending = "none"
+    else:
+        after_ending = "mixed"
+    out = dict(result, ok=True, backup=backup, verified=check)
+    out["fileFacts"] = {
+        "lineEndingBefore": line_ending,
+        "lineEndingAfter": after_ending,
+        "lineEndingPreserved": (line_ending == after_ending),
+        "bomBefore": bool(bom),
+        "bomAfter": _after.startswith(b"\xef\xbb\xbf"),
+        "bytesBefore": len(_raw), "bytesAfter": len(_after),
+        "bytesDelta": len(_after) - len(_raw),
+        "crlfBefore": _n_crlf, "crlfAfter": _a_crlf,
+        "note": ("`changed` 只说**键值**改了什么；本字段说**文件本身**改了什么 —— "
+                 "两者必须一起看（防『只改 1 个键却重写整个文件行尾』这类报告与事实不符）。"),
+    }
+    if not out["fileFacts"]["lineEndingPreserved"]:
+        out["warnings"] = (out.get("warnings") or []) + [
+            "⚠️ 行尾风格**未保持**（%s → %s）" % (line_ending, after_ending)]
+    return out
 
 
 def apply_preset(name, dry_run=False, path=None):

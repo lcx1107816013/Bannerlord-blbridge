@@ -14,6 +14,8 @@ BlBridge 自测：不需要游戏，用合成数据验证 Python 侧（分析器
 import io
 import json
 import os
+import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -27,10 +29,89 @@ import bl_analyze  # noqa: E402
 FAIL = []
 
 
+def _sha(p):
+    return hashlib.sha256(io.open(p, "rb").read()).hexdigest()
+
+
+def assert_param_retargets(tool, args_fn, default_path, copy_path, label):
+    """★ 通用纪律（2026-10-08 立，由一起**真实事故**逼出来）：
+        **凡"新增参数"，必配"参数被转发"的断言。**
+
+    ## 事故现场（`bl_apply_rts_config` 的 `path`）
+    `bl_apply_rts_config` 的派发**既不声明也不转发 `path`** ⇒
+    调用方传 `path=<副本>` 被**静默丢弃**，实际写的是**真实**配置。
+    我当时就是想"写临时副本"，结果**改到了玩家的真档**（已按事故前备份逐字节还原）。
+
+    ★ 危险点：参数"看起来传了"、返回值正常、**没有任何报错** ⇒ 教科书级**静默失效**。
+
+    ## 判据（Lead 定的，比"函数签名收了这个参数"强得多）
+    传一个**非默认目标**，然后**双向**断言：
+      · ① 非默认目标（副本）**确实被改变了** —— 证明参数**生效**；
+      · ② **默认目标 sha 不变** —— 证明它没有偷偷落到默认真档。
+
+    ⚠️ 只断言 ① 是不够的：参数被丢弃后，若某个中间层"顺手"改了默认目标，① 仍可能通过。
+    只有 ①+② 才锁定"**目标真的被换掉了**"。
+
+    ## 用法（供后续**所有**新参数复用）
+        assert_param_retargets(
+            tool="bl_apply_rts_config",
+            args_fn=lambda p: {"edits": [{"key": "ElevatedHeight", "value": "3"}], "path": p},
+            default_path=bl_rts.config_path(),
+            copy_path=<临时副本>,
+            label="rts")
+    """
+    real_sha = _sha(default_path)
+    copy_before = _sha(copy_path)
+    # ⚠️ **不能在模块级直接引用 `bl_mcp`**：它是 `main()` 里的**局部 import**
+    #    （本文件刻意不在模块级 import bl_mcp，避免它在 import 期就跑副作用）。
+    #    第一版我直接写 `bl_mcp.call_tool(...)` ⇒ 本函数一执行就 `NameError`
+    #    （是我自己刚加的断言把它抓出来的）。⇒ 这里**惰性 import**。
+    import bl_mcp as _bm
+    try:
+        r = _bm.call_tool(tool, args_fn(copy_path))
+    except Exception as _e:  # noqa: BLE001
+        check(False, "★参数转发(%s): %s 经派发不抛异常" % (label, tool), repr(_e))
+        return False
+    ok = True
+    c1 = _sha(copy_path) != copy_before
+    check(c1, "★参数转发(%s): 传副本 `path` ⇒ **副本真的被改了**（参数确实生效）"
+              % label, r.get("path"))
+    c2 = _sha(default_path) == real_sha
+    check(c2, "★★参数转发(%s): 传副本 `path` ⇒ **默认目标 sha 不变**"
+              "（防『参数被静默丢弃、落到默认真档』）" % label,
+          "default sha %s" % real_sha[:12])
+    c3 = os.path.normcase(r.get("path") or "") == os.path.normcase(copy_path)
+    check(c3, "★参数转发(%s): 返回里回显的 `path` 就是副本绝对路径" % label, r.get("path"))
+    return ok and c1 and c2 and c3
+
+
 def check(cond, label, extra=""):
     print(("  [OK] " if cond else "  [FAIL] ") + label + (("  <- " + str(extra)) if extra else ""))
     if not cond:
         FAIL.append(label)
+
+
+# ── A5 判据（部署一致性）用的小夹具：只在临时目录里造合成清单/源码 ──────
+#
+# 刻意写成**独立函数**而不是内联：让"注入了什么"一眼可见，
+# 并保证它们**只碰 tempfile**（AGENTS.md：自测绝不碰真配置/真部署）。
+
+def _write_a5_manifest(d, obj):
+    """把一个（可被篡改的）清单写进临时目录，返回路径。"""
+    p = os.path.join(d, "build_manifest.json")
+    with io.open(p, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False))
+    return p
+
+
+def _mk_a5_src(d, name):
+    """在临时目录造一个 src/（内容与清单**故意不一致**，用于 B 段反向对照）。"""
+    s = os.path.join(d, "src")
+    if not os.path.isdir(s):
+        os.makedirs(s)
+    with io.open(os.path.join(s, name), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("// tampered for reverse control\n")
+    return s
 
 
 # ── 1. 合成一场战斗 ───────────────────────────────────────────────────
@@ -1467,6 +1548,52 @@ def main():
     except Exception as _exc:  # noqa: BLE001
         check(False, "bl_check_dispatch 可加载并跑通（脚本自身失效要报出来）", repr(_exc))
 
+    # ── 部署产物 ↔ 源码 一致性判据（bl_check_deploy_consistency.py，2026-10-08 立的项）──
+    # 立项现场：一个**假阻塞**（"部署 DLL 不含 get_hero ⇒ 必须重新部署"）由两个错因叠成 ——
+    #   ① `-Filter 'BlBridge.dll'` 漏掉 `.bak_*`；② **只搜一种编码**（get_hero 是字面量，在 #US/UTF-16LE）。
+    # ⇒ 这里只挂**纯逻辑**判据（合成字节，不依赖本机有没有部署），
+    #   因为 bl_selftest 必须能在"没装游戏/没部署"的机器上全绿。
+    #   ★ 关键是断言它有**分辨力**：并集能找到两类符号，而单一编码对另一类**必须**假阴性
+    #     —— 否则"并集"退化成恒真，"没报缺失"就毫无意义。
+    try:
+        import bl_check_deploy_consistency as _dcon
+
+        _lit = b"get_hero"                      # 字面量：只该在 UTF-16LE(#US)
+        _typ = b"IsCampaignActive"              # 类型/方法名：只该在 UTF-8(#Strings)
+        _blob = _lit.decode() .encode("utf-16-le") + _typ.decode().encode("utf-8")
+        check(_dcon.has_utf16(_blob, "get_hero") and not _dcon.has_utf8(_blob, "get_hero")
+              and _dcon.has_symbol(_blob, "get_hero"),
+              "A5: 字面量只在 UTF-16 命中 ⇒ 必须靠并集才找得到（UTF-8-only 会假阴性）", "")
+        check(_dcon.has_utf8(_blob, "IsCampaignActive")
+              and not _dcon.has_utf16(_blob, "IsCampaignActive")
+              and _dcon.has_symbol(_blob, "IsCampaignActive"),
+              "A5: 方法名只在 UTF-8 命中 ⇒ 只查 UTF-16 会假阴性（另一面的对照）", "")
+        _probs, _ = _dcon.check_key_symbols(
+            _blob, key_symbols=[("get_hero", "literal"), ("zzz_not_real_20261008", "literal")])
+        check(any("zzz_not_real_20261008" in p for p in _probs),
+              "A5 反向对照：注入**不存在**的符号必须被判据报出（否则判据恒真）", _probs)
+        # A/B 两段也要有分辨力：篡改清单的 dllSha256 / 源哈希，必须各自变红
+        _d = tempfile.mkdtemp(prefix="bda_a5_")
+        try:
+            _bin = os.path.join(_d, "bin", "Win64_Shipping_Client")
+            os.makedirs(_bin)
+            with io.open(os.path.join(_bin, "BlBridge.dll"), "wb") as _fh:
+                _fh.write(_blob)
+            _real = _dcon.sha256_file(os.path.join(_bin, "BlBridge.dll"))
+            _a, _ = _dcon.check_dll_vs_manifest(
+                _d, manifest_override=_write_a5_manifest(_d, {"dllSha256": "0" * 64}))
+            check(any(p.startswith("A") for p in _a),
+                  "A5 反向对照：篡改 dllSha256 ⇒ A 段必须红", _a)
+            _b, _ = _dcon.check_sources_vs_disk({"sources": {"A.cs": "1" * 64}},
+                                                src_dir=_mk_a5_src(_d, "A.cs"))
+            check(any(p.startswith("B") for p in _b),
+                  "A5 反向对照：篡改源文件哈希 ⇒ B 段必须红", _b)
+            check(_real and len(_real) == 64, "A5: sha256_file 返回完整摘要", _real)
+        finally:
+            shutil.rmtree(_d, ignore_errors=True)
+    except Exception as _exc:  # noqa: BLE001
+        check(False, "bl_check_deploy_consistency 可加载并跑通（脚本自身失效要报出来）", repr(_exc))
+
     check("bl_skip_video" in names and "bl_cheat_mode" in names,
           "启动/流程控制工具已注册（v0.8.20：skip_video / cheat_mode）", names)
     _cm = next((t for t in tools if t.get("name") == "bl_cheat_mode"), None)
@@ -1497,6 +1624,38 @@ def main():
           and (out.get("verified") or {}).get("ElevatedHeightInSiege") == "10"
           and os.path.isfile(out.get("backup") or ""),
           "rts: 套用预设 + 自动备份 + 回读核对", out)
+
+    # ★★ bl_apply_rts_config 的行尾不变量（2026-10-08，与 bl_mcp.apply_config 同一缺陷）
+    #   实测真实 `RTSCameraConfig.xml` = **CRLF + BOM**（3343 B / 57 CRLF）；
+    #   旧写路径无条件 "\n" 拼回 ⇒ 静默改成 LF-only，而返回只说"改了 N 个键"。
+    rts_crlf = os.path.join(rts_dir, "rts_crlf.xml")
+    with io.open(rts_crlf, "wb") as fh:
+        fh.write(b"\xef\xbb\xbf"
+                 + ('<?xml version="1.0" encoding="utf-8"?>\r\n'
+                    '<RTSCameraConfig>\r\n'
+                    '  <ElevatedHeight>0</ElevatedHeight>\r\n'
+                    '</RTSCameraConfig>\r\n').encode("utf-8"))
+    r0 = io.open(rts_crlf, "rb").read()
+    c0 = r0.count(b"\r\n")
+    try:
+        # ⚠️ 必须**先 import bl_mcp**：本段的 rts 测试在 main() 里**早于**
+        #   后面那段 `import bl_mcp`（配置检查段）⇒ 直接用会 UnboundLocalError。
+        #   （这是我自己写的测试的第一版就踩到的 —— 局部名在赋值前不可用。）
+        import bl_mcp as _bm_rts
+        rts_out = _bm_rts.call_tool("bl_apply_rts_config", {
+            "edits": [{"key": "ElevatedHeight", "value": "9"}], "path": rts_crlf})
+        r1 = io.open(rts_crlf, "rb").read()
+        c1 = r1.count(b"\r\n")
+        check(c1 == c0 and c1 > 0,
+              "rts ★派发: CRLF 写回后行尾风格不变（同类缺陷回归）",
+              "crlf %d -> %d" % (c0, c1))
+        check(r1.startswith(b"\xef\xbb\xbf"),
+              "rts ★派发: BOM 保持", "bom=%s" % r1.startswith(b"\xef\xbb\xbf"))
+        ff2 = (rts_out or {}).get("fileFacts") or {}
+        check(ff2.get("lineEndingPreserved") is True,
+              "rts ★派发: 返回里如实报告行尾事实", ff2)
+    except Exception as _e:  # noqa: BLE001
+        check(False, "rts ★派发: 经 call_tool 写 CRLF 文件", repr(_e))
     bad = bl_rts.apply([{"key": "NoSuchKey", "value": "1"}], path=rts_cfg)
     check(bad.get("ok") is False and "NoSuchKey" in (bad.get("error") or ""),
           "rts: 未知键默认拒绝写入", bad)
@@ -1573,8 +1732,523 @@ def main():
                                       dry_run=True)
             check("Not/Exist/Path" in (bad.get("missing") or []),
                   "B1 对照: 无效路径会被报告", bad.get("missing"))
+
+        # ── A4（2026-10-08）：config 工具加 `path` 参数 ──────────────────────
+        #
+        # 需求来源：`bl_apply_config` 够不着 RBM 的 `Configs\RBM\config.xml`，
+        # 导致"脚本化改 RBM 开关做 A/B"做不了（调用方只能手工编辑文件）。
+        #
+        # ★★ 本组测试里**最重要**的一条是"读必须真只读"：
+        #    实测事故（2026-10-08，B 线）：`RBMConfig.parseXmlConfig()` 末尾**无条件**
+        #    调 `saveXmlConfig()` → `document.Save(GetConfigFilePath())`（永远写真实路径）。
+        #    有人拿篡改副本做"只读往返验证"，结果**覆写了玩家真实配置**。
+        #    ⇒ 所以下面既断言"读到了值"，也断言"读完**文件没变**" + "临时副本没被写回真档"。
+        a4_dir = tempfile.mkdtemp(prefix="bda_a4cfg_")
+        try:
+            a4_path = os.path.join(a4_dir, "config.xml")
+            # 造一个**本地**配置：两个键，值可辨认。
+            with io.open(a4_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                         '<Config>\n'
+                         '  <Category id="A4Probe">\n'
+                         '    <Option id="Alpha" value="111" />\n'
+                         '    <Option id="Beta" value="222" />\n'
+                         '  </Category>\n'
+                         '</Config>\n')
+            before_bytes = io.open(a4_path, "rb").read()
+            before_sha = hashlib.sha256(before_bytes).hexdigest()
+
+            # (1) 指定 path 读得到真实值（= 与直接读文件一致）
+            okA, payA = bl_mcp.read_config(None, _structured=True, path=a4_path)
+            check(okA is True
+                  and payA.get("values", {}).get("A4Probe/Alpha") == "111"
+                  and payA.get("values", {}).get("A4Probe/Beta") == "222",
+                  "A4: 指定 path 能读到真实值（与直接读文件一致）", payA.get("values"))
+            # (2) ★ 回显**绝对路径**（"文件目标不可信"的第一道防线）
+            check(os.path.isabs(payA.get("path") or "")
+                  and os.path.normcase(payA.get("path")) == os.path.normcase(a4_path)
+                  and payA.get("pathSource") == "explicit",
+                  "A4: 返回里回显**实际读取的绝对路径** + pathSource=explicit", payA.get("path"))
+            check(payA.get("readOnly") is True,
+                  "A4: 读返回里标明 readOnly=true", payA.get("readOnly"))
+            # (3) ★★ 读**不得**改动文件（反向对照：真只读）
+            after_sha = hashlib.sha256(io.open(a4_path, "rb").read()).hexdigest()
+            check(after_sha == before_sha,
+                  "A4 ★: `bl_read_config` 真的只读（读前后文件 sha256 不变）",
+                  "%s -> %s" % (before_sha[:12], after_sha[:12]))
+            # (4) 指定不存在的 path ⇒ 明确报错，**且不回退**到 Warbandlord 默认目标
+            okB, payB = bl_mcp.read_config(None, _structured=True,
+                                           path=os.path.join(a4_dir, "nope.xml"))
+            check(okB is False and payB.get("error") == "config_not_found"
+                  and payB.get("pathSource") == "explicit",
+                  "A4: 指定不存在的 path ⇒ 明确报错（不静默回退到默认目标）",
+                  {k: payB.get(k) for k in ("error", "pathSource")})
+            # (5) 指定不存在的 path ⇒ 写也必须拒绝（不能"回退去改默认文件"）
+            okC, payC = bl_mcp.apply_config([{"path": "A4Probe/Alpha", "value": "9"}],
+                                            _structured=True,
+                                            path=os.path.join(a4_dir, "nope.xml"))
+            check(okC is False and payC.get("error") == "config_not_found",
+                  "A4: 指定不存在的 path ⇒ 写也明确拒绝", payC.get("error"))
+            # (6) dry-run 不落盘 + 指定 path 生效
+            dryA = bl_mcp.apply_config([{"path": "A4Probe/Alpha", "value": "999"}],
+                                       dry_run=True, path=a4_path)
+            check(dryA.get("dryRun") is True
+                  and dryA.get("changed", {}).get("A4Probe/Alpha", {}).get("new") == "999"
+                  and hashlib.sha256(io.open(a4_path, "rb").read()).hexdigest() == before_sha,
+                  "A4: 指定 path 的 dry-run 只预览不落盘（sha 不变）", dryA.get("changed"))
+            # (7) 真写：备份 + 写后回读 + 回显绝对路径 + 提示需重启
+            wr = bl_mcp.apply_config([{"path": "A4Probe/Alpha", "value": "333"}],
+                                     path=a4_path)
+            check(wr.get("ok") is True
+                  and os.path.isabs(wr.get("path") or "")
+                  and (wr.get("verified") or {}).get("A4Probe/Alpha") == "333",
+                  "A4: 真写后回读核对成功（verified 与写入一致）",
+                  {"path": wr.get("path"), "verified": wr.get("verified")})
+            check(os.path.isfile(wr.get("backup") or ""),
+                  "A4: 写前**备份**存在（backup 是绝对路径且文件在）", wr.get("backup"))
+            check(wr.get("restartRequired") is True
+                  and "重启" in (wr.get("restartNote") or ""),
+                  "A4: 返回里写明**改完须重启游戏才生效**（RBM 无热重载）",
+                  wr.get("restartNote"))
+            # (8) ★ 反向对照：**未**给 path 时，行为必须仍是 B1 闸门（不被 A4 改坏）
+            if st["looksUninstalled"]:
+                okD, payD = bl_mcp.read_config(None, _structured=True)
+                check(okD is False
+                      and payD.get("error") == "target_module_not_installed"
+                      and payD.get("pathSource") is None,
+                      "A4 反向对照: 未给 path ⇒ 仍是 B1 闸门（拒绝且 pathSource 不出现）",
+                      {k: payD.get(k) for k in ("error", "pathSource")})
+        finally:
+            shutil.rmtree(a4_dir, ignore_errors=True)
+
+        # ── A4b（2026-10-08）：RBM 的 config.xml **两种格式并存** ─────────────
+        #
+        # 立项现场：A4 的 `path` 参数能读到 RBM 真档了，但**读不到要改的那三个开关** ——
+        #   因为该文件里并存两种写法：
+        #     形式② `<Option id="X" value="V" />`（Warbandlord 遗产，**只这种被旧扫描器认**）
+        #     形式① `<Tag>V</Tag>`（RBM 自己的，**要改的开关全是这种**）
+        #   实测：旧扫描器在 RBM 真档上读到 468 项，**全部来自 `<Warbandlord>` 段**，
+        #   而 `BadDataCleanupEnabled` / `DryRun` / `UseWarbandlordPerkValues` 一个都读不到。
+        #   ⇒ 加形式①支持。下面用**合成样本**做对照（不碰玩家真档）。
+        fmt_dir = tempfile.mkdtemp(prefix="bda_a4fmt_")
+        try:
+            fmt_path = os.path.join(fmt_dir, "mixed.xml")
+            with io.open(fmt_path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                         '<Config version="2">\n'
+                         '  <DeveloperMode>0</DeveloperMode>\n'
+                         '  <RBMAI>\n'
+                         '    <Enabled>1</Enabled>\n'
+                         '    <PostureEnabled>1</PostureEnabled>\n'
+                         '  </RBMAI>\n'
+                         '  <RBMCampaign>\n'
+                         '    <Enabled>1</Enabled>\n'
+                         '    <BadDataCleanupEnabled>0</BadDataCleanupEnabled>\n'
+                         '    <BadDataCleanupDryRun>1</BadDataCleanupDryRun>\n'
+                         '  </RBMCampaign>\n'
+                         '  <Warbandlord>\n'
+                         '    <Category id="CombatMechanics">\n'
+                         '      <Group id="CombatEnergy">\n'
+                         '        <Option id="DefenderEnergyMultiplier" value="1" />\n'
+                         '      </Group>\n'
+                         '    </Category>\n'
+                         '  </Warbandlord>\n'
+                         '</Config>\n')
+            okF, payF = bl_mcp.read_config(None, _structured=True, path=fmt_path)
+            V = payF.get("values") or {}
+            # (1) 形式①能读到（祖先标签名拼接）
+            check(okF is True
+                  and V.get("RBMCampaign/BadDataCleanupEnabled") == "0"
+                  and V.get("RBMCampaign/BadDataCleanupDryRun") == "1"
+                  and V.get("RBMAI/PostureEnabled") == "1",
+                  "A4b: 形式① `<Tag>v</Tag>` 能读到（祖先标签名拼接）",
+                  {k: V.get(k) for k in ("RBMCampaign/BadDataCleanupEnabled",
+                                          "RBMCampaign/BadDataCleanupDryRun",
+                                          "RBMAI/PostureEnabled")})
+            # (2) ★ 形式②**一条不少**（防"加分支把原格式扫坏"）
+            check(V.get("CombatMechanics/CombatEnergy/DefenderEnergyMultiplier") == "1",
+                  "A4b ★反向对照: 加形式①后，形式②仍照常读到（没被扫坏）",
+                  V.get("CombatMechanics/CombatEnergy/DefenderEnergyMultiplier"))
+            # (3) ★ Lead 要求的**碰撞判据**：`Enabled` 在多个段重复，必须互不覆盖
+            check(V.get("RBMCampaign/Enabled") == "1" and V.get("RBMAI/Enabled") == "1"
+                  and V.get("RBMCampaign/Enabled") is not None
+                  and len([k for k in V if k.endswith("/Enabled")]) == 2,
+                  "A4b ★: 同名标签 `Enabled` 在不同段**互不覆盖**（祖先路径区分）",
+                  {k: v for k, v in V.items() if k.endswith("/Enabled")})
+            # (4) 计数口径必须**显式**给出两种形式各多少（否则 468 会被误当全部）
+            #     ⚠️ 期望值**从样本本身数**出来，不手写常量 —— 我第一版手写成
+            #     `bare==5`，实际是 6（漏数了 `RBMCampaign/Enabled`）。
+            #     手写常量属于"数量类结论"，正是本项目要求逐条列举的场景。
+            kc = payF.get("keyCount") or {}
+            n_bare_expected = sum(1 for l in
+                                  io.open(fmt_path, encoding="utf-8").read().splitlines()
+                                  if l.strip().count("</") == 1
+                                  and not l.strip().startswith("</")
+                                  and "Option" not in l)
+            check(kc.get("bare") == n_bare_expected and kc.get("option") == 1
+                  and kc.get("total") == n_bare_expected + 1,
+                  "A4b: keyCount 分别给出 bare/option 计数（防『read 468=全部』的误读）",
+                  {"got": kc, "bare_expected": n_bare_expected})
+            # (5) 顶层容器（Config）不进路径
+            check("Config/DeveloperMode" not in V and V.get("DeveloperMode") == "0",
+                  "A4b: 顶层 `Config` 不进路径（DeveloperMode 不带前缀）", V.get("DeveloperMode"))
+            # (6) ★★ 写形式①必须**保持原格式**（改写成 <Option> 会让 RBM 读不到）
+            fmt_sha_before = hashlib.sha256(io.open(fmt_path, "rb").read()).hexdigest()
+            wf = bl_mcp.apply_config(
+                [{"path": "RBMCampaign/BadDataCleanupEnabled", "value": "7"}],
+                path=fmt_path)
+            txt_after = io.open(fmt_path, encoding="utf-8").read()
+            check(wf.get("ok") is True
+                  and "<BadDataCleanupEnabled>7</BadDataCleanupEnabled>" in txt_after,
+                  "A4b ★: 写形式①保持原格式（`<Tag>v</Tag>`，不改成 <Option>）",
+                  [l.strip() for l in txt_after.splitlines()
+                   if "BadDataCleanup" in l])
+            check("<Option id=\"BadDataCleanupEnabled\"" not in txt_after,
+                  "A4b ★反向对照: 写形式①**没有**被改写成 <Option .../>（否则 RBM 读不到）",
+                  "no Option rewrite")
+            # (7) 写后回读 + 形式②未受影响 + 文件仍能解析
+            check((wf.get("verified") or {}).get("RBMCampaign/BadDataCleanupEnabled") == "7"
+                  and wf.get("changed", {}).get(
+                      "RBMCampaign/BadDataCleanupEnabled", {}).get("format") == "bare",
+                  "A4b: 写后回读=7，且 changed 里标出 format=bare", wf.get("verified"))
+            import xml.etree.ElementTree as _ET
+            try:
+                _ET.parse(fmt_path)
+                parsed = True
+            except Exception:  # noqa: BLE001
+                parsed = False
+            check(parsed, "A4b: 写形式①后文件仍是合法 XML", fmt_path)
+            check(fmt_sha_before != hashlib.sha256(
+                      io.open(fmt_path, "rb").read()).hexdigest(),
+                  "A4b 反向对照: 真写确实改动了文件（证明上一组『sha 不变』不是恒真）",
+                  "sha changed")
+            # (8) ★ 真机上形式①确有项、且与形式②无重名（用真档**只读**核对）
+            rbm_cfg = os.path.join(os.path.expanduser("~"), "Documents",
+                                   "Mount and Blade II Bannerlord", "Configs", "RBM", "config.xml")
+            if os.path.isfile(rbm_cfg):
+                okR, payR = bl_mcp.read_config(None, _structured=True, path=rbm_cfg)
+                kR = payR.get("keyCount") or {}
+                VR = payR.get("values") or {}
+                # ★★ 刻意**不写死** "215/468/683" —— 那个文件**正被 B 线/Lead 在改**
+                #    （审批窗口时要往里加 badDataCleanup* 节点）⇒ 写死常量必然假失败。
+                #    这正是我自己先前立的纪律："数量类结论不能只报个数、更不能把某个瞬间的快照当不变量"。
+                #    ⇒ 改成**自一致性**判据：解析结果必须与**同一文件的独立正则计数**吻合，
+                #      且两种形式都**非空**。这样文件怎么长大都不会误报，而"扫描器坏了"仍会红。
+                _raw_rbm = io.open(rbm_cfg, encoding="utf-8-sig").read()
+                _n_opt = len(re.findall(r'<Option\s+id="[^"]+"\s+value="[^"]*"\s*/>', _raw_rbm))
+                _n_bare = len(re.findall(
+                    r'^\s*<([A-Za-z_][A-Za-z0-9_]*)(?:\s[^>]*)?>([^<]*)</\1>\s*$',
+                    _raw_rbm, re.M))
+                check(okR is True
+                      and kR.get("option") == _n_opt and _n_opt > 0
+                      and kR.get("bare") == _n_bare and _n_bare > 0
+                      and kR.get("total") == _n_opt + _n_bare,
+                      "A4b ★真机: RBM 真档两种形式的计数与**独立正则**吻合（自一致，不写死快照）",
+                      {"tool": kR, "regex_option": _n_opt, "regex_bare": _n_bare})
+                # 三个开关必须读得到（这是 A4 的实际用途；值随窗口初态变，故只断言"读得到"）
+                _switches = ["RBMCombat/UseWarbandlordPerkValues",
+                             "RBMCampaign/BadDataCleanupEnabled",
+                             "RBMCampaign/BadDataCleanupDryRun"]
+                check(all(VR.get(k) is not None for k in _switches),
+                      "A4b ★真机: 要改的三个 RBM 开关**读得到**（值不断言，随窗口初态变）",
+                      {k: VR.get(k) for k in _switches})
+        finally:
+            shutil.rmtree(fmt_dir, ignore_errors=True)
+
+        # ── ★★ 缺陷回归：**经 `call_tool()` 派发**测写路径（2026-10-08，Lead 实测发现）──
+        #
+        # ## 为什么必须是**派发**，不能只直调函数
+        #
+        # 上面那一组 A4/A4b 断言**全部是直调** `bl_mcp.apply_config(...)` —— 那是**对**的用法，
+        # 但它**绕过了 MCP 派发点**，于是漏掉了一类只有派发才会暴露的缺陷：
+        #
+        #   缺陷 1（★★★）：`apply_config(_structured=True)` 的**成功分支返回裸 dict**，
+        #     而派发点写的是 `ok, payload = apply_config(...)` ⇒ `ValueError: too many values to unpack`。
+        #     ★ 更糟的是：写路径顺序是"备份 → 写盘 → os.replace → 回读 → return"，
+        #     异常发生在**返回之后**（调用方解包时）⇒ **文件已经改完落盘，但调用方只看到异常**
+        #     ⇒ 调用方以为"改失败了"，**实际配置已被改**（报告与事实相反，且在**写**路径上）。
+        #     该洞在 HEAD 里就存在，但**长期不可达**（没有 path 时永远先过 B1 闸门 ⇒ 走错误分支）；
+        #     **A4 加了 path= 之后它才第一次可达**。
+        #
+        #   缺陷 2（★★）：写回**无条件用 "\n" 拼** ⇒ 把整个 CRLF 文件**静默**改成 LF-only，
+        #     而返回里只说"改了 1 个键" ⇒ 同样是报告与事实不符。
+        #
+        # ⇒ 教训：**"直调通过"不等于"派发路径通过"**；写路径的测试**必须走真实调用入口**。
+        disp_dir = tempfile.mkdtemp(prefix="bda_a4disp_")
+        try:
+            # 造 CRLF + BOM 文件（模拟真实 RBM/RTSCamera 配置的形态）
+            dp = os.path.join(disp_dir, "crlf.xml")
+            with io.open(dp, "wb") as fh:
+                fh.write(b"\xef\xbb\xbf"
+                         + ('<?xml version="1.0" encoding="utf-8"?>\r\n'
+                            '<Config version="2">\r\n'
+                            '  <RBMCampaign>\r\n'
+                            '    <Enabled>0</Enabled>\r\n'
+                            '    <BadDataCleanupEnabled>0</BadDataCleanupEnabled>\r\n'
+                            '  </RBMCampaign>\r\n'
+                            '</Config>\r\n').encode("utf-8"))
+            raw0 = io.open(dp, "rb").read()
+            crlf0 = raw0.count(b"\r\n")
+
+            # (A) ★ dry_run 经派发：不得抛异常
+            try:
+                r_dry = bl_mcp.call_tool("bl_apply_config", {
+                    "edits": [{"path": "RBMCampaign/Enabled", "value": "1"}],
+                    "dry_run": True, "path": dp})
+                dry_ok, dry_err = True, None
+            except Exception as _e:  # noqa: BLE001
+                r_dry, dry_ok, dry_err = None, False, repr(_e)
+            check(dry_ok and isinstance(r_dry, dict) and r_dry.get("ok") is not False,
+                  "★派发: `bl_apply_config` dry_run 经 `call_tool` 不抛异常（缺陷1 回归）",
+                  dry_err or {k: r_dry.get(k) for k in ("ok", "dryRun")})
+            check(io.open(dp, "rb").read() == raw0,
+                  "★派发: dry_run 不落盘（字节完全不变）", "sha unchanged")
+
+            # (B) ★★ 真写经派发：不得抛异常，且必须回读=期望值
+            try:
+                r_w = bl_mcp.call_tool("bl_apply_config", {
+                    "edits": [{"path": "RBMCampaign/Enabled", "value": "1"}],
+                    "path": dp})
+                w_ok, w_err = True, None
+            except Exception as _e:  # noqa: BLE001
+                r_w, w_ok, w_err = None, False, repr(_e)
+            check(w_ok,
+                  "★★派发: `bl_apply_config` **真写**经 `call_tool` 不抛异常"
+                  "（缺陷1 回归 —— 若抛，则文件可能已改而调用方以为失败）", w_err)
+            if w_ok:
+                check(r_w.get("ok") is True
+                      and (r_w.get("verified") or {}).get("RBMCampaign/Enabled") == "1",
+                      "★派发: 写后 `verified` 回读 = 期望值（端到端）",
+                      r_w.get("verified"))
+                # (C) ★★ CRLF 不变量：写回后行尾风格**不变**
+                raw1 = io.open(dp, "rb").read()
+                crlf1 = raw1.count(b"\r\n")
+                check(crlf1 == crlf0 and crlf1 > 0,
+                      "★★派发: CRLF 文件写回后**行尾风格不变**（缺陷2 回归）",
+                      "crlf %d -> %d" % (crlf0, crlf1))
+                check(raw1.startswith(b"\xef\xbb\xbf") == raw0.startswith(b"\xef\xbb\xbf"),
+                      "★派发: BOM 状态写回后不变",
+                      "bom %s -> %s" % (raw0[:3] == b"\xef\xbb\xbf",
+                                        raw1[:3] == b"\xef\xbb\xbf"))
+                ff = r_w.get("fileFacts") or {}
+                check(ff.get("lineEndingBefore") == "CRLF"
+                      and ff.get("lineEndingAfter") == "CRLF"
+                      and ff.get("lineEndingPreserved") is True,
+                      "★派发: 返回里**如实报告**行尾前后事实（fileFacts）", ff)
+                check("<Enabled>1</Enabled>" in io.open(dp, encoding="utf-8-sig").read(),
+                      "★派发: 值确实写进去了", "Enabled=1")
+
+            # (D) ★ 反向对照：**LF 文件**写回后必须仍是 LF（不能一律改成 CRLF）
+            lp = os.path.join(disp_dir, "lf.xml")
+            with io.open(lp, "wb") as fh:
+                fh.write(('<?xml version="1.0" encoding="utf-8"?>\n'
+                          '<Config version="2">\n'
+                          '  <RBMCampaign>\n'
+                          '    <Enabled>0</Enabled>\n'
+                          '  </RBMCampaign>\n'
+                          '</Config>\n').encode("utf-8"))
+            try:
+                bl_mcp.call_tool("bl_apply_config", {
+                    "edits": [{"path": "RBMCampaign/Enabled", "value": "1"}], "path": lp})
+                rawL = io.open(lp, "rb").read()
+                check(rawL.count(b"\r\n") == 0 and rawL.count(b"\n") > 0,
+                      "★派发反向对照: LF 文件写回后**仍是 LF**（没有一律改成 CRLF）",
+                      "crlf=%d lf=%d" % (rawL.count(b"\r\n"),
+                                         rawL.count(b"\n") - rawL.count(b"\r\n")))
+            except Exception as _e:  # noqa: BLE001
+                check(False, "★派发反向对照: LF 文件写回", repr(_e))
+
+            # (E) ★ 错误路径经派发：不存在的 path ⇒ 结构化错误、不抛
+            try:
+                r_e = bl_mcp.call_tool("bl_apply_config", {
+                    "edits": [{"path": "A/B", "value": "1"}],
+                    "path": os.path.join(disp_dir, "nope.xml")})
+                check(isinstance(r_e, dict) and r_e.get("ok") is False
+                      and r_e.get("error") == "config_not_found",
+                      "★派发: 不存在的 path ⇒ 结构化错误（不抛、不回退）", r_e.get("error"))
+            except Exception as _e:  # noqa: BLE001
+                check(False, "★派发: 不存在的 path 应返回结构化错误而非抛异常", repr(_e))
+
+            # ════════════════════════════════════════════════════════════════
+            # ★★★ 通用纪律（2026-10-08 立，由一起真实事故逼出来）：
+            #      **凡"新增参数"必配"参数被转发"的断言。**
+            # 取证法（Lead 定）：传**非默认目标**，**双向**断言
+            #   ① 副本被改了；② 默认真档 sha 不变。
+            # 只测"函数接受这个参数"毫无价值；要测"这个参数真的改变了**目标**"。
+            # 具体实现见模块级 `assert_param_retargets()`（供后续所有新参数复用）。
+            # ════════════════════════════════════════════════════════════════
+            import bl_rts as _rts_mod
+            _real_rts = _rts_mod.config_path()
+            _real_rts_sha = _sha(_real_rts)
+            _real_cfg = bl_mcp.warbandlord_config()
+            _real_cfg_sha = _sha(_real_cfg) if os.path.isfile(_real_cfg) else None
+
+            # (F) bl_apply_rts_config：传副本 ⇒ 副本变、真档不变
+            #     ★ 这正是本次事故的工具 —— 它此前**根本不转发 path**。
+            _cp = os.path.join(disp_dir, "rts_copy.xml")
+            with io.open(_cp, "wb") as fh:
+                fh.write(('<?xml version="1.0" encoding="utf-8"?>\n'
+                          '<RTSCameraConfig>\n'
+                          '  <ElevatedHeight>10</ElevatedHeight>\n'
+                          '</RTSCameraConfig>\n').encode("utf-8"))
+            assert_param_retargets(
+                "bl_apply_rts_config",
+                lambda p: {"edits": [{"key": "ElevatedHeight", "value": "3"}], "path": p},
+                _real_rts, _cp, "rts")
+            check(_sha(_real_rts) == _real_rts_sha,
+                  "★★安全底线: 真实 RTSCamera 配置在整个自测期间**逐字节未变**",
+                  "sha %s" % _sha(_real_rts)[:12])
+
+            # (G) bl_apply_config：传副本 ⇒ 副本变、Warbandlord 默认目标不变（存在时）
+            _cp2 = os.path.join(disp_dir, "cfg_copy2.xml")
+            with io.open(_cp2, "wb") as fh:
+                fh.write(('<?xml version="1.0" encoding="utf-8"?>\n'
+                          '<Config version="2">\n'
+                          '  <RBMCampaign>\n'
+                          '    <Enabled>0</Enabled>\n'
+                          '  </RBMCampaign>\n'
+                          '</Config>\n').encode("utf-8"))
+            assert_param_retargets(
+                "bl_apply_config",
+                lambda p: {"edits": [{"path": "RBMCampaign/Enabled", "value": "1"}], "path": p},
+                _real_cfg, _cp2, "config")
+            if _real_cfg_sha is not None:
+                check(_sha(_real_cfg) == _real_cfg_sha,
+                      "★★安全底线: 真实 Warbandlord 配置在自测期间逐字节未变",
+                      "sha %s" % _sha(_real_cfg)[:12])
+        finally:
+            shutil.rmtree(disp_dir, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001
         check(False, "config 读写检查", repr(exc))
+
+    # ── R1（2026-10-08）：`bl_get_perk` 的**判据口径**离线对照 ─────────────
+    #
+    # 立项现场：R1 的需求原文把反向对照写成"_bowDeadshot.PrimaryBonus 期望 0.002"，
+    # 并配"开关前后两次读数必须不同"。反编译实测（DefaultPerks.cs 原文）：
+    #   6 个 Perk 原版 Primary **全是 0.002f**、Secondary **全是 0.005f**；
+    #   而 C7 对 Primary 与 Secondary **赋同一个目标值**（0.001 或 0.002）
+    #   ⇒ `_bowDeadshot` / `_crossbowMightyPull` / `_throwingUnstoppableForce` 的
+    #     **Primary 原版 0.002 == 目标 0.002 ⇒ 它本来就不该变**！
+    # ⇒ 若按原文判据，这三项的 Primary **恒等** ⇒ 会把**正确**判成"工具无效"，
+    #   还会**掩盖 C7 已生效**。这正是本项目最防的"判据错了却把账记在别人身上"。
+    #
+    # ⇒ 本组断言把**正确的判据形状**钉进闸门（纯逻辑，不需要游戏）：
+    #   ① 原版基线表必须是 Primary 全 0.002 / Secondary 全 0.005（防有人改错基线）；
+    #   ② 三态判定：changed / unchangedExpected / unexpected，各自能被正确区分；
+    #   ③ ★ 反向对照：若把 `_bowDeadshot.PrimaryBonus` 当成"必须变化"，
+    #      判定器**必须**给出 unchangedExpected（而不是误报为"工具无效"）。
+    print()
+    print("=" * 90)
+    print("R1 · bl_get_perk 的判据口径（离线，不需要游戏）")
+    print("=" * 90)
+    try:
+        # 原版基线（反编译 DefaultPerks.cs:1971/1989/2010/2031/2052/2073 实测）
+        _VANILLA = {
+            "_oneHandedWayOfTheSword": (0.002, 0.005),
+            "_twoHandedWayOfTheGreatAxe": (0.002, 0.005),
+            "_polearmWayOfTheSpear": (0.002, 0.005),
+            "_bowDeadshot": (0.002, 0.005),
+            "_crossbowMightyPull": (0.002, 0.005),
+            "_throwingUnstoppableForce": (0.002, 0.005),
+        }
+        # C7 目标值（RBM/SubModule.cs:112-117；Primary 与 Secondary 同值）
+        _TARGET = {
+            "_oneHandedWayOfTheSword": 0.001,
+            "_twoHandedWayOfTheGreatAxe": 0.001,
+            "_polearmWayOfTheSpear": 0.001,
+            "_bowDeadshot": 0.002,
+            "_crossbowMightyPull": 0.002,
+            "_throwingUnstoppableForce": 0.002,
+        }
+
+        def _verdict(vanilla, target, observed):
+            """三态判定（R1 建议口径）。"""
+            if observed is None:
+                return "unreadable"
+            if abs(observed - target) < 1e-9:
+                return "changed" if abs(vanilla - target) > 1e-9 else "unchangedExpected"
+            if abs(observed - vanilla) < 1e-9:
+                return "notApplied"      # 读数还是原版 ⇒ 没生效（或工具读到静态值）
+            return "unexpected"
+
+        check(all(abs(v[0] - 0.002) < 1e-9 for v in _VANILLA.values()),
+              "R1: 原版基线 Primary **全 0.002**（6/6，反编译实测）",
+              [v[0] for v in _VANILLA.values()])
+        check(all(abs(v[1] - 0.005) < 1e-9 for v in _VANILLA.values()),
+              "R1: 原版基线 Secondary **全 0.005**（6/6）",
+              [v[1] for v in _VANILLA.values()])
+
+        # ★ 核心：哪些字段"Primary 本来就不该变" —— 必须精确点出那 3 个
+        unchanged_primary = sorted(k for k in _VANILLA
+                                   if abs(_VANILLA[k][0] - _TARGET[k]) < 1e-9)
+        check(unchanged_primary == ["_bowDeadshot", "_crossbowMightyPull",
+                                    "_throwingUnstoppableForce"],
+              "R1 ★: 精确点出『Primary 原版==目标 ⇒ 本来就不该变』的 3 个字段",
+              unchanged_primary)
+
+        # ② 三态判定器
+        check(_verdict(0.002, 0.001, 0.001) == "changed",
+              "R1: 三态① changed（原版≠目标，读数=目标）")
+        check(_verdict(0.002, 0.002, 0.002) == "unchangedExpected",
+              "R1: 三态② unchangedExpected（原版=目标，读数保持）")
+        check(_verdict(0.002, 0.001, 0.002) == "notApplied",
+              "R1: 三态③ notApplied（读数还是原版 ⇒ **没生效**，与『工具无效』区分）")
+        check(_verdict(0.002, 0.001, 0.777) == "unexpected",
+              "R1: 三态④ unexpected（既不是原版也不是目标）")
+        check(_verdict(0.002, 0.001, None) == "unreadable",
+              "R1: 三态⑤ unreadable（没读到 ⇒ **不判 0**，与『值是 0』区分）")
+
+        # ③ ★★ 反向对照：原文判据（要求 Primary 必须变）对 `_bowDeadshot` **必然失败** ——
+        #     本组断言证明"我们知道它必然失败"，从而证明改判据不是找借口。
+        naive_would_fail = abs(_VANILLA["_bowDeadshot"][0] - _TARGET["_bowDeadshot"]) < 1e-9
+        check(naive_would_fail,
+              "R1 ★反向对照: 原文判据『Primary 必须变』对 _bowDeadshot **必然失败** "
+              "⇒ 改三态判据是**必需**的，不是找借口", "vanilla==target==0.002")
+
+        # 同时断言"最强反向对照字段"确实两个方向都变
+        strong = ("_oneHandedWayOfTheSword", "_twoHandedWayOfTheGreatAxe", "_polearmWayOfTheSpear")
+        check(all(abs(_VANILLA[k][0] - _TARGET[k]) > 1e-9
+                  and abs(_VANILLA[k][1] - _TARGET[k]) > 1e-9 for k in strong),
+              "R1 ★: 首选反向对照字段（Primary+Secondary **两向都变**）= 3 个单手/双手/长杆",
+              strong)
+
+        # 工具必须在返回里**把 Primary 与 Secondary 分开**（否则 _bowDeadshot 无法判定）
+        import bl_mcp as _bm
+        _t = next((t for t in _bm.TOOLS if t.get("name") == "bl_get_perk"), None)
+        check(_t is not None, "R1: bl_get_perk 已声明在 TOOLS 表")
+        if _t:
+            _d = _t.get("description") or ""
+            check("primaryBonus" in _d and "secondaryBonus" in _d,
+                  "R1 ★: 工具描述里明写 Primary/Secondary 分开返回")
+            check("本来就不该变" in _d or "不该变" in _d,
+                  "R1 ★: 工具描述里警示『某些字段本来就不该变』（防误判）")
+        with io.open(os.path.join(HERE, "gabp_names.json"), encoding="utf-8") as _fh:
+            _nm = json.load(_fh)
+        check("bl_get_perk" in (_nm.get("tools") or {}),
+              "R1: gabp_names.json 的 tools 段已登记 bl_get_perk")
+        check("get_perk" in (_nm.get("methods") or {}),
+              "R1: gabp_names.json 的 methods 段已登记 get_perk")
+
+        # ★ R1 的**反射可达性**静态检查（2026-10-08，自查发现的一个"死兜底"）：
+        #   `CampaignReadProbe` 的通用取值器 `P()` 只找 **Public** 成员；
+        #   而 `Campaign.AllPerks` 是 **internal**（反编译实测 `Campaign.cs:294`）⇒
+        #   用 `P(Campaign.Current, "AllPerks")` 做兜底是**永不生效的死代码**（第一版就是这样）。
+        #   本断言钉住"R1 的源码里必须走 NonPublic 反射拿 AllPerks"，防将来改回去。
+        #   （⚠️ 本文件没有 `REPO_ROOT` 常量 —— 用 `HERE/..` 现算，避免再引用不存在的名字。）
+        _cr_path = os.path.join(os.path.dirname(HERE), "src", "CampaignReadProbe.cs")
+        _cr = io.open(_cr_path, encoding="utf-8").read()
+        check("BindingFlags.NonPublic" in _cr and "AllPerks" in _cr,
+              "R1: `AllPerks`（internal）的兜底必须走 NonPublic 反射"
+              "（`P()` 只找 Public ⇒ 用它等于死代码）",
+              "found NonPublic=%s AllPerks=%s" % ("BindingFlags.NonPublic" in _cr,
+                                                  "AllPerks" in _cr))
+        # 反向对照：确保**没有**残留"用 P(...) 读 AllPerks"的写法
+        check('P(Campaign.Current, "AllPerks")' not in _cr
+              and 'P(Campaign.Current, \\"AllPerks\\")' not in _cr,
+              "R1 反向对照: 源码里**没有**『用 P() 读 internal AllPerks』的死兜底残留",
+              "no dead fallback")
+    except Exception as exc:  # noqa: BLE001
+        check(False, "R1 判据口径检查", repr(exc))
 
     # ── 源码 ↔ 已部署 DLL 的**内容级**核验（2026-10-07 用户要求补；同日修正）──
     #

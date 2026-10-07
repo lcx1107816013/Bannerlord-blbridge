@@ -959,6 +959,25 @@ _OPEN_RE = re.compile(r'<(Category|Group|SubGroup)\b([^>]*?)(/?)>')
 _CLOSE_RE = re.compile(r'</\s*(Category|Group|SubGroup)\s*>')
 _ID_RE = re.compile(r'id="([^"]+)"')
 
+# ── 形式①（裸标签）：RBM 自己的 config.xml 用它 ────────────────────────────
+#   `<Tag>value</Tag>` 单行、无 id/value 属性。
+#   ⚠️ 与形式②（`<Option id=".." value=".." />`）**在同一个文件里并存**：
+#      实测 `Configs\RBM\config.xml` 顶层有 7 个段，`<Warbandlord>` 是形式②、
+#      其余（`RBMAI` / `RBMCombat` / `RBMCampaign` / `RBMTournament` /
+#      `DeveloperMode` / `LastSeenChangelogVersion`）是形式①。
+_BARE_RE = re.compile(r'^\s*<([A-Za-z_][A-Za-z0-9_]*)(?:\s[^>]*)?>([^<]*)</\1>\s*$')
+_TAG_NAME_RE = re.compile(r'^\s*</?([A-Za-z_][A-Za-z0-9_]*)')
+_SELF_CLOSING_RE = re.compile(r'/>\s*$')
+
+# ★ 形式②的保留标签名。**必须显式排除**，否则它们会被当成形式①的裸标签：
+#   `<Category id="X">` / `<Option id=".." value=".." />` 都能匹配"通用标签"形状，
+#   一旦被塞进形式①的祖先栈，就会污染路径、甚至让 `Option` 记录整个失效
+#   （`<Option ... />` 会被误当成"祖先标签"而不是"配置项"）。
+_RESERVED_TAGS = ("Category", "Group", "SubGroup", "Option")
+
+# 这些"标签"不是配置段，进栈会污染路径（XML 声明 / 注释）。
+_SKIP_LINE_PREFIX = ("<?", "<!")
+
 
 def _read_text(path):
     with io.open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
@@ -966,14 +985,64 @@ def _read_text(path):
 
 
 def _scan(text):
-    """按行扫描 config.xml，返回 [(行号, 完整路径, 值, OptionId)]。
+    """按行扫描 config.xml，返回 [(行号, 完整路径, 值, 键名, 形式)]。
 
-    路径由 Category / Group / SubGroup 的 id 逐层拼接而成，
-    例如 DamageCalc/ArmorEffect/ArmorBreakPoint。
+    **两种形式并存**（实测本机 `Configs\\RBM\\config.xml` 两者同时存在）：
+
+      形式② `<Option id="X" value="V" />`（Warbandlord 遗产格式）
+          ⇒ 路径由 `Category/Group/SubGroup` 的 **id** 逐层拼接，
+            例如 `DamageCalc/ArmorEffect/ArmorBreakPoint`。
+      形式① `<Tag>V</Tag>`（RBM 自己的格式）
+          ⇒ 路径由**祖先标签名**逐层拼接（顶层 `Config` 不计），
+            例如 `RBMCampaign/BadDataCleanupEnabled`、`RBMCombat/UseWarbandlordPerkValues`。
+
+    ★ 为什么形式①必须用**祖先标签名**而不是光用标签名：
+      `Enabled` 在 `RBMTournament` / `RBMAI` / `RBMCombat` / `RBMCampaign`
+      **四个段里都出现**（Lead 实测）⇒ 光用标签名会**四路撞车**、后写覆盖前写。
+      带祖先路径 ⇒ `RBMCampaign/Enabled` 唯一。
+      （实测该文件 215 个裸标签**拼接后无重复路径**，见自测里的断言。）
+
+    ★ 两种形式的路径**天然不撞车**：形式①用"标签名"、形式②用"id 值"。
     """
     out = []
-    stack = []
+    stack = []        # 形式②：[(标签名, id)]
+    bare_stack = []   # 形式①：祖先标签名
     for idx, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(_SKIP_LINE_PREFIX):
+            continue
+
+        name_m = _TAG_NAME_RE.match(line)
+        tag_name = name_m.group(1) if name_m else None
+        is_reserved = tag_name in _RESERVED_TAGS
+        self_closing = bool(_SELF_CLOSING_RE.search(line))
+
+        # ── 形式①：裸标签成对 `<Tag>v</Tag>`（无属性、单行）──────────────
+        #   保留名（Category/Group/SubGroup/Option）**不走这里**。
+        if not is_reserved:
+            bm = _BARE_RE.match(line)
+            if bm:
+                tag, val = bm.group(1), bm.group(2)
+                # 顶层容器（`Config`）不进路径 ⇒ 路径从它的子段开始。
+                ancestors = [t for t in bare_stack if t != "Config"]
+                full = ("/".join(ancestors) + "/" + tag) if ancestors else tag
+                out.append((idx, full, val, tag, "bare"))
+                continue
+
+            # 形式①的**容器**开/闭（如 `<RBMCampaign>` / `</RBMCampaign>`）。
+            # ⚠️ 自闭合行（`<X ... />`）不进出栈 —— 它没有配对的闭合标签。
+            if self_closing:
+                continue
+            if stripped.startswith("</"):
+                if bare_stack and bare_stack[-1] == tag_name:
+                    bare_stack.pop()
+                continue
+            if stripped.startswith("<"):
+                bare_stack.append(tag_name)
+                continue
+            continue
+
+        # ── 形式②：Category/Group/SubGroup + Option ──────────────────────
         cm = _CLOSE_RE.search(line)
         if cm:
             if stack and stack[-1][0] == cm.group(1):
@@ -983,42 +1052,137 @@ def _scan(text):
         if om:
             attrs = om.group(2) or ""
             ident = _ID_RE.search(attrs)
-            self_closing = (om.group(3) == "/") or attrs.rstrip().endswith("/")
-            if ident and not self_closing:
+            sc = (om.group(3) == "/") or attrs.rstrip().endswith("/")
+            if ident and not sc:
                 stack.append((om.group(1), ident.group(1)))
             continue
         m = _OPT_RE.search(line)
         if m and stack:
             full = "/".join(x[1] for x in stack) + "/" + m.group(1)
-            out.append((idx, full, m.group(2), m.group(1)))
+            out.append((idx, full, m.group(2), m.group(1), "option"))
     return out
 
 
-def read_config(paths=None, _structured=False):
-    """读 Warbandlord 配置。
+# ─────────────────────────────────────────────────────────────────────
+# A4（2026-10-08）：给 config 工具加**显式 `path`** —— 让调用方能指定配置文件
+#
+# ## 为什么要（B1 建议②的落地）
+#
+# B1 修完后，不传 `path` 时工具会**明确拒绝**已卸载的 Warbandlord；
+# 而项目真正要改的是 RBM 的 `Configs\RBM\config.xml`（`bl_apply_config` 现在够不着它），
+# 于是"脚本化改 RBM 开关做自动化 A/B"做不了 —— 调用方只能手工编辑文件。
+# ⇒ 加 `path`：**显式指定就按指定文件操作**，目标是什么由调用方自己负责。
+#
+# ## ★★ 安全纪律（本节的每一条都是"文件目标不可信"这个教训的直接产物）
+#
+# 1. **`path` 一旦给了，就跳过 Warbandlord 闸门。**
+#    闸门的语义是"你没说目标 ⇒ 我按默认目标替你判它好不好"。
+#    调用方**明确**指定了目标 ⇒ 再拿 Warbandlord 的存活性去拒它就是错判。
+# 2. ★ **返回值里必须回显实际操作的绝对路径**，且**读与写都要回显**。
+#    理由：B1 的事故是"操作了**错的文件**"（改 Warbandlord 残留档却以为在改 RBM）；
+#    另一类同源事故是"以为操作的是另一个文件"（用改了路径的副本往返、
+#    却被底层无条件写回了真实配置）。
+#    两者都只能靠"**把目标绝对路径回显出来**"被人/脚本核对 ⇒ 这是本工具的第一道防线。
+# 3. ★ **读必须真只读。** 本文件的 `read_config` 走 `_read_text()` +
+#    `_scan()`（纯文本/正则解析），**从不实例化任何 mod 的 Config 类**。
+#    ⚠️ 这不是可有可无的洁癖 —— 实测（2026-10-08，B 线真实事故）：
+#    `RBMConfig.parseXmlConfig()` **不是只读函数**，它的末尾无条件调 `saveXmlConfig()`
+#    → `document.Save(Utilities.GetConfigFilePath())`（**永远写真实配置路径**）。
+#    有人用它做"只读往返验证"，结果**用副本覆写了玩家的真实配置**。
+#    ⇒ 结论钉死：**任何"读配置"的实现都不得调用 mod 自己的 parse/load 函数**，
+#      只能用纯文本/XML 解析。本工具满足这条。
+# 4. `path` 给错（不存在/不是文件）⇒ **明确报错**，不回退到默认目标。
+#    静默回退会让"我指定了 A 却改了 B"，正是第 2 条要防的。
+# ─────────────────────────────────────────────────────────────────────
 
-    B1 修复：目标模块若已软卸载 ⇒ **明确拒绝**（不再读一个没有消费者的死人文件）。
+def _resolve_config_path(path):
+    """把调用方给的 `path` 规范化成**绝对路径**（用于回显与操作）。
+
+    ⚠️ 刻意**不做**"不存在就回退默认"：回退会造成"指定了 A 却动了 B"。
+    存在问题一律由调用方（read_config / apply_config）显式报错。
+    """
+    if path is None:
+        return None
+    p = str(path).strip()
+    if not p:
+        return None
+    # expandvars/expanduser 后 abspath：让返回里的路径**一定是绝对的**，
+    # 这样"我到底动了哪个文件"不依赖 cwd 的隐含语义。
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
+
+
+def read_config(paths=None, _structured=False, path=None):
+    """读配置（默认 Warbandlord；给了 `path` 则读指定文件）。
+
+    ★ **本函数只读** —— 纯文本解析，**绝不调用任何 mod 的 parse/load 函数**
+    （原因见上面 A4 注释第 3 条：`RBMConfig.parseXmlConfig()` 会静默写真实配置）。
+
+    B1 修复：**未给 `path`** 时，目标模块若已软卸载 ⇒ **明确拒绝**
+    （不再读一个没有消费者的死人文件）。
     `_structured=True` 时返回 `(ok, payload)` 而不抛异常（供 MCP 派发直接用）。
     """
-    ok, st = _warbandlord_guard()
-    if not ok:
-        if _structured:
-            return False, st
-        raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
-    path = warbandlord_config()
-    if not os.path.isfile(path):
-        err = {"ok": False, "error": "config_not_found", "path": path,
-               "message": "找不到 Warbandlord 配置: %s" % path}
+    explicit = _resolve_config_path(path)
+    if explicit is not None:
+        # 显式指定目标 ⇒ 跳过 Warbandlord 闸门（闸门只管"没说目标"的情形）。
+        if not os.path.isfile(explicit):
+            err = {"ok": False, "error": "config_not_found",
+                   "path": explicit, "pathSource": "explicit",
+                   "message": ("指定的配置文件不存在或不是文件：%s"
+                               "（**不会**回退到默认目标 —— 静默回退会造成"
+                               "『指定了 A 却动了 B』）" % explicit)}
+            if _structured:
+                return False, err
+            raise IOError(err["message"])
+        path_use, module, source = explicit, None, "explicit"
+    else:
+        ok, st = _warbandlord_guard()
+        if not ok:
+            if _structured:
+                return False, st
+            raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
+        path_use, module, source = warbandlord_config(), "Warbandlord", "default"
+
+    if not os.path.isfile(path_use):
+        err = {"ok": False, "error": "config_not_found", "path": path_use,
+               "pathSource": source,
+               "message": "找不到配置: %s" % path_use}
         if _structured:
             return False, err
         raise IOError(err["message"])
-    text = _read_text(path)
+    text = _read_text(path_use)
     out = {}
-    for _idx, full, val, _oid in _scan(text):
+    kinds = {}
+    for _idx, full, val, _key, kind in _scan(text):
         out[full] = val
+        kinds[full] = kind
     result = dict((p, out.get(p)) for p in paths) if paths else out
     if _structured:
-        return True, {"values": result, "module": "Warbandlord", "path": path}
+        # 口径：让调用方看得出这个文件里**两种形式各有多少** ——
+        # 否则"读到 468 项"会被误以为"读到全部"（实测形式①另有 215 项）。
+        n_bare = sum(1 for k in kinds.values() if k == "bare")
+        n_opt = sum(1 for k in kinds.values() if k == "option")
+        payload = {"values": result, "path": path_use, "pathSource": source,
+                   "readOnly": True,
+                   "keyCount": {"total": len(kinds), "option": n_opt, "bare": n_bare},
+                   "formats": ("支持两种写法：`<Option id=\"..\" value=\"..\" />`（option，"
+                               "Warbandlord 遗产格式）与 `<Tag>value</Tag>`（bare，RBM 自己的格式）。"
+                               "★ 路径口径：option 用 `Category/Group/SubGroup id` 拼接；"
+                               "bare 用**祖先标签名**拼接（如 `RBMCampaign/BadDataCleanupEnabled`）"
+                               "—— 因为像 `Enabled` 这种标签名在多个段里重复，"
+                               "只用标签名会撞车。"),
+                   "note": ("只读：纯文本解析，**未**调用任何 mod 的 parse/load 函数"
+                            "（那些函数可能静默写回真实配置）。"
+                            "配置文件的大小/时间已一并返回，便于确认读的是哪个文件。")}
+        if module:
+            payload["module"] = module
+        try:
+            stt = os.stat(path_use)
+            payload["sizeBytes"] = stt.st_size
+            payload["mtimeUtc"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(stt.st_mtime))
+        except OSError:
+            pass
+        return True, payload
     return result
 
 
@@ -1031,24 +1195,101 @@ def _is_number(s):
         return False
 
 
-def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
+def apply_config(edits, dry_run=False, allow_missing=False, _structured=False, path=None):
     """edits: [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}, ...]
 
-    B1 修复：**写入前**先过模块存在性闸门 —— 目标模块若已软卸载，
+    默认目标 = Warbandlord；给了 `path` 则改指定文件（A4，2026-10-08）。
+
+    B1 修复：**未给 `path`** 时，写入前先过模块存在性闸门 —— 目标模块若已软卸载，
     改这个文件的唯一后果是"看起来改了、实际没人读"，进而把工具问题误判成 MOD 问题。
+
+    ★ A4 安全纪律（见上面那节长注释）：
+      · 返回值里**回显实际操作的绝对路径**（`path`）+ `pathSource`；
+      · **写前备份**（`backup` 字段给出备份的绝对路径）；
+      · **写后回读校验**（`verified`），且回读走**同一份文本解析**（不碰 mod 的 parse 函数）；
+      · 返回里写清"**改完需重启游戏才生效**"。
+
+    ★★ 返回约定（**必须严格遵守，2026-10-08 因违反它出过一次严重缺陷**）：
+
+        _structured=False  ⇒ 返回 **dict**（payload 本体）
+        _structured=True   ⇒ 返回 **(ok: bool, payload: dict)** 元组 —— **所有**分支，含**成功**分支
+
+    为什么把这条写死在 docstring 里：MCP 派发点（`call_tool`）写的是
+    `ok, payload = apply_config(..., _structured=True)`。若某个分支偷偷返回裸 dict，
+    解包会把 **dict 的键**当成 `(ok, payload)` ⇒ `ValueError: too many values to unpack`。
+    ★ 而**真写路径**的顺序是"备份 → 写盘 → os.replace → 回读 → return"
+    ⇒ 异常发生在**返回之后**（调用方解包时）⇒ **文件已经改完落盘，但调用方只看到 ValueError**
+    ⇒ 调用方会以为"改失败了"而**实际上配置已被改** —— 正是本项目最防的"报告与事实相反"，
+    而且发生在**写路径**上。
+
+    ⚠️ 该缺陷**在 HEAD 里就已存在**（成功分支一直返回裸 dict），但长期**不可达**：
+    没有 `path` 参数时永远先过 B1 闸门，而目标模块（Warbandlord）已卸载 ⇒ 总是走
+    `(False, st)` 错误分支 ⇒ 成功分支没人走。**A4 加了 `path=` 之后它才第一次可达。**
+    ⇒ 教训：**加参数/放宽闸门，等于打开一条以前锁着的路 —— 要检查那条路上有没有旧洞。**
     """
-    ok, st = _warbandlord_guard()
-    if not ok:
-        if _structured:
-            return False, st
-        raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
-    path = warbandlord_config()
+    explicit = _resolve_config_path(path)
+    if explicit is not None:
+        # 显式指定目标 ⇒ 跳过 Warbandlord 闸门（同 read_config 的理由）。
+        if not os.path.isfile(explicit):
+            err = {"ok": False, "error": "config_not_found",
+                   "path": explicit, "pathSource": "explicit",
+                   "message": ("指定的配置文件不存在或不是文件：%s"
+                               "（**不会**回退到默认目标）" % explicit)}
+            if _structured:
+                return False, err
+            raise IOError(err["message"])
+        path_use, source = explicit, "explicit"
+    else:
+        ok, st = _warbandlord_guard()
+        if not ok:
+            if _structured:
+                return False, st
+            raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
+        path_use, source = warbandlord_config(), "default"
+
+    path = path_use
     if not os.path.isfile(path):
-        raise IOError("找不到 Warbandlord 配置: %s" % path)
+        raise IOError("找不到配置: %s" % path)
+
+    # ★ 统一的"结构化/非结构化"返回出口 —— 保证**所有**分支遵守上面的约定。
+    #   刻意做成局部函数而不是在每个 return 前手写三元式：
+    #   手写 4 处就有 4 次漏掉的机会，而这里漏一次就是"改完报失败"。
+    def _ret(payload, ok=True):
+        return (ok, payload) if _structured else payload
     raw = io.open(path, "rb").read()
     bom = raw.startswith(b"\xef\xbb\xbf")
     text = _read_text(path)
     lines = text.splitlines()
+
+    # ── ★★ 行尾风格：必须**保留原样**（2026-10-08 修，Lead 实测发现）──────────
+    #
+    # ## 缺陷现场（实测字节账）
+    #
+    # 原文件 CRLF=1007；调一次 `apply_config` 改 1 个键之后：
+    #   48505 B / CRLF=1007  →  47498 B / CRLF=0（全变 LF-only）
+    #   47498 = 48133 - 1007 + 372 ⇒ **1007 个 `\r` 被静默吃掉**（6 个新节点的增量另算）。
+    #
+    # ⇒ 后果是**报告与事实不符**：返回里 `changed` 只说"改了 1 个键"，
+    #   而实际上**整个文件的每一行行尾都被重写了**。
+    #   这正是本项目反复强调的"**写路径必须报告真实发生了什么**"
+    #   （与"改完报失败""读不到当 0"同一类：报告 ≠ 事实）。
+    #
+    # ## 修法
+    #
+    # 从**原始字节**判定该文件用的是哪种行尾，写回时**按原样**拼。
+    # 三态而非二态：CRLF / LF / **混用**（混用时按"以 CRLF 为主"处理，
+    # 并仍以**计数**如实回报，不假装它是单一风格）。
+    _n_crlf = raw.count(b"\r\n")
+    _n_lf = raw.count(b"\n") - _n_crlf
+    if _n_crlf > 0 and _n_lf == 0:
+        line_ending, newline = "CRLF", "\r\n"
+    elif _n_crlf == 0 and _n_lf > 0:
+        line_ending, newline = "LF", "\n"
+    elif _n_crlf == 0 and _n_lf == 0:
+        line_ending, newline = "none", "\n"          # 单行/无换行文件
+    else:
+        line_ending = "mixed"
+        newline = "\r\n" if _n_crlf >= _n_lf else "\n"
 
     # v0.8.10（F5）：入参形状与值的健全性检查。
     #
@@ -1076,19 +1317,28 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
     warnings = []
 
     info = {}
-    for idx, full, val, oid in _scan(text):
-        info[idx] = (full, val, oid)
+    for idx, full, val, key, kind in _scan(text):
+        info[idx] = (full, val, key, kind)
 
     changed = {}
     missing = []
     new_lines = []
     for idx, line in enumerate(lines):
         if idx in info:
-            full, oldval, oid = info[idx]
+            full, oldval, key, kind = info[idx]
             if full in want:
                 indent = line[:len(line) - len(line.lstrip())]
-                new_lines.append(indent + '<Option id="%s" value="%s" />' % (oid, want[full]))
-                changed[full] = {"old": oldval, "new": want[full]}
+                if kind == "bare":
+                    # ★ 形式①必须**保持原格式**：写回 `<Tag>value</Tag>`，
+                    #   只替换值、保留原缩进与标签名。
+                    #   理由：形式①是 **RBM 自己的 loader** 在读；
+                    #   若把它改写成 `<Option id=.. value=.. />`，RBM 就读不到了
+                    #   ⇒ 又是"改了没生效"，正是本项目最防的那类静默失败。
+                    #   （这也是刻意**不**统一成一种格式的原因。）
+                    new_lines.append(indent + '<%s>%s</%s>' % (key, want[full], key))
+                else:
+                    new_lines.append(indent + '<Option id="%s" value="%s" />' % (key, want[full]))
+                changed[full] = {"old": oldval, "new": want[full], "format": kind}
                 if _is_number(oldval) and not _is_number(want[full]):
                     warnings.append("%s：旧值 %r 是数字、新值 %r 不是 —— 请确认该键允许非数值"
                                     % (full, oldval, want[full]))
@@ -1103,9 +1353,11 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
     if warnings:
         result["warnings"] = warnings
     if dry_run:
-        return result
+        return _ret(result)
     if missing and not allow_missing:
-        return dict(result, ok=False, error="以下配置路径不存在，未写入任何修改: %s" % ", ".join(missing))
+        return _ret(dict(result, ok=False,
+                         error="以下配置路径不存在，未写入任何修改: %s" % ", ".join(missing)),
+                    ok=False)
 
     # 备份
     import shutil
@@ -1113,9 +1365,10 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
     backup = path + ".bak_" + time.strftime("%Y%m%d_%H%M%S")
     shutil.copy2(path, backup)
 
-    body = "\n".join(new_lines)
-    if text.endswith("\n") and not body.endswith("\n"):
-        body += "\n"
+    # ★ 按**原文件的行尾风格**拼回（不是硬编码 "\n"）—— 见上面 line_ending 的注释。
+    body = newline.join(new_lines)
+    if raw.endswith(b"\n"):
+        body += newline
     data = body.encode("utf-8")
     if bom:
         data = b"\xef\xbb\xbf" + data
@@ -1129,11 +1382,60 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
         ET.parse(tmp)
     except Exception as exc:  # noqa: BLE001
         os.remove(tmp)
-        return dict(result, ok=False, error="XML 校验失败，已放弃写入: %r" % (exc,))
+        return _ret(dict(result, ok=False, error="XML 校验失败，已放弃写入: %r" % (exc,)),
+                    ok=False)
     os.replace(tmp, path)
-    check = read_config(list(want.keys()))
-    result.update({"ok": True, "backup": backup, "verified": check})
-    return result
+    # ★ 回读校验走**同一份文本解析**（`read_config` 指定 path）——
+    #   绝不用 mod 自己的 parse 函数（那些会写盘，正是 A4 注释第 3 条记的事故）。
+    check = read_config(list(want.keys()), path=path)
+    # ★ 写后**字节级**事实（不靠推断）：行尾风格是否守住、BOM 是否守住。
+    #   为什么要回报这些：Lead 实测发现过"只改 1 个键，却把整文件 CRLF 重写成 LF"，
+    #   而返回里只说了 changed 的条数 ⇒ **报告与事实不符**。
+    #   ⇒ 凡是"这次写入动了什么"，都要能从返回里**核对**，而不是靠调用方自己 diff。
+    after_raw = io.open(path, "rb").read()
+    after_crlf = after_raw.count(b"\r\n")
+    after_lf = after_raw.count(b"\n") - after_crlf
+    if after_crlf > 0 and after_lf == 0:
+        after_ending = "CRLF"
+    elif after_crlf == 0 and after_lf > 0:
+        after_ending = "LF"
+    elif after_crlf == 0 and after_lf == 0:
+        after_ending = "none"
+    else:
+        after_ending = "mixed"
+    bytes_delta = len(after_raw) - len(raw)
+    result.update({
+        "ok": True,
+        "path": path,                  # ★ 实际写入的**绝对路径**（第一道防线）
+        "pathSource": source,          # explicit（调用方指定） / default（Warbandlord 默认）
+        "backup": backup,              # ★ 备份的绝对路径
+        "verified": check,             # ★ 写后回读（与写入同一解析口径）
+        "restartRequired": True,
+        "restartNote": ("⚠️ **改完必须重启游戏才生效** —— 本类配置（如 RBM）"
+                        "**没有热重载**，游戏只在启动/读档时读一次配置文件。"
+                        "改完不重启 ⇒ 表现为『改了但没生效』，"
+                        "**不要把这种情况误判成 MOD 有 bug**。"),
+        # ★ 文件格式不变量（写前后对照，**如实回报**，不假设"肯定没变"）
+        "fileFacts": {
+            "lineEndingBefore": line_ending,
+            "lineEndingAfter": after_ending,
+            "lineEndingPreserved": (line_ending == after_ending),
+            "bomBefore": bool(bom),
+            "bomAfter": after_raw.startswith(b"\xef\xbb\xbf"),
+            "bytesBefore": len(raw),
+            "bytesAfter": len(after_raw),
+            "bytesDelta": bytes_delta,
+            "crlfBefore": _n_crlf,
+            "crlfAfter": after_crlf,
+            "note": ("`changed` 只说**键值**改了什么；本字段说**文件本身**改了什么。"
+                     "两者**必须一起看** —— 只报 changed 条数会掩盖『整文件行尾被重写』这类事实。"),
+        },
+    })
+    if not result["fileFacts"]["lineEndingPreserved"]:
+        result["warnings"] = (result.get("warnings") or []) + [
+            "⚠️ 行尾风格**未保持**（%s → %s）—— 请核对这是否是你想要的"
+            % (line_ending, after_ending)]
+    return _ret(result)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1176,31 +1478,66 @@ TOOLS = [
     },
     {
         "name": "bl_read_config",
-        "description": "回读 Warbandlord 的 config.xml 配置值（可不传 paths 取全部）",
+        "description": ("回读 config.xml 配置值（可不传 paths 取全部）。"
+                        "**默认目标 = Warbandlord 模块的 config.xml**；"
+                        "★ 给了 `path` 则读**指定文件**（例如 RBM 的 "
+                        "`<我的文档>\\Mount and Blade II Bannerlord\\Configs\\RBM\\config.xml`）"
+                        "—— 目的：让 MOD 侧能脚本化核对/改 RBM 开关做自动化 A/B。"
+                        "★ **本工具真只读**：纯文本解析，**不调用任何 mod 的 parse/load 函数**"
+                        "（实测 `RBMConfig.parseXmlConfig()` 会在末尾无条件写回**真实**配置路径，"
+                        "用副本做『只读往返』会覆写玩家真档 —— 已发生过一次事故）。"
+                        "⚠️ 返回里的 `path` 是**实际读取的绝对路径**，请照它核对；"
+                        "`pathSource=explicit|default` 说明目标是你指定还是默认。"
+                        "★ **支持两种写法**（实测 RBM 的 `Configs\\RBM\\config.xml` **两者并存**）："
+                        "`<Option id=\"..\" value=\"..\" />`（Warbandlord 遗产格式，路径=`Category/Group/SubGroup` id 拼接）"
+                        "与 `<Tag>value</Tag>`（RBM 自己的格式，路径=**祖先标签名**拼接，"
+                        "如 `RBMCampaign/BadDataCleanupEnabled`）。"
+                        "`keyCount` 分别给出两种形式各多少（RBM 真档实测：option=468 + bare=215 = 683）。"
+                        "⚠️ 像 `Enabled` 这种标签名在 4 个段里重复 ⇒ 只给标签名会撞车，必须用带祖先的完整路径。"
+                        "⚠️ 不给 `path` 时保留 B1 闸门：目标模块看起来已卸载 ⇒ "
+                        "明确拒绝 `target_module_not_installed`（读一个没有消费者的死人文件没有意义）。"),
         "inputSchema": {"type": "object", "properties": {
             "paths": {"type": "array", "items": {"type": "string"},
-                      "description": "形如 DamageCalc/ArmorEffect/ArmorBreakPoint；不传则返回全部"}},
+                      "description": "形如 DamageCalc/ArmorEffect/ArmorBreakPoint；不传则返回全部"},
+            "path": {"type": "string",
+                     "description": "要读的配置文件**绝对路径**（可选）。给了就跳过 Warbandlord 闸门"}},
             "additionalProperties": False},
     },
     {
         "name": "bl_apply_config",
-        "description": ("修改 Warbandlord config.xml（自动备份 + 写后 XML 校验）。"
-                        "注意：游戏需要重启后配置才生效。"),
+        "description": ("修改 config.xml（自动备份 + 写后 XML 校验 + 回读核对）。"
+                        "**默认目标 = Warbandlord 模块的 config.xml**；"
+                        "★ 给了 `path` 则改**指定文件**（例如 RBM 的 "
+                        "`<我的文档>\\Mount and Blade II Bannerlord\\Configs\\RBM\\config.xml`）。"
+                        "★ 返回值一定回显**实际写入的绝对路径** `path`、`pathSource`、"
+                        "备份路径 `backup`、回读结果 `verified` —— 请照 `path` 核对"
+                        "（本项目的教训是『文件目标不可信』：既会『操作了错的文件』，"
+                        "也会『以为操作的是另一个文件』）。"
+                        "★ **写回保持原格式**：`<Option id=\"..\" value=\"..\" />` 仍写成 Option，"
+                        "`<Tag>v</Tag>` 仍写成裸标签（**不会**被统一成一种）——"
+                        "因为 RBM 自己的 loader 只认裸标签，改写格式 ⇒ RBM 读不到 ⇒ 又是『改了没生效』。"
+                        "⚠️ **RBM **没有热重载**：改完必须重启游戏才生效**，"
+                        "否则表现为『改了但没生效』，别误判成 MOD 有 bug。"),
         "inputSchema": {"type": "object", "properties": {
             "edits": {"type": "array", "items": {"type": "object", "properties": {
                 "path": {"type": "string"}, "value": {"type": "string"}}, "required": ["path", "value"]}},
-            "dry_run": {"type": "boolean", "description": "只预览不写入"}},
+            "dry_run": {"type": "boolean", "description": "只预览不写入"},
+            "path": {"type": "string",
+                     "description": "要改的配置文件**绝对路径**（可选）。给了就跳过 Warbandlord 闸门"}},
             "required": ["edits"], "additionalProperties": False},
     },
     {
         "name": "bl_rts_config",
         "description": ("回读 **RTSCamera** 的配置（Documents\\...\\Configs\\RTSCamera\\RTSCameraConfig.xml）。"
                         "只读。用来查'攻城相机高度/自由相机/抬升触发'这些开关现在是什么值。"
-                        "我们不改它的代码，只当它的参数管理员（见 bl_apply_rts_config）。"),
+                        "我们不改它的代码，只当它的参数管理员（见 bl_apply_rts_config）。"
+                        "★ 可选 `path` 指定别的文件（副本）；返回里回显**实际读取的绝对路径** + `pathSource`。"),
         "inputSchema": {"type": "object", "properties": {
             "keys": {"type": "array", "items": {"type": "string"},
                      "description": "只读这些键（如 ElevatedHeightInSiege）；不传返回全部"},
-            "presets": {"type": "boolean", "description": "true = 顺带回显可用预设名"}},
+            "presets": {"type": "boolean", "description": "true = 顺带回显可用预设名"},
+            "path": {"type": "string",
+                     "description": "要读的配置文件**绝对路径**（可选；不传=真实 RTSCamera 配置）"}},
             "additionalProperties": False},
     },
     {
@@ -1216,7 +1553,10 @@ TOOLS = [
                 "key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]},
                 "description": "逐键写入，如 [{\"key\":\"ElevatedHeightInSiege\",\"value\":\"10\"}]"},
             "dry_run": {"type": "boolean", "description": "只预览不写入"},
-            "allow_missing": {"type": "boolean", "description": "允许写入表里不存在的键（默认 false）"}},
+            "allow_missing": {"type": "boolean", "description": "允许写入表里不存在的键（默认 false）"},
+            "path": {"type": "string",
+                     "description": "要写的配置文件**绝对路径**（可选；不传=真实 RTSCamera 配置）。"
+                                    "★ 自测/试写**请务必传副本路径**"}},
             "additionalProperties": False},
     },
     {
@@ -1638,6 +1978,10 @@ TOOLS = [
                         "（如刚被灭的家族、换帅瞬间的部队）⇒ **不可作为自动清理依据**。"
                         "⚠️ **`skipped` 字段必须看**：若某类扫描不了（成员缺失），它会显式列出 —— "
                         "否则「某类 0 条」会被误读成「这一类很干净」。"
+                        "★ **`coverage` 是另一回事**：它是**正常**的覆盖口径（例如物品扫描"
+                        "**共扫了哪些 roster** —— 全部队伍 + 聚落 + `Settlement.Stash`）——"
+                        "`skipped`=异常（没扫成）/ `coverage`=正常（扫了什么），**两者别混读**；"
+                        "看 `coverage` 才能判断「物品 0 条」到底是扫遍了还是只扫了一处。"
                         "⚠️ 实测（1.4.8）：军团在 `Kingdom.Armies` 上，"
                         "**`Campaign.Armies` 不存在**（任务同理走 `Campaign.QuestManager.Quests`）。"),
         "inputSchema": {
@@ -1647,6 +1991,39 @@ TOOLS = [
                          "description": "只扫某几类（逗号分隔）：party,clan,kingdom,army,quest,item。不传=全扫"},
                 "limit": {"type": "integer",
                           "description": "报告最多返回几条 finding（0=不限；仅截断报告，不影响扫描量）"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "bl_get_perk",
+        "description": ("**读取 Perk 的运行时生效值（只读，需战役上下文）**：返回 C7 会改写的那 6 个 "
+                        "Perk 的 `primaryBonus` / `secondaryBonus`（各带 `...Readable` 标志），"
+                        "以及 `primaryIncrementType` / `requiredSkillValue` / `skill`。"
+                        "★ 它补的是一个**真实缺口**：三合一 C7 会改写 6 个 Perk 的 bonus，"
+                        "而验『值真的被改写了』此前**没有任何工具**能读运行时 Perk 值 ⇒ "
+                        "V2 只能退化成『看游戏内 Perk tooltip』（需真人、不精确）。"
+                        "★ **Primary 与 Secondary 分开返回，必须按『每个字段各自的预期』核对** —— "
+                        "反编译实测原版基线：这 6 个 Perk 的 Primary **全是 0.002**、Secondary **全是 0.005**；"
+                        "而目标值对 Primary/Secondary 是同一个数（0.001 或 0.002）⇒ "
+                        "对 `_bowDeadshot` / `_crossbowMightyPull` / `_throwingUnstoppableForce` 而言"
+                        "**Primary 本来就不该变**（目标 0.002 == 原版 0.002）。"
+                        "⚠️ 所以**不要**把判据写成『开关前后两次读数必须不同』—— "
+                        "那会把『正确』误判成『工具无效』。"
+                        "⚠️ **本工具不返回调用方的目标值**（BlBridge 刻意不引入 mod 语义）——"
+                        "目标值请在三合一侧对照。"
+                        "⚠️ `xxxReadable=false` 表示该属性**没读到**（此时 `null` **不是 0**）。"
+                        "⚠️ `DefaultPerks` 是 `Campaign` 的属性 ⇒ **主菜单/自定义战斗下为 null** ⇒ "
+                        "报 `no_campaign`，**不返回 0**（防『读到 0 当成映射成 0』）。"
+                        "用法：不传参 ⇒ 列那 6 个；`perk=_bowDeadshot`（私有字段名，可省 `_`）"
+                        "或 `perk=BowDeadshot`（StringId）指名查；`all=true` 列全部 Perk。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "perk": {"type": "string",
+                         "description": "Perk 字段名（如 `_bowDeadshot`，`_` 可省）或 StringId（如 `BowDeadshot`）"},
+                "all": {"type": "boolean",
+                        "description": "true = 列出全部 Perk（默认只列 C7 相关的那 6 个）"},
             },
             "additionalProperties": False,
         },
@@ -2361,7 +2738,7 @@ TOOL_GROUPS = {
         "bl_list_saves", "bl_load_save", "bl_campaign_time",
         "bl_campaign_overview", "bl_list_kingdoms", "bl_list_clans",
         "bl_list_settlements", "bl_list_parties", "bl_campaign_log",
-        "bl_get_hero", "bl_scan_bad_data",
+        "bl_get_hero", "bl_scan_bad_data", "bl_get_perk",
     ],
     "config": [
         "bl_read_config", "bl_apply_config", "bl_rts_config", "bl_apply_rts_config",
@@ -2995,40 +3372,70 @@ def call_tool(name, args):
                 "count": len(page), "events": page}
 
     if name == "bl_read_config":
-        # B1：目标模块若已软卸载 ⇒ 返回结构化错误（含判据与替代方案），不抛异常
-        ok, payload = read_config(args.get("paths"), _structured=True)
+        # B1：未给 path 且目标模块已软卸载 ⇒ 结构化错误（含判据与替代方案），不抛异常。
+        # A4：给了 path ⇒ 跳过闸门、读指定文件，并在返回里回显绝对路径。
+        ok, payload = read_config(args.get("paths"), _structured=True,
+                                  path=args.get("path"))
         return payload if not ok else {"ok": True, **payload}
 
     if name == "bl_apply_config":
         edits = args.get("edits") or []
         if not edits:
             return {"ok": False, "error": "edits 不能为空"}
-        ok, payload = apply_config(edits, dry_run=bool(args.get("dry_run")),
-                                   _structured=True)
+        # ★ 防御性形状检查（2026-10-08）：`apply_config(...,_structured=True)` 的契约是
+        #   返回 `(ok, payload)` **元组**。历史缺陷：成功分支返回裸 dict ⇒ 解包炸在**返回之后**，
+        #   而那时文件**已经改完落盘** ⇒ 调用方以为失败、实际已改（最防的"报告与事实相反"）。
+        #   ⇒ 这里显式断言形状：契约再被破坏时立刻报**可读**错误，而不是 `too many values to unpack`。
+        _ret_shape = apply_config(edits, dry_run=bool(args.get("dry_run")),
+                                  _structured=True, path=args.get("path"))
+        if not (isinstance(_ret_shape, tuple) and len(_ret_shape) == 2):
+            return {"ok": False, "error": "internal_return_contract_violation",
+                    "detail": ("apply_config(_structured=True) 必须返回 (ok, payload) 元组，"
+                               "实得 %r —— 这是**实现缺陷**（不是你的调用问题）。"
+                               "⚠️ 若本次是**真写**，配置文件**可能已经被改**："
+                               "请用 bl_read_config 回读确认，并检查同目录是否有 .bak_ 备份。"
+                               % type(_ret_shape).__name__),
+                    "path": args.get("path")}
+        ok, payload = _ret_shape
         return payload if not ok else {"ok": True, **payload}
 
     # ── v0.8.15：RTSCamera 配置（B 方案：只当它的参数管理员，不碰它的代码）──────
     if name == "bl_rts_config":
         try:
-            values = bl_rts.read(args.get("keys"))
+            values = bl_rts.read(args.get("keys"), path=args.get("path"))
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "path": bl_rts.config_path()}
-        out = {"ok": True, "path": bl_rts.config_path(), "values": values}
+            return {"ok": False, "error": str(e),
+                    "path": args.get("path") or bl_rts.config_path()}
+        # ★ 回显**实际读取的绝对路径**（与 A4 同口径）。
+        _p = args.get("path") or bl_rts.config_path()
+        out = {"ok": True, "path": os.path.abspath(os.path.expanduser(str(_p))),
+               "pathSource": "explicit" if args.get("path") else "default",
+               "values": values}
         if args.get("presets"):
             out["presets"] = dict(bl_rts.PRESETS)
         return out
 
     if name == "bl_apply_rts_config":
         try:
+            # ★★ `path` 必须**转发**下去（2026-10-08 修，实测事故）：
+            #   旧版这两个 RTS 工具的派发**既不声明也不转发 `path`** ⇒
+            #   调用方传 `path=<副本>` 会被**静默丢弃**，实际写的是**真实**配置
+            #   ⇒ 我的自测本想写临时副本，结果**改到了玩家的真档**（已按备份 sha 逐字节还原）。
+            #   ⇒ 教训：**"参数没被转发" = 静默改错文件**，与 B1（改了没有消费者的死文件）
+            #     是同一类"文件目标不可信"，但方向相反（这次是"以为在写副本，其实写了真档"）。
             if args.get("preset"):
-                return bl_rts.apply_preset(str(args["preset"]), dry_run=bool(args.get("dry_run")))
+                return bl_rts.apply_preset(str(args["preset"]),
+                                           dry_run=bool(args.get("dry_run")),
+                                           path=args.get("path"))
             edits = args.get("edits") or []
             if not edits:
                 return {"ok": False, "error": "需要 preset，或非空的 edits"}
             return bl_rts.apply(edits, dry_run=bool(args.get("dry_run")),
-                                allow_missing=bool(args.get("allow_missing")))
+                                allow_missing=bool(args.get("allow_missing")),
+                                path=args.get("path"))
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), "path": bl_rts.config_path()}
+            return {"ok": False, "error": str(e),
+                    "path": args.get("path") or bl_rts.config_path()}
 
     if name == "bl_crash":
         # 宿主侧工具：解析 WER 自动落盘的 minidump。**不碰游戏、不需要游戏在跑**
@@ -3932,6 +4339,34 @@ def call_tool(name, args):
             return {"ok": False, "error": e.get("message") or "get_hero 失败",
                     "code": e.get("code"), "response": resp}
         return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_get_perk":
+        # R1（2026-10-08，隔壁项目需求）：读 Perk 运行时生效值（只读，需战役上下文）。
+        params = {}
+        if args.get("perk"):
+            params["perk"] = str(args["perk"])
+        if args.get("all"):
+            params["all"] = "true"
+        resp, err = send_command("get_perk", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_perk 失败",
+                    "code": e.get("code"), "response": resp}
+        result = resp.get("result")
+        # ★ 把"判据口径"再钉一遍（调用方常只看 result，不看 tool description）——
+        #   这条**必须**跟着返回走，否则 V2 的验收很容易写成"两次必须不同"而误判。
+        return {"ok": True, "result": result,
+                "scope": ("**只读运行时 Perk 值。** ★ `primaryBonus` 与 `secondaryBonus` "
+                          "**必须按各自预期**核对：原版基线 6 个 Perk 的 Primary 全 0.002、"
+                          "Secondary 全 0.005，而目标值对 Primary/Secondary 是同一个数 ⇒ "
+                          "`_bowDeadshot`/`_crossbowMightyPull`/`_throwingUnstoppableForce` 的 "
+                          "**Primary 本来就不该变**。⚠️ 别写成『开关前后两次读数必须不同』—— "
+                          "那会把正确判成工具无效。"
+                          "⚠️ `xxxReadable=false` ⇒ 该值**没读到**，`null` **不是 0**。"
+                          "⚠️ 本工具**不返回调用方目标值**（BlBridge 不引入 mod 语义）。"),
+                "response": resp}
 
     if name == "bl_list_kingdoms":
         params = {}

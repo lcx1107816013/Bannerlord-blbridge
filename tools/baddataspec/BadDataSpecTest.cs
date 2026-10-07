@@ -197,6 +197,21 @@ public static class BadDataSpecTest
              new BadDataSpec.ItemSnapshot { Name = "读不到", HasItemObject = true, Count = -1 },
              "item_count_unreadable", BadDataSpec.SeveritySuspect);
 
+        // ── ★ A3（2026-10-08）：物品扫描扩到**全队伍 + 聚落**后的新对照 ────────
+        //
+        // 扩范围的**风险**是"合法特例被当坏数据"（真实世界正常但会误报的那类）。
+        // 下面对照就是钉这条：**合法 0 数量** 与 **匪帮队伍** 都**不许**报 broken。
+        Item(must: false, "★ A3：合法 0 数量（对象在）⇒ **不报 broken**（真实世界正常特例）",
+             new BadDataSpec.ItemSnapshot { Name = "货物", HasItemObject = true, Count = 0 },
+             "item_null_object");
+        Item(must: false, "★ A3：合法 0 数量 ⇒ 不报 item_null_object（对象确实在）",
+             new BadDataSpec.ItemSnapshot {
+                 Name = "货物", Roster = "party:匪帮", HasItemObject = true, Count = 0 },
+             "item_null_object");
+        // ★ 来源 roster 必须进报告：扩到多 roster 后，没有来源就**无法复核**某条指哪里。
+        //   这条断言"报出来的 who 里带上了 roster"，正是"扩了范围"在报告上**可见**的证据。
+        ItemRosterAttribution();
+
         // ════════════════════════════════════════════════════════════════
         Console.WriteLine();
         Console.WriteLine("--- 汇总 JSON ---");
@@ -227,6 +242,28 @@ public static class BadDataSpecTest
         check("汇总 JSON 每条 finding 都带 evidence（便于人工复核）",
               js.Contains("\"evidence\":\"isActive=true"), js);
         check("finding 是合法 JSON（能被独立解析，而非自证）", ParseOk(js), js.Substring(0, 160));
+
+        // ── ★ A3（2026-10-08）：`coverage`（正常覆盖口径）必须与 `skipped`（异常）**分开** ──
+        //
+        // 立项点：扩到"全队伍 + 聚落"后，必须让人看得出"扫了哪些 roster"，
+        //   否则「物品 0 条」会被误读成"整档都干净"。
+        // ⚠️ 第一版我把这条口径**塞进了 `skipped`** —— 那是**错的口径**：
+        //   `skipped` 的语义是"**某类没扫成**"，把正常信息放进去
+        //   ⇒ 每次成功扫描都**假报"有东西没扫成"**，污染了那唯一的异常信号。
+        //   ⇒ 本组对照钉住"两者不混"。
+        string jsCov = BadDataSpec.BuildSummaryJson(
+            new List<BadDataSpec.Finding>(), 1, 1, 1, 1, 1, 7, 3.0,
+            new List<string> { "item: 共扫 3 个 roster —— party:[玩家](5); settlement:X(2); stash:X(1)" });
+        check("★A3: 汇总 JSON 带 `coverage`（正常覆盖口径）",
+              jsCov.Contains("\"coverage\":[") && jsCov.Contains("共扫 3 个 roster"), jsCov);
+        check("★A3: 未传 coverage ⇒ **不出现** `coverage` 键（不凭空造字段）",
+              !js.Contains("\"coverage\""), js.Substring(0, 160));
+        // 反向对照：coverage 里的话**不该**出现在 skipped 语义里 ——
+        //   `BuildSummaryJson` 本身不产出 skipped（那是 Scanner 注入的），
+        //   所以这里断言"覆盖信息只在 coverage、不在别处"。
+        check("★A3 反向对照: 覆盖口径**只**出现在 `coverage`，不在 `scope`/别处以 `skipped` 名义出现",
+              jsCov.IndexOf("共扫 3 个 roster") > jsCov.IndexOf("\"coverage\":["),
+              jsCov.Substring(Math.Max(0, jsCov.IndexOf("coverage") - 20), 120));
 
         // ════════════════════════════════════════════════════════════════
         Console.WriteLine();
@@ -332,6 +369,42 @@ public static class BadDataSpecTest
         List<BadDataSpec.Finding> fs = new List<BadDataSpec.Finding>();
         BadDataSpec.JudgeItem(it, fs);
         if (must) Fire("item", label, fs, code, severity); else NoFire(label, fs, code);
+    }
+
+    /// <summary>
+    /// ★ A3：断言**来源 roster 出现在报告的 who 里**。
+    ///
+    /// 为什么单独一条：扩到"全部队伍 + 聚落"后，同一件物品可能出现在多个 roster 里，
+    /// 报告若只给物品名 ⇒ **无法复核这条 finding 指哪里**，
+    /// 清理器也就无法"按具体条目清理"（本项目的硬约束之一）。
+    /// ⇒ 这条断言"扩范围"在报告上**可见**，而不是只体现在代码里。
+    /// </summary>
+    private static void ItemRosterAttribution()
+    {
+        List<BadDataSpec.Finding> fs = new List<BadDataSpec.Finding>();
+        BadDataSpec.JudgeItem(new BadDataSpec.ItemSnapshot {
+            Name = "坏物品", Roster = "stash:Epicrotea", HasItemObject = false }, fs);
+        bool hit = false;
+        foreach (BadDataSpec.Finding f in fs)
+        {
+            if (f.Code == "item_null_object" && f.Subject != null
+                && f.Subject.Contains("stash:Epicrotea"))
+            {
+                hit = true;
+            }
+        }
+        check("★ A3：finding 里带**来源 roster**（stash:Epicrotea ⇒ 可复核是哪一份）", hit,
+              fs.Count > 0 ? fs[0].Subject : "(无 finding)");
+
+        // 反向对照：**没给** roster 时，who 里**不该**凭空出现 "@"
+        //（防"为了过上面那条断言而恒拼接一个来源"）
+        List<BadDataSpec.Finding> fs2 = new List<BadDataSpec.Finding>();
+        BadDataSpec.JudgeItem(new BadDataSpec.ItemSnapshot {
+            Name = "坏物品", HasItemObject = false }, fs2);
+        bool clean = fs2.Count > 0 && fs2[0].Subject != null
+                     && !fs2[0].Subject.Contains("@");
+        check("★ A3 反向对照：未给 roster ⇒ who 里不出现 '@'（判据不是恒真）", clean,
+              fs2.Count > 0 ? fs2[0].Subject : "(无 finding)");
     }
 
     private static void check(string name, bool cond, string detail = "")

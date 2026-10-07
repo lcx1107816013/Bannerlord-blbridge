@@ -530,6 +530,13 @@ namespace BlBridge
             {
                 return BadDataScanner.HandleScan(id, raw);
             }
+            // R1（2026-10-08，隔壁项目需求）：读 Perk 的**运行时生效值**（只读）。
+            // 用途：三合一 C7 改写 6 个 Perk 的 bonus，要验"值真的被改写了" ——
+            // 而 `Campaign.Current.DefaultPerks` 只有 mod 自己能读，此前无工具 ⇒ V2 无法硬验证。
+            if (method == "get_perk")
+            {
+                return CampaignReadProbe.HandleGetPerk(id, raw);
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 

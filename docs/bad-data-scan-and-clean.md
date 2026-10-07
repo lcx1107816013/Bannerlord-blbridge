@@ -61,26 +61,62 @@ Insert / Clear / RemoveAt  同样是 public=True, 含throw指令=0
 ⇒ **清理器实现前必须先用受控实验判定它到底是哪种**（见 §四）。
 **在此之前，任何"调用 `MobileParties.Remove(...)` 就完事"的写法都是猜测。**
 
+> ★ **2026-10-08 订正（读本节前必看）**：上一条"必须"是**针对"直删集合"这条路线**说的，
+> 而该路线**本身已被否定** —— 见 §2.3：五类对象**都有** `*Action` 正规入口，
+> 清理**一律走 `*Action` 类，不碰 `MobileParties`/`Clans` 集合**。
+> ⇒ 本节的"不能猜"**依然成立**，但它约束的是**不要走直删路线**，而不是"先做实验才能清理"。
+
 ### 2.2 集合都是只读视图
 
 `Campaign.MobileParties` / `.Clans` / `.Kingdoms` / `.Settlements` 全是 `MBReadOnlyList<T>`。
 `Campaign` 上没有公开的 `Remove*`/`Destroy*`（扫到的只有 `OnDestroy()` / `RemoveEntityComponent`，
 后者是 EntityComponent 体系、与部队无关）。
 
-### 2.3 各类对象的"正规销毁入口"（实测结果）
+### 2.3 各类对象的"正规销毁入口"（★ 已订正，2026-10-08）
 
-| 对象 | 正规入口 | 实测 |
+> **订正声明（重要）**：本节原先的结论是"**部队/家族/军团没有 `Destroy`/`Remove`/`Disband`
+> ⇒ 只能硬改对象图**"。**该结论错误，已作废。**
+>
+> **错在哪**：只在**实体类本身**（`MobileParty` / `Clan` / `Army`）上找销毁方法。
+> 而 Bannerlord 的引擎语义是 **"实体类上没有方法 ≠ 没有正规入口"** ——
+> 销毁一律走 `TaleWorlds.CampaignSystem.Actions` 命名空间下的 **`*Action` 类**
+> （这是引擎唯一被设计出来、会派发事件 + 维护所有关联容器的路径）。
+>
+> 订正依据：`read_csharp_type` 反编译实测
+> （`TaleWorlds.CampaignSystem/TaleWorlds.CampaignSystem.Actions/*.cs`），
+> 以及本项目**自己已在用**该模式的既有代码 `RBM/SubModule.cs:396-415`。
+
+| 对象 | **正规入口（`*Action` 类）** | 内部做什么（实测） |
 |---|---|---|
-| `MobileParty` | `Destroy` / `Remove` / `OnRemove` / `SetActive` | ❌ **都不存在**（只有 `IsActive` 属性）|
-| `Clan` | `Deactivate` / `Destroy` / `Remove` | ❌ 都不存在（只有 `IsEliminated` 属性）|
-| `Army` | `Disband` / `DisbandArmy` / `Finish` | ❌ 都不存在 |
-| `QuestBase` | `CompleteQuestWithCancel(TextObject)` / `CompleteQuestWithFail(TextObject)` | ✅ **存在**（这是"终止卡死任务"的正规入口）|
-| `QuestManager` | `OnQuestCompleted(QuestBase, QuestCompleteDetails)` | ✅ 存在 |
+| **部队** `MobileParty` | `DestroyPartyAction.Apply(PartyBase destroyerParty, MobileParty destroyedParty)`<br>`DestroyPartyAction.ApplyForDisbanding(MobileParty, Settlement)` | 派发 `OnMobilePartyDestroyed` + `OnMapInteractableDestroyed` → **`destroyedParty.RemoveParty()`**；`ApplyForDisbanding` 先 `LeaveSettlementAction.ApplyForParty` 再派发 `OnPartyDisbanded` |
+| **家族** `Clan` | `DestroyClanAction.Apply(Clan)`<br>`ApplyByFailedRebellion(Clan)` / `ApplyByClanLeaderDeath(Clan)` | 派发 `OnClanDestroyed` → **`DeactivateClan()`** → 逐队伍 `DestroyPartyAction.Apply` → 处理英雄（`KillCharacterAction.ApplyByRemove`）→ 聚落改属（`ChangeOwnerOfSettlementAction.ApplyByDestroyClan`）→ `FactionManager.RemoveFactionsFromCampaignWars` → 退王国（`ChangeKingdomAction`）|
+| **军团** `Army` | `DisbandArmyAction` 共 **12 个** `ApplyBy*`（逐条列举：`ApplyByReleasedByPlayerAfterBattle` / `ApplyByArmyLeaderIsDead` / `ApplyByNotEnoughParty` / `ApplyByObjectiveFinished` / `ApplyByPlayerTakenPrisoner` / `ApplyByFoodProblem` / `ApplyByInactivity` / `ApplyByCohesionDepleted` / `ApplyByNoActiveWar` / `ApplyByUnknownReason` / `ApplyByLeaderPartyRemoved` / `ApplyByNoShip`）| **`army.DisperseInternal(reason)`**（按成因选 reason；`DismissalRequestedWithInfluence` 还会扣影响力/关系）|
+| **物品** `ItemRoster` | `RemoveIf(Func<ItemRosterElement,int>)` → `IEnumerable<ItemRosterElement>`<br>`Remove(ItemRosterElement)` / `AddToCounts(ItemObject, int)`<br>★ 读取一律 **`GetItemNumber(ItemObject)`**（不是 `GetElementNumber(int index)`）| vanilla 自带 `RemoveZeroCountsFromRoster` / `ReplaceInvalidItemsWithTrash`（均 `private`，由 `OnLoadStarted`/`LoadInitializationCallback` 调用）|
+| **任务** `QuestBase` | `CompleteQuestWithCancel(TextObject)` / `CompleteQuestWithFail(TextObject)` | （原有结论，**正确**，保留）|
+| `QuestManager` | `OnQuestCompleted(QuestBase, QuestCompleteDetails)` | （原有结论，**正确**，保留）|
 
-⇒ **任务**有明确正规入口（`CompleteQuestWithCancel`）；
-**部队/家族/军团**没有 → 它们的"清理"要么走更上层的 Manager，要么本来就是**不该手动删**的
-（`IsActive=false` / `IsEliminated=true` 才是引擎认可的"移除"表达）。
-**这一点必须在实现前想清楚，否则就是硬改对象图 = 高风险。**
+#### 两条必须一起看的补充（都来自实测反编译，不是推测）
+
+1. **`CampaignObjectManager.RemoveClan` 不是通用入口，别无条件调。**
+   `DestroyClanAction.ApplyInternal` **只在 `destroyedClan.IsRebelClan` 为真时**才自己调
+   `Campaign.Current.CampaignObjectManager.RemoveClan(...)`。
+   ⇒ 对**非叛乱**家族直接 `RemoveClan` 会绕过同一批次里的英雄/聚落/战争清理。
+   （本项目 `RBM/SubModule.cs:396-415` 是"`DestroyClanAction.Apply` **之后**再补 `RemoveClan`"，
+   针对的是 `Culture == null` 的**坏家族**这一特殊场景，注释明写"只 `Clans.Remove` 会漏 `Factions`"。）
+2. **`ApplyInternal` 是 `private`**，外部只能调那些 `Apply*` 公开重载 —— 这正是"入口存在但必须选对语义"的原因
+   （例如军团清理要按成因挑 `ApplyByInactivity` 等，而不是自己造一个 reason）。
+
+#### ★ 保留的硬约束（**理由仍然成立，不要因本节订正而忽略**）
+
+**绝不**用 `Campaign.MobileParties.Remove(...)` / `Campaign.Clans.Remove(...)`
+这类**集合直删**去"清理"对象 —— **即使 §2.1 的 `MBReadOnlyList` 行为未知，这条也成立**：
+
+- `Campaign.MobileParties` / `.Clans` 是 **`MBReadOnlyList<T>`**（§2.2），而引擎另有
+  **`MobilePartyLocator`** 等索引结构（按位置/会话维护的查找表）；
+- **集合直删只动一个容器，索引与关联对象都留在原处** ⇒ 得到一个"查得到、但已不在册"的**不一致状态**，
+  **比不清理更糟**（后续引擎遍历索引时触雷）。
+- `*Action` 类的价值正是**替你把"所有该动的地方"按引擎顺序动完**（派发事件 + 清理关联 + 更新索引）。
+  ⇒ **一律走 `*Action` 类**，这是本节的唯一正确结论。
 
 ### 2.4 存档相关 API
 
@@ -113,9 +149,15 @@ MBSaveLoad.GetSaveFileWithName(String) -> SaveGameFileInfo
 
 ---
 
-## 四、清理器实现前的**第一步**（受控实验，别跳）
+## 四、关于 `MBReadOnlyList` 的受控实验（★ 已降级：可选，不再是清理的前提）
 
-在**动真档之前**，先写一个**只读探测**回答：`MBReadOnlyList.Add/Remove` 被调用时到底怎样？
+> **2026-10-08 订正**：本节原先写作"清理器实现前的**第一步**（受控实验，别跳）"。
+> 自 §2.3 订正后（五类**都有** `*Action` 正规入口），**清理不需要碰这两个只读集合**
+> ⇒ 本实验**不再是清理路径的前置条件**。
+> 保留它只有一个理由：它回答"**直删到底会不会静默无效**"—— 这仍是一个值得知道的引擎事实
+> （§2.1 那条"`Add`/`Remove` 存在、IL 里无 `throw`"的**观测**有效，只是**不该用它给清理定性**）。
+
+在**动真档之前**，若仍想回答 `MBReadOnlyList.Add/Remove` 被调用时到底怎样，可写一个**只读探测**：
 
 ```
 判据（必须成对）：
@@ -124,8 +166,9 @@ MBSaveLoad.GetSaveFileWithName(String) -> SaveGameFileInfo
   C 若静默无效 ⇒ **在临时存档**上试（绝不碰玩家真档）
 ```
 
-★ 只有在 A/B 都是"抛异常"或"确实生效且可回滚"时，才继续设计清理；
-若是"静默无效"，则**必须换方案**（走引擎 Manager / 或明确不支持该类型清理）。
+★ 原先写的"只有在 A/B 都是'抛异常'或'确实生效且可回滚'时才继续设计清理"**已作废** ——
+清理走 `*Action` 类（§2.3），**不依赖本实验的结果**。
+本实验的结论无论哪种，都**不改变"一律走 `*Action` 类"**这条路线。
 
 ---
 
@@ -135,8 +178,13 @@ MBSaveLoad.GetSaveFileWithName(String) -> SaveGameFileInfo
 |---|---|
 | 扫描（BlBridge，只读） | ✅ `bl_scan_bad_data`，真机 13/13，修掉 2 处误报 |
 | 清理（MOD，写） | ⏳ **未开始**；先做 §四 的受控实验 |
-| `MBReadOnlyList` 写行为 | ⚠️ **未知**（Add/Remove 存在且无 throw ⇒ 不能猜） |
+| **各类对象的正规销毁入口** | ✅ **已订正（2026-10-08）**：**五类全都有** `*Action` 正规入口（见 §2.3），**不需要硬改对象图** |
+| `MBReadOnlyList` 写行为 | ⚠️ **未知**（Add/Remove 存在且无 throw ⇒ 不能猜）；★ 但**这条已不再是清理的必经之路** —— 见 §2.3 的"一律走 `*Action` 类" |
 | 存档备份 API | ⚠️ **未找到**直接路径 API，需用文件系统或继续查 |
+
+> ★ **订正带来的实质变化**：原先"部队/家族/军团没有正规入口 ⇒ 清理 = 硬改对象图 = 高风险"
+> 这个**阻塞理由已消失**。§四 的 `MBReadOnlyList` 受控实验**仍值得做**（它回答"直删会不会静默无效"），
+> 但**不再是清理路径的前提** —— 清理一律走 `*Action`，不碰这两个集合。
 
 ### 一条纪律（写给实现者）
 
