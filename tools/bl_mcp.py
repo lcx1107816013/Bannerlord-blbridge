@@ -1535,17 +1535,22 @@ TOOLS = [
         "name": "bl_source_map",
         "description": ("**源码定位（栈帧 → 文件:行号）**：把崩溃栈帧映射到源码位置并附"
                         "**真实源码片段**，补「栈只有方法名、agent 无法跳到那一行」的缺口。"
-                        "两条路径：① 栈里自带行号（该 DLL 需用 `/debug:full` 编译 —— "
-                        "**`.NET Framework` 不认 portable PDB**）；② 本地符号索引 "
-                        "（`out/BlBridge.symbols.json`，由 PDB 抽出的 方法→文件:行号）。"
+                        "三条路径：① 栈里自带行号（该 DLL 需用 `/debug:full` 编译 —— "
+                        "**`.NET Framework` 不认 portable PDB**）；② 我们自己的符号索引 "
+                        "（`out/BlBridge.symbols.json`）；③ **第三方 PDB 索引** "
+                        "（`out/symbols-thirdparty/`，由各 mod 自带 PDB 抽出）。"
                         "⚠️ **解析与语言无关**：中文 Windows 的栈是 `位置 X.cs:行号 24`、"
                         "英文是 `in X.cs:line 24` —— 只认英文关键词的判据会在中文系统上"
                         "把「有行号」判成「没有」。"
-                        "⚠️ **第三方帧如实说「无法定位」，绝不编造行号**"
-                        "（如 `HarmonyLib.*` / `TaleWorlds.*`，它们的 DLL 不在我们仓库里）。"
-                        "⚠️ **实测边界**：真实 194 个栈帧里只有 **2 帧**属我们工程（99% 是 "
-                        "BCL/框架帧）⇒ 对**第三方 mod 崩溃**，本工具**结构上给不出行号**。"
-                        "生成索引：`python tools/bl_symbols.py --build`。"),
+                        "⚠️ **拿不准就不给**：第三方帧若同名方法散在多个程序集**且行号不同**"
+                        "（实测 `HarmonyExtensions.cs` 89 vs 90：BUTR 共享库被复制进每个 mod），"
+                        "或 PDB 里有**不可信行号**（实测出现 16707566），一律如实说"
+                        "「无法确定」—— **绝不编造行号**（错行号比没有更坏）。"
+                        "⚠️ 第三方**没有源码片段**（它们的源码不在本仓库）。"
+                        "⚠️ 实测覆盖：真实方法名抽样 333 个 → **约 75% 可定位**"
+                        "（对比改造前只有 1%，因为当时只覆盖我们自己的代码）；"
+                        "其余因真歧义或 PDB 损坏被如实拒绝。"
+                        "生成索引：`python tools/bl_symbols.py --build` / `--third-party`。"),
         "inputSchema": {
             "type": "object",
             "properties": {

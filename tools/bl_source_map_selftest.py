@@ -114,11 +114,22 @@ def main():
                  or "TaleWorlds" in (f["method"] or "")]
         check("5b 第三方帧标为 thirdParty", all(f["thirdParty"] for f in third),
               repr([(f["method"], f["thirdParty"]) for f in third]))
-        check("5c 第三方帧 locatedBy=None", all(f["locatedBy"] is None for f in third),
+        # ⚠️ 这两条断言**已按新能力更新**（2026-10-07）：
+        #    它们写于"只有我们自己索引"的时代，当时要求第三方帧一律无法定位。
+        #    现在有了**第三方 PDB 索引**（新能力），能定位的**应该**给位置 ——
+        #    断言若仍要求 None，反而会把改进判成失败。
+        #    新的判据是：**要么如实定位（带程序集名），要么如实说无法定位**，
+        #    **但绝不能给出我们自己的源码片段**（那才是错的方向）。
+        check("5c 第三方帧要么定位要么如实说无法定位（不能沉默给假位置）",
+              all(f["locatedBy"] in ("thirdparty", None) for f in third),
               repr([(f["method"], f["locatedBy"]) for f in third]))
-        check("5d 第三方帧说明是'第三方'而非'索引未覆盖'",
-              all("第三方" in (f.get("reason") or "") for f in third),
-              repr([f.get("reason") for f in third]))
+        check("5d 第三方帧**绝不**附我们的源码片段",
+              all(not f.get("snippet") for f in third),
+              "★ 给了片段 ⇒ 极可能是我们的同名文件（如 SubModule.cs）")
+        undecided = [f for f in third if f["locatedBy"] is None]
+        check("5e 未定位的第三方帧都给了原因",
+              all(bool(f.get("reason")) for f in undecided),
+              repr([(f["method"], f.get("reason")) for f in undecided]))
         # 自有帧：若索引在，必须能定位
         own = [f for f in frames if "BlBridge.CrashGuard.Finalizer" in (f["method"] or "")]
         if res["indexAvailable"]:
@@ -163,18 +174,130 @@ def main():
                 shutil.move(idx_backup, idxp)
 
         # ── 10：纯第三方栈 —— 反向对照 ──
-        print("\n[10] 反向对照：纯第三方栈 ⇒ 全部无法定位，但**不报错**")
+        print("\n[10] 反向对照：纯第三方栈 ⇒ 不报错，且行为如实")
         res10 = sm.analyze(stack_text="at HarmonyLib.Harmony.PatchAll()\n"
                                       "at System.RuntimeMethodHandle.InvokeMethod()")
         check("10a ok=True（正常结果，不算失败）", res10["ok"] is True, repr(res10["ok"]))
         f10 = [f for e in res10["frames"] for f in e["located"]]
-        check("10b 全部 locatedBy=None", all(f["locatedBy"] is None for f in f10),
-              repr([f["locatedBy"] for f in f10]))
-        check("10c 全部标为第三方", all(f["thirdParty"] for f in f10),
+        check("10b 全部标为第三方", all(f["thirdParty"] for f in f10),
               repr([(f["method"], f["thirdParty"]) for f in f10]))
+        # ⚠️ 同 5c 的理由：有了第三方 PDB 索引后，"能定位"是**改进**而非缺陷。
+        #    真实判据是：要么如实定位（thirdparty），要么如实说无法定位（None + reason）。
+        check("10c 每帧都有如实的处置（定位 或 带原因的无法定位）",
+              all(f["locatedBy"] == "thirdparty"
+                  or (f["locatedBy"] is None and f.get("reason")) for f in f10),
+              repr([(f["method"], f["locatedBy"], f.get("reason")) for f in f10]))
         check("10d 过滤掉了 System.*（BCL 非我们工程）",
               all(f["thirdParty"] for f in f10 if "System." in (f["method"] or "")),
               "BCL 帧没被认成第三方")
+        check("10e 第三方帧无我们的源码片段",
+              all(not f.get("snippet") for f in f10), "给了片段")
+
+        # ── 14：★ 第三方定位 —— 三条"假行号"缺陷的对照判据 ──
+        print("\n[14] 第三方定位（含三条假行号缺陷的对照）")
+        tp_idx = sm._thirdparty_indexes()
+        if not tp_idx:
+            print("  [skip] 无第三方索引 ⇒ 跑 `python tools/bl_symbols.py --third-party` 后再测")
+        else:
+            # 14a 归属判定：白名单，只有 BlBridge.* 才算我们的
+            check("14a _is_our_frame 白名单（BlBridge 是，RBM 不是）",
+                  sm._is_our_frame("BlBridge.SubModule.OnApplicationTick")
+                  and not sm._is_our_frame("RBM.SubModule.OnSubModuleLoad"),
+                  "黑名单式判定会把 RBM 当成我们的 ⇒ 读错源码")
+
+            # 14b ★ 文件名撞车：第三方帧**绝不能**配上我们的源码片段
+            #     实测：SubModule.cs 在 RBM/Bloodlust/BellumCivile 等**每个**第三方索引里都有，
+            #     而我们的主入口同名 ⇒ 无条件按 basename 取就会给错代码。
+            stack_tp = "at RBM.SubModule.OnSubModuleLoad() 位置 /src/SubModule.cs:行号 86"
+            res_tp = sm.analyze(stack_text=stack_tp)
+            f_tp = res_tp["frames"][0]["located"][0]
+            check("14b-1 第三方帧不给我们的源码片段",
+                  f_tp.get("snippet") is None,
+                  "★ 给了片段 ⇒ 可能是我们的 src/SubModule.cs（错代码）")
+            check("14b-2 第三方帧附说明为何无片段",
+                  bool(f_tp.get("sourceNote")), repr(f_tp.get("sourceNote")))
+            # 反向对照：我们自己的帧**必须**给片段
+            stack_own = ("at BlBridge.SubModule.OnApplicationTick(Single dt) "
+                         "位置 /src/SubModule.cs:行号 316")
+            res_own = sm.analyze(stack_text=stack_own)
+            f_own = res_own["frames"][0]["located"][0]
+            check("14b-3 对照：自有帧仍给片段",
+                  bool(f_own.get("snippet")), "自有帧也没片段 ⇒ 修过头了")
+
+            # 14c ★ 同名方法的跨程序集碰撞：RBM 的 OnSubModuleLoad 不能被
+            #     解析成 BlBridge.SubModule.OnSubModuleLoad
+            e = sm.locate("RBM.SubModule.OnSubModuleLoad", sm.load_index())
+            check("14c-1 查索引时不把 RBM 方法配到我们的同名方法（旧缺陷）",
+                  e is None or not (e.get("method") or "").startswith("BlBridge."),
+                  "配到了 %r ⇒ 会给我们的 SubModule.cs 行号" % (e,))
+            tpm, cands = sm.locate_thirdparty("RBM.SubModule.OnSubModuleLoad")
+            check("14c-2 走第三方索引能拿到 RBM 自己的位置",
+                  tpm is not None and tpm.get("assembly") == "rbm",
+                  repr(tpm))
+
+            # 14d ★ 不可信行号（实测第三方 PDB 里有 16707566）必须被拦
+            check("14d-1 _line_is_plausible 拒绝离谱行号",
+                  (not sm._line_is_plausible(16707566)) and sm._line_is_plausible(86)
+                  and (not sm._line_is_plausible(0)) and (not sm._line_is_plausible(None)),
+                  "上界判据失灵 ⇒ 会把 16707566 当成位置报出去")
+            stack_bad = ("at BellumCivile.Behaviors.FeudalTitleBehavior."
+                         "TryFinalizeCrownPromotionHierarchy()")
+            res_bad = sm.analyze(stack_text=stack_bad)
+            f_bad = res_bad["frames"][0]["located"][0]
+            if f_bad.get("corruptLine"):
+                check("14d-2 损坏行号被如实说明且不报位置",
+                      f_bad.get("locatedBy") is None and not f_bad.get("line")
+                      and "不可信" in (f_bad.get("reason") or ""),
+                      repr(f_bad))
+
+            # 14e 版本歧义：不猜
+            check("14e locate_thirdparty 返回 (best, candidates) 二元组",
+                  isinstance(tpm, (dict, type(None))) and isinstance(cands, list),
+                  "接口形状变了")
+
+            # ── 14f ★ 游戏版本消歧（v0.8.51）：两种命名形态都要认 ──
+            #
+            # 立项理由（实测 2026-10-07）：一个 mod 目录里可能同时放 42 个版本的
+            # dll+pdb，文件名里的版本号是**游戏版本**（供 ModuleLoader 按 LoaderFilter 挑），
+            # 不是 mod 版本 —— 实测各版本 FileVersion 相同，但**同一方法行号不同**
+            # （144 vs 149）。不消歧就会有大量真实方法以"歧义"被拒。
+            print("\n[14f] 游戏版本消歧（两种命名形态）")
+            try:
+                import bl_symbols as sb
+            except Exception:                             # noqa: BLE001
+                sb = None
+            if sb is None:
+                print("  [skip] 取不到 bl_symbols")
+            else:
+                gv = sb.game_version()
+                check("14f-1 读得到游戏版本（形如 1.4.8）",
+                      bool(gv) and gv.count(".") == 2, repr(gv))
+                # 人工造两种形态的索引名，验证都能被剥成同一个 stem
+                # ⚠️ 夹具必须**含游戏版本对应的那一份**（否则消歧无从匹配 ——
+                #    首版夹具只放了 v1.4.0/v1.5.1，却断言 gv=1.4.8 能选中 v1.4.8，
+                #    那是不可能成立的；测试数据写错又会把正确实现判成失败）。
+                fake = {"bannerlord.butterlib.implementation.1.4.8": {},
+                        "bannerlord.butterlib.implementation.1.3.15": {},
+                        "bannerlord.mboptionscreen.v1.4.8": {},
+                        "bannerlord.mboptionscreen.v1.4.0": {},
+                        "bannerlord.mboptionscreen.v1.5.1": {},
+                        "rbm": {}}
+                pref, _dropped = sb.preferred_index_names(fake, gv or "1.4.8")
+                check("14f-2 点号形态被消歧（...implementation.1.4.8）",
+                      pref.get("bannerlord.butterlib.implementation")
+                      == "bannerlord.butterlib.implementation.1.4.8",
+                      repr(pref))
+                check("14f-3 ★ `v` 前缀形态也被消歧（...mboptionscreen.v1.4.8）",
+                      pref.get("bannerlord.mboptionscreen") == "bannerlord.mboptionscreen.v1.4.8",
+                      "首版只认纯数字尾段 ⇒ MCM 的 11 个版本一个都没消歧，"
+                      "全部以'歧义'被拒（实测把覆盖率提升几乎全吃掉）")
+                check("14f-4 不带版本号的索引不受影响（rbm）",
+                      "rbm" not in pref, repr(pref))
+                # _versioned_keys 也要认 v 前缀（否则 pool 收窄时会把它们漏掉）
+                vk = sm._versioned_keys(fake)
+                check("14f-5 _versioned_keys 认 v 前缀",
+                      "bannerlord.mboptionscreen.v1.4.0" in vk and "rbm" not in vk,
+                      repr(sorted(vk)))
 
         # ── 12：只读 ──
         print("\n[12] 只读（不修改源文件）")
