@@ -17,7 +17,7 @@
   2. **派发** ← `call_tool()` 里的 `if name == "bl_x":`（决定调不调得动）
   3. **分组** ← `TOOL_GROUPS`（`BLBRIDGE_TOOLSET=core+config` 时只暴露这两组）
 
-判据（3 条，每条都能指出"哪种输入会红"）：
+判据（4 条 + 2 组对照，每条都能指出"哪种输入会红"）：
   C1 声明 ⇒ 派发：TOOLS 里每个名字都必须在 call_tool 里有分支。
                    缺了就是"看得见、调不动"（本脚本的立项理由）。
   C2 派发 ⇒ 声明：call_tool 里的每个分支名都必须在 TOOLS 里。
@@ -25,6 +25,9 @@
                    "旧名字还留着"的典型残留）。
   C3 声明 ⇒ 分组：TOOLS 里每个名字都必须落在 `TOOL_GROUPS` 的某一组里。
                    漏登记的工具，在设了 `BLBRIDGE_TOOLSET` 的环境里会**凭空消失**且极难察觉。
+  C5 manifest 的 `_meta.blbridge.toolCount` == TOOLS 声明数（2026-10-07 新增）。
+                   `build.ps1` **只同步 version、不同步 toolCount** ⇒ 它是手工维护的，
+                   实测已漂移过（加第 58 个工具时仍写 57）。
 
 **关于 `--selftest`**：一个恒返回 OK 的校验器、一个正则写错把所有名字都跳过来的校验器，
 都会得到"通过"。所以 `--selftest` 会在内存里注入 3 类故障，逐条断言被抓到；
@@ -127,7 +130,101 @@ def audit(src=None, path=None):
         if n not in grouped:
             problems.append("C3 不在任何 TOOL_GROUPS 组里（设了 BLBRIDGE_TOOLSET 时会凭空消失）: %s" % n)
     problems.extend(check_cli_entries(declared, src))
+    problems.extend(check_manifest_toolcount(len(declared)))
     return problems
+
+
+# ── C5：manifest.json 的 toolCount 必须等于真实工具数（2026-10-07 新增）──────
+#
+# ## 为什么加这条
+#
+# `module/mcp/manifest.json` 的 `_meta.blbridge.toolCount` 是**手工维护**的，
+# 而 `build.ps1` **只同步 version、不同步 toolCount**（它自己写明"手维护必漂移"）。
+# 实测证据（2026-10-07）：本仓加第 58 个工具（`bl_lexicon`）时，
+# `toolCount` 仍停在 **57**，而 `bl_mcp.py` 的 `TOOLS` 已是 58 ——
+# **没有任何既有闸门会发现**（C1/C2/C3 只比三个源，都不看 manifest）。
+#
+# ⇒ 危害是"对外声明与实现不符"：AI 读 manifest 得知 57 个工具，
+#   于是不会去调第 58 个（`toolCount` 正是给"读完介绍即接入"的客户端看的）。
+#
+# ## 判据
+#
+# `toolCount == len(TOOLS 声明数)`。**哪种输入会红**：加/删工具却没同步 manifest；
+# 或把 toolCount 写成别的数（打错字）。**抽取失败也算红**（ENV），不静默放行。
+MANIFEST_PY = os.path.join(HERE, os.pardir, "module", "mcp", "manifest.json")
+
+
+def read_manifest_toolcount(path=None):
+    """读 manifest 的 _meta.blbridge.toolCount；取不到返回 (None, 原因)。"""
+    p = os.path.abspath(path or MANIFEST_PY)
+    if not os.path.isfile(p):
+        return None, "manifest 不存在：%s" % p
+    try:
+        with io.open(p, "r", encoding="utf-8-sig") as fh:
+            d = json.load(fh)
+    except Exception as exc:                              # noqa: BLE001
+        return None, "manifest 解析失败：%s" % exc
+    try:
+        v = d["_meta"]["blbridge"]["toolCount"]
+    except Exception:                                     # noqa: BLE001
+        return None, "manifest 里没有 _meta.blbridge.toolCount（键路径变了？）"
+    return v, None
+
+
+def check_manifest_toolcount(n_declared, path=None):
+    """C5：manifest 的 toolCount 必须等于真实声明数。"""
+    problems = []
+    val, why = read_manifest_toolcount(path)
+    if why:
+        problems.append("ENV: C5 读不到 manifest 的 toolCount（%s）—— 抽取失败不算通过" % why)
+        return problems
+    if not isinstance(val, int):
+        problems.append("C5 toolCount 不是整数：%r" % (val,))
+        return problems
+    if val != n_declared:
+        problems.append(
+            "C5 manifest 的 toolCount=%d 与 TOOLS 声明数=%d 不符"
+            "（对外声明与实现不一致；build.ps1 只同步 version、不同步这项）"
+            % (val, n_declared))
+    return problems
+
+
+def c5_selftest(declared):
+    """C5 的对照组：注入「toolCount 写错」必须被抓到。"""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="bl_c5_")
+    try:
+        cases = [
+            ("正确值 %d" % len(declared), len(declared), False),
+            ("写错 +1", len(declared) + 1, True),
+            ("写错 -1", len(declared) - 1, True),
+            ("写成字符串", str(len(declared)), True),
+        ]
+        for label, val, should_fail in cases:
+            p = os.path.join(d, "m.json")
+            obj = {"_meta": {"blbridge": {"toolCount": val}}}
+            with io.open(p, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(json.dumps(obj))
+            probs = check_manifest_toolcount(len(declared), path=p)
+            got = bool(probs)
+            ok = (got == should_fail)
+            print("   [%s] C5 对照组 %-14s => %s"
+                  % ("OK" if ok else "FAIL", label,
+                     ("报: " + probs[0][:70]) if probs else "0 报错"))
+            if not ok:
+                return False
+        # 缺键也要被抓到
+        p = os.path.join(d, "bad.json")
+        with io.open(p, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps({"_meta": {}}))
+        probs = check_manifest_toolcount(len(declared), path=p)
+        ok = bool(probs)
+        print("   [%s] C5 对照组 %-14s => %s"
+              % ("OK" if ok else "FAIL", "缺键", "报: " + probs[0][:70] if probs else "0 报错"))
+        return ok
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # ── C4：宿主侧工具模块必须有 CLI 入口（2026-10-06 新增）──────────────────
@@ -325,6 +422,12 @@ def selftest():
     # ⇒ 直接跑静默 exit=0；而自测「直接 import 调函数」⇒ **绕过 CLI** ⇒ 抓不到。
     # 所以这条闸门是**静态**的（扫源码文本），并自带注入对照证明判据不是恒真。
     ok = c4_selftest() and ok
+
+    # ── C5 对照组（manifest.toolCount）：2026-10-07 新增 ──
+    # 缺陷现场：加第 58 个工具（bl_lexicon）时 manifest 的 toolCount 仍停在 57，
+    # 而 C1/C2/C3 只比 bl_mcp.py 内部三个源、**都不看 manifest** ⇒ 无闸门可发现。
+    print("-- C5 对照组（manifest toolCount） --")
+    ok = c5_selftest(declared_names(src)) and ok
 
     print("结果: %s" % ("全部通过" if ok else "有故障没被抓到"))
     return 0 if ok else 1
