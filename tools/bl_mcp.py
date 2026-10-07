@@ -399,6 +399,100 @@ def _iso_utc(epoch_seconds):
         return None
 
 
+def _dll_has_utf16(path, needle):
+    """DLL 里是否含该字符串（按 **UTF-16LE** 找）。
+
+    ## ⚠️ 为什么必须按 UTF-16 找（血泪教训，2026-10-07）
+
+    .NET 的字符串字面量在程序集里以 **UTF-16LE** 存储（ECMA-335 的 `#US` 流）。
+    用 ASCII / UTF-8 搜**必然搜不到** —— 于是会得出**假阴性**：
+    "这个符号不在 DLL 里 ⇒ 部署落后了"。
+
+    真事：隔壁会话据此报"部署落后于源码（DLL 不含 `get_hero`）"，
+    而我**自己也用带中文的 `.ps1` 复现了同一个假阴性**
+    （PS 5.1 按 cp936 解码 UTF-8 无 BOM 脚本 ⇒ 比对错位）。
+    Python 字节级按 UTF-16LE 搜 ⇒ 一次性证明符号**都在**。
+    ⇒ 所以这条判据写进工具，**不靠人去搜字符串**。
+    """
+    try:
+        with io.open(path, "rb") as fh:
+            blob = fh.read()
+        return blob.find(needle.encode("utf-16-le")) >= 0
+    except (IOError, OSError, UnicodeEncodeError):
+        return False
+
+
+def dll_source_symbol_check(src_dir=None, dll_path=None):
+    """**内容级**核验：源码里新加的「可判定符号」是否真的进了 DLL。
+
+    ## 为什么单靠 SHA256 不够（这条判据补的就是那个洞）
+
+    `build_check` 的四段链条用的是**哈希**：源码哈希 vs 清单哈希 vs 磁盘哈希。
+    它能抓"改了没构建"，但**抓不到一类更阴的情况**：
+    清单/哈希都对上了，而 DLL 内容**缺**某个新符号
+    （例如构建缓存、把旧 DLL 复制过去、或清单与产物不同步）。
+
+    ⇒ 这里做**内容级**独立核验：从源码里**自动提取**本工程自己的
+      `"字面量"` 里的**可判定符号**（形如 `x_y_z` 的小写下划线串，
+      例如 `clan_bandit_no_heroes` / `scan_bad_data`），
+      再去 DLL 的 UTF-16 流里找。**缺一个就点名**。
+
+    ⚠️ 边界（如实）：
+      · 只查**本工程源码里的字符串字面量**，不解析 IL —— 它证明的是
+        "这些字面量进了 DLL"，**不是**"逻辑正确"；
+      · 编译器可能**合并/驻留**字符串，所以"找不到"是**强信号**（几乎肯定是没编进去），
+        但"找得到"不能证明版本一致 ⇒ 与哈希链条**互补**，不替代它。
+    """
+    out = {"checked": 0, "found": 0, "missing": [], "dll": dll_path, "note": ""}
+    if not dll_path:
+        dll_path = deployed_dll_path()
+        out["dll"] = dll_path
+    if not os.path.isfile(dll_path):
+        out["note"] = "DLL 不存在，跳过内容核验"
+        return out
+    src = src_dir or source_dir()
+    if not os.path.isdir(src):
+        out["note"] = "没有 src/（部署副本），跳过内容核验"
+        return out
+
+    # 从源码提取"可判定符号"：小写+下划线、含至少两个下划线、长度>=8。
+    # 这个形状是**本工程自己的约定**（坏数据 code、method 名等），
+    # 误抓风险低（普通中文注释/路径不会是这个形状）。
+    sym_re = re.compile(r'"([a-z][a-z0-9]*(?:_[a-z0-9]+){2,})"')
+    seen = []
+    try:
+        for name in sorted(os.listdir(src)):
+            if not name.endswith(".cs"):
+                continue
+            try:
+                text = io.open(os.path.join(src, name), encoding="utf-8",
+                               errors="replace").read()
+            except (IOError, OSError):
+                continue
+            for m in sym_re.finditer(text):
+                s = m.group(1)
+                if s not in seen:
+                    seen.append(s)
+    except (IOError, OSError) as exc:
+        out["note"] = "读源码失败：%r" % exc
+        return out
+
+    missing = []
+    for s in seen:
+        if not _dll_has_utf16(dll_path, s):
+            missing.append(s)
+    out["checked"] = len(seen)
+    out["found"] = len(seen) - len(missing)
+    out["missing"] = missing[:20]
+    out["totalMissing"] = len(missing)
+    if missing:
+        out["note"] = ("⚠️ 有 %d 个源码里的符号**不在 DLL 里** ⇒ 部署很可能落后于源码"
+                       "（内容级判据；与哈希链条互补）" % len(missing))
+    else:
+        out["note"] = "源码里的 %d 个可判定符号都在 DLL 的 UTF-16 流里（内容级一致）" % len(seen)
+    return out
+
+
 def build_check(src_dir=None, mod_dir=None):
     """构建一致性判定：把「源码 → 构建产物 → 部署文件 → 进程内 DLL」四段串起来核验。
 
@@ -474,6 +568,13 @@ def build_check(src_dir=None, mod_dir=None):
             if (want.get(name) or "").lower() != _sha256_file(os.path.join(src, name)).lower():
                 changed.append(name)
         missing = [n for n in want if n not in have]
+
+        # ★ 内容级核验（2026-10-07，用户要求补上）：哈希链条**抓不到**"DLL 内容缺新符号"。
+        #   实测背景：隔壁会话用 ASCII 搜 DLL 报"部署落后（缺 get_hero）"——
+        #   那是**假阴性**（.NET 字符串是 UTF-16）；但"哈希都对、内容却缺符号"这个洞是真的。
+        #   ⇒ 无论哈希结果如何，都独立做一次**内容级**核验并把结果放进返回里。
+        out["symbolCheck"] = dll_source_symbol_check(src_dir=src, dll_path=dll)
+
         if changed or missing:
             out["code"] = "stale_source"
             # ── B6 修复（2026-10-07，隔壁项目测试表发现）──────────────────────

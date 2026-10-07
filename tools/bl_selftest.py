@@ -1576,6 +1576,47 @@ def main():
     except Exception as exc:  # noqa: BLE001
         check(False, "config 读写检查", repr(exc))
 
+    # ── 源码 ↔ 已部署 DLL 的**内容级**核验（2026-10-07 用户要求补）──────────
+    #
+    # 为什么要它：`build_check` 的四段链条用**哈希**，抓不到"DLL 内容缺新符号"
+    #   （构建缓存、把旧 DLL 复制过去、清单与产物不同步都会造成）。
+    #   实测背景：隔壁会话用 **ASCII** 搜 DLL 报"部署落后（缺 get_hero）" —— 那是**假阴性**
+    #   （.NET 字符串是 **UTF-16LE**）。⇒ 把正确的查法写进工具，不靠人去搜。
+    print()
+    print("=" * 90)
+    print("③b 源码 ↔ 已部署 DLL 内容核验（UTF-16 字节级；含反向对照）")
+    print("=" * 90)
+    try:
+        import bl_mcp
+        dll = bl_mcp.deployed_dll_path()
+        print("  dll = %s" % dll)
+        if not os.path.isfile(dll):
+            check(True, "③b 跳过（本机没有部署副本）", "deployed dll 不存在")
+        else:
+            r = bl_mcp.dll_source_symbol_check()
+            print("  源码可判定符号 %s 个，DLL 里找到 %s 个，缺 %s 个"
+                  % (r.get("checked"), r.get("found"), r.get("totalMissing")))
+            check(r.get("checked") > 0,
+                  "③b 确实提取到了符号（不是空跑）", r.get("checked"))
+            check((r.get("totalMissing") or 0) == 0,
+                  "③b 源码符号都在已部署 DLL 里（内容级一致）", r.get("missing"))
+            # ★ 反向对照：这个检查必须**有分辨力**，否则"恒通过"毫无意义
+            check(bl_mcp._dll_has_utf16(dll, "scan_bad_data") is True,
+                  "③b 对照: 真符号（scan_bad_data）判 True", "应为 True")
+            check(bl_mcp._dll_has_utf16(dll, "zzz_not_a_real_symbol_xyz") is False,
+                  "③b 对照: 假符号判 False ⇒ 检查有分辨力（非恒过）", "应为 False")
+            # ★ 反向对照 2：UTF-16 与 ASCII 的差别必须被体现
+            #   （这正是隔壁会话假阴性的根因 —— ASCII 搜不到 UTF-16 字符串）
+            with io.open(dll, "rb") as fh:
+                blob = fh.read()
+            check(blob.find(b"scan_bad_data") < 0,
+                  "③b 对照: 同一符号用 **ASCII** 搜确实找不到 ⇒ 证实 UTF-16 是必须的",
+                  "ASCII 竟找到了（那 UTF-16 的说明要复核）")
+            check(r.get("symbolCheckSkipped") is None and "note" in r,
+                  "③b 返回里带可读说明（便于人复核）", r.get("note"))
+    except Exception as exc:  # noqa: BLE001
+        check(False, "源码↔DLL 内容核验", repr(exc))
+
     print()
     print("=" * 90)
     print("④ 控制通道（文件 IPC + 会话身份校验 + 协议不变式）")
