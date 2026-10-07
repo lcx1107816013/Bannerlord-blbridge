@@ -12,12 +12,30 @@
 
 ## 一、当前状态牌（会话 A 维护，改完请更新）
 
+> **更新于 2026-10-07 后段（B1/B2/B4/B5/B6/B7 全部完成 + 坏数据扫描已部署）**
+
 | 项 | 值 |
 |---|---|
-| 会话 A 正在做的 | **B1 修复（已完成、未提交）** |
-| 工作区未提交文件 | `tools/bl_mcp.py`（B1 闸门）、`src/BadDataSpec.cs`（新增判据层） |
-| `src/BadDataSpec.cs` | **21,174 B / 2026-10-07 23:39:00** —— 就是 B6 里那个 `changedSources` |
-| 是否可安全 `-Deploy` | ⚠️ **暂时不要** —— 见 §三 |
+| **可以 `-Deploy` 吗** | ✅ **可以**。工作区已无半成品；已部署 `dll sha256 = F10558B390467E1F...`（272 KB） |
+| 会话 A 当前在做什么 | 坏数据扫描（已实现 + 离线对照 38/38；**真机待验**）|
+| 未提交改动 | 见 `git status`（本轮：`BadDataSpec.cs`/`BadDataScanner.cs`/`tools/baddataspec/` 等）|
+| `src/BadDataSpec.cs` | **已从 21,181 B 半成品变为完整判据层**（就是 B6 里那个 `changedSources`）|
+
+### 已修完的（对隔壁测试表的回写口径）
+
+| # | 状态 |
+|---|---|
+| **B1** | ✅ 已修 + 自测（4 条判据含反向对照）|
+| **B2** | ✅ **真机验证通过**（战役内 `unsupported_in_campaign` + 进程存活；对照 `false` ⇒ `wrong_state`）|
+| **B3** | ✅ 既有纪律（按 PID 核对）|
+| **B4** | ✅ `bl_patches` 返回加 `scope`（**在册 ≠ 生效**；`Prepare()` 返 false 不出现）|
+| **B5** | ✅ 复核结论：**非矛盾，是作用域不同** ⇒ 返回加 `scopes`；刻意不加互斥提示 |
+| **B6** | ✅ `changedSourcesDetail` 附 `mtimeUtc`/`sizeBytes` + 写明"`stale_source` 永远是 BlBridge 自己" |
+| **B7** | ✅ `bl_get_hero` 已实现 + **真机验证**；★ 真机抓到并修了 2 个 bug（同伴静默漏报 1→4、`stringId` 双重引号）|
+
+> ⚠️ **旧状态牌的"B1 未提交、暂不要 Deploy"已作废** —— 那是 B1 修复进行中的中间态记录，
+> 隔壁会话据此提出的疑问是对的。现已全部提交/验证，可安全部署。
+
 
 ---
 

@@ -1395,6 +1395,34 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_scan_bad_data",
+        "description": ("**坏数据扫描（只读，需战役上下文）**：找存档里的坏数据 —— "
+                        "死部队 / 空家族 / 无效物品 / 卡死任务 / 损坏军团。"
+                        "★ **本工具只扫描、不改任何数据**；清理必须另行实现且先备份"
+                        "（写新档、不覆盖原档）。"
+                        "返回按 `kind`（party/clan/kingdom/army/quest/item）分组的 findings，"
+                        "每条带 `severity` / `code` / `subject` / `detail` / **`evidence`**（判据用到的事实，便于人工复核）。"
+                        "⚠️ **严重度两档，意义完全不同**："
+                        "`broken` = **结构上不可能正常**（如活跃部队却没有 PartyComponent、"
+                        "任务已结束却仍登记在 QuestManager 里）；"
+                        "`suspect` = **可疑**，可能只是游戏正常的过渡状态"
+                        "（如刚被灭的家族、换帅瞬间的部队）⇒ **不可作为自动清理依据**。"
+                        "⚠️ **`skipped` 字段必须看**：若某类扫描不了（成员缺失），它会显式列出 —— "
+                        "否则「某类 0 条」会被误读成「这一类很干净」。"
+                        "⚠️ 实测（1.4.8）：军团在 `Kingdom.Armies` 上，"
+                        "**`Campaign.Armies` 不存在**（任务同理走 `Campaign.QuestManager.Quests`）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "only": {"type": "string",
+                         "description": "只扫某几类（逗号分隔）：party,clan,kingdom,army,quest,item。不传=全扫"},
+                "limit": {"type": "integer",
+                          "description": "报告最多返回几条 finding（0=不限；仅截断报告，不影响扫描量）"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "bl_campaign_time",
         "description": ("只读：战役时间/暂停状态诊断。"
                         "status（默认，也是唯一可用的 mode）回读 "
@@ -2104,7 +2132,7 @@ TOOL_GROUPS = {
         "bl_list_saves", "bl_load_save", "bl_campaign_time",
         "bl_campaign_overview", "bl_list_kingdoms", "bl_list_clans",
         "bl_list_settlements", "bl_list_parties", "bl_campaign_log",
-        "bl_get_hero",
+        "bl_get_hero", "bl_scan_bad_data",
     ],
     "config": [
         "bl_read_config", "bl_apply_config", "bl_rts_config", "bl_apply_rts_config",
@@ -3631,6 +3659,30 @@ def call_tool(name, args):
             return {"ok": False, "error": e.get("message") or "campaign_overview 失败",
                     "code": e.get("code"), "response": resp}
         return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_scan_bad_data":
+        # 坏数据扫描（只读）。**只报不改** —— 清理另行实现且先备份。
+        params = {}
+        if args.get("only"):
+            params["only"] = str(args["only"])
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("scan_bad_data", params, timeout=60)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "scan_bad_data 失败",
+                    "code": e.get("code"), "response": resp}
+        result = resp.get("result")
+        # 把口径再钉一遍（调用方常只看 result，不看 tool description）
+        return {"ok": True, "result": result,
+                "scope": ("**只读扫描，不改任何数据。** severity=broken 是**明确错**"
+                          "（结构上不可能正常）；severity=suspect 是**可疑**，"
+                          "可能只是游戏正常的过渡状态 ⇒ **不可作为自动清理依据**。"
+                          "⚠️ `skipped` 非空表示**某类没扫成** —— 别把「0 条」读成「很干净」。"
+                          "清理必须另行实现，且**先备份 + 写新档不覆盖原档**。"),
+                "response": resp}
 
     if name == "bl_get_hero":
         # B7（2026-10-07，隔壁项目需求）：读英雄运行时血量（只读，需战役上下文）。

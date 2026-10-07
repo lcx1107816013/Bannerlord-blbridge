@@ -247,6 +247,12 @@
       "needs": "campaign",
       "note": "控制面 A 阶段 · 只读：战役日志快照（最近 N 条 LogEntry，默认 20 / 上限 200）"
     },
+    "scan_bad_data": {
+      "gabp": "campaign/scan_bad_data",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "坏数据**只读**扫描：死部队（无 PartyComponent / 已失活仍在集合里 / 孤儿家族）、空家族（未消灭但无 Hero）、无效物品实例、卡死/残留任务（!IsOngoing 却仍在 QuestManager.Quests 里）、损坏军团（无成员 / 无领袖 / 领袖不在自己的 Parties 里）。⚠️ 容器真名实测（1.4.8）：军团在 **Kingdom.Armies**，**Campaign.Armies 不存在**；任务在 **Campaign.QuestManager.Quests**，**Campaign.Quests 不存在**（猜错会得到『什么都扫不到却报没问题』的扫描器）。⚠️ 只读：不改任何数据。"
+    },
     "get_hero": {
       "gabp": "campaign/get_hero",
       "kind": "read",
@@ -481,6 +487,10 @@
     "bl_get_hero": {
       "gabp": "campaign/get_hero",
       "note": "只读运行时英雄血量（需战役上下文）：hitPoints/maxHitPoints/overflow/isOverflow/isWounded/isDead/isAlive/clan/party。补真实缺口 —— C6-④「溢出修复」的验收判据就是比较当前与最大血量，而此前无工具可读（get_entity 读静态索引库非运行时、bl_list_parties 无 hp）。overflow = hitPoints - maxHitPoints（>0 即要夹回的量）。hpReadable=false 时 hp/max 的 0 不是真值。**不提供 woundedLimit** —— 该成员在 1.4.8 上实测不存在，宁缺勿造。血量仅战役有意义（战斗里是 Agent.Health）。"
+    },
+    "bl_scan_bad_data": {
+      "gabp": "campaign/scan_bad_data",
+      "note": "坏数据扫描（**只读**，需战役上下文）：死部队/空家族/无效物品/卡死任务/损坏军团。**只报不改** —— 清理必须另行实现且先备份（写新档、不覆盖原档）。返回按 kind 分组，每条带 severity/code/subject/detail/**evidence**（判据事实，便于人工复核）。⚠️ severity 两档意义不同：broken=结构上不可能正常（活跃部队无 PartyComponent、已结束任务仍登记在 QuestManager）；suspect=可疑，可能只是正常过渡态（刚被灭的家族），**不可作为自动清理依据**。⚠️ **skipped 非空表示某类没扫成** —— 别把『0 条』读成『很干净』。"
     }
   }
 }

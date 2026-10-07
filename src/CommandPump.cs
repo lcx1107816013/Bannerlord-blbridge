@@ -524,6 +524,12 @@ namespace BlBridge
             {
                 return CampaignReadProbe.HandleGetHero(id, raw);
             }
+            // 坏数据扫描（只读）：死部队/空家族/无效物品/卡死任务/损坏军团。
+            // ⚠️ 只读 —— 不改任何数据；清理必须另行实现且先备份（见 docs/bad-data-scan.md）。
+            if (method == "scan_bad_data")
+            {
+                return BadDataScanner.HandleScan(id, raw);
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 
