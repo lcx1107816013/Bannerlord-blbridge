@@ -407,5 +407,215 @@ namespace BlBridge
                     ex.GetType().Name + ": " + ex.Message, false);
             }
         }
+
+        // ── B7（2026-10-07，隔壁项目需求）：读英雄**当前血量** ─────────────────
+        //
+        // ## 为什么需要它
+        //
+        // 三合一 MOD 的 C6-④「溢出修复」把"当前血量 > 最大血量"的英雄夹回上限；
+        // **它的验收判据天然就是"读当前血量与上限并比较"** —— 而此前**没有任何工具能读**：
+        //   · `get_entity kind=hero` 读的是**静态索引库**（预计算投影），非运行时状态；
+        //   · `bl_list_parties` 只有 morale/gold/size/位置，无 hp；
+        //   · `bl_campaign_overview` 只有 gold/influence/counts；
+        //   · RBM 的 `Debug.Print` **不落** default*.log。
+        // ⇒ 一个改存档数据的修复项**无法做行为验证**。本 handler 补的就是这个缺口。
+        //
+        // ## API 依据（反射实测 2026-10-07，本机 1.4.8；**不是猜的**）
+        //
+        //   `Hero.HitPoints` / `MaxHitPoints` : ✅ Int32
+        //   `Hero.IsWounded` / `IsDead` / `IsAlive` / `IsFugitive` : ✅ Boolean
+        //   `Hero.Name`(TextObject) / `StringId` / `PartyBelongedTo` / `Clan` / `Occupation` : ✅
+        //   `Hero.WoundedLimit` : ❌ **不存在**（隔壁建议里提到的字段名不对）
+        //
+        // ⚠️ 所以**不输出 `woundedLimit`** —— 宁可少一个字段，也不凭空造一个
+        //    （造了调用方会以为读到了真实阈值）。重伤状态用实测存在的 `isWounded`/`isAlive` 表达。
+        //
+        // ## 口径（读结论前必看）
+        //
+        // · **只读**：不写、不改、不治疗。
+        // · `overflow = hitPoints - maxHitPoints`（>0 即溢出）—— 正是 C6-④ 要夹回的量。
+        // · **`hpReadable=false` 时 hp/max 的 0 不是真值**，别据此下结论（防"读不到 → 报没溢出"）。
+        // · 血量只在**战役**里有意义（战斗里是 `Agent.Health`，另一套）⇒ 无战役上下文报 `no_campaign`。
+        // · 不给 id 时默认列**玩家队伍的**英雄（主角 + 同伴）—— 覆盖最常见的问法。
+        internal static string HandleGetHero(string id, string raw)
+        {
+            string g = Guard(id, out _);
+            if (g != null) return g;
+            try
+            {
+                string want = Jmini.Str(raw, "heroId", null);
+                if (string.IsNullOrEmpty(want)) want = Jmini.Str(raw, "name", null);
+                int limit = Jmini.Int(raw, "limit", 0);
+                bool all = Jmini.Str(raw, "all", "false") == "true";
+
+                List<object> heroes = new List<object>();
+                if (!string.IsNullOrEmpty(want))
+                {
+                    object hit = FindHeroByStringId(want);
+                    if (hit == null) hit = FindHeroByName(want);
+                    if (hit == null)
+                    {
+                        return Protocol.Failure(id, "hero_not_found",
+                            "找不到英雄：" + want + "（按 StringId 精确匹配，或名字包含匹配）。"
+                            + "注意这与 get_entity 的**静态索引库**不同 —— 那个读预计算表，本工具读运行时状态。",
+                            false);
+                    }
+                    heroes.Add(hit);
+                }
+                else if (all)
+                {
+                    heroes.AddRange(AllHeroes());
+                }
+                else
+                {
+                    object main = Hero.MainHero;
+                    if (main != null) heroes.Add(main);
+                    foreach (object ch in MainPartyCompanions())
+                    {
+                        if (!ReferenceEquals(ch, main)) heroes.Add(ch);
+                    }
+                }
+
+                List<string> rows = new List<string>();
+                int i = 0;
+                int overflow = 0;
+                foreach (object h in heroes)
+                {
+                    if (limit > 0 && i >= limit) break;
+                    i++;
+                    object hpO = P(h, "HitPoints");
+                    object maxO = P(h, "MaxHitPoints");
+                    int hp = (int)Num(hpO);
+                    int max = (int)Num(maxO);
+                    // ★ 只在两个值**都读到了**时才判溢出：
+                    //   读不到时 hp/max 都是 0，照判会得出"没溢出"的**假结论**。
+                    bool hasHp = hpO != null && maxO != null;
+                    bool isOverflow = hasHp && max > 0 && hp > max;
+                    if (isOverflow) overflow++;
+                    object clan = P(h, "Clan");
+                    object party = P(h, "PartyBelongedTo");
+                    object nameO = P(h, "Name");
+                    StringBuilder one = new StringBuilder();
+                    one.Append('{');
+                    one.Append("\"stringId\":").Append(Protocol.Q(JVal(P(h, "StringId"))));
+                    one.Append(",\"name\":").Append(Protocol.Q(nameO == null ? "" : nameO.ToString()));
+                    one.Append(",\"hitPoints\":").Append(hpO == null ? "null" : hp.ToString());
+                    one.Append(",\"maxHitPoints\":").Append(maxO == null ? "null" : max.ToString());
+                    one.Append(",\"hpReadable\":").Append(hasHp ? "true" : "false");
+                    // 溢出量由工具算好（也避免调用方把符号方向算反）
+                    one.Append(",\"overflow\":").Append(hasHp && max > 0
+                        ? (hp > max ? (hp - max).ToString() : "0") : "null");
+                    one.Append(",\"isOverflow\":").Append(isOverflow ? "true" : "false");
+                    one.Append(",\"isWounded\":").Append(JVal(P(h, "IsWounded")));
+                    one.Append(",\"isDead\":").Append(JVal(P(h, "IsDead")));
+                    one.Append(",\"isAlive\":").Append(JVal(P(h, "IsAlive")));
+                    one.Append(",\"isFugitive\":").Append(JVal(P(h, "IsFugitive")));
+                    one.Append(",\"occupation\":").Append(JVal(P(h, "Occupation")));
+                    one.Append(",\"clan\":").Append(Protocol.Q(clan == null ? "" : JVal(P(clan, "Name"))));
+                    one.Append(",\"party\":").Append(Protocol.Q(party == null ? "" : JVal(P(party, "Name"))));
+                    one.Append('}');
+                    rows.Add(one.ToString());
+                }
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"ok\":true");
+                sb.Append(",\"count\":").Append(rows.Count);
+                sb.Append(",\"overflowCount\":").Append(overflow);
+                sb.Append(",\"heroes\":[").Append(string.Join(",", rows.ToArray())).Append(']');
+                sb.Append(",\"note\":").Append(Protocol.Q(
+                    "只读运行时血量。overflow = hitPoints - maxHitPoints（>0 即溢出，正是 C6-④ 要夹回的量）；"
+                    + "isOverflow 是同一判断的布尔形式。hpReadable=false 表示该字段没读到"
+                    + "（**此时 hp/max 的 0 不是真值**，别据此下结论）。"
+                    + "⚠️ 本工具**不提供 woundedLimit** —— `Hero.WoundedLimit` 在 1.4.8 上"
+                    + "**实测不存在**，宁缺勿造；重伤状态请看 isWounded/isAlive。"));
+                sb.Append('}');
+                return Protocol.Success(id, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                return Protocol.Failure(id, "get_hero_failed",
+                    ex.GetType().Name + ": " + ex.Message, false);
+            }
+        }
+
+        /// <summary>玩家队伍的同伴 Hero（只读遍历 MemberRoster）。取不到就返回空表，不抛。</summary>
+        private static List<object> MainPartyCompanions()
+        {
+            List<object> outList = new List<object>();
+            try
+            {
+                object main = Hero.MainHero;
+                object pb = P(main, "PartyBelongedTo");
+                object members = P(pb, "MemberRoster");
+                if (members == null) return outList;
+                object data = P(members, "data");
+                IEnumerable den = data as IEnumerable;
+                if (den == null) return outList;
+                foreach (object el in den)
+                {
+                    object ch = P(el, "Character");
+                    object hero = P(ch, "HeroObject");
+                    if (hero != null) outList.Add(hero);
+                }
+            }
+            catch
+            {
+            }
+            return outList;
+        }
+
+        /// <summary>按 StringId 精确找英雄（只读）。</summary>
+        private static object FindHeroByStringId(string sid)
+        {
+            foreach (object h in AllHeroes())
+            {
+                object idv = P(h, "StringId");
+                if (idv != null && string.Equals(idv.ToString(), sid, StringComparison.Ordinal))
+                {
+                    return h;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>按名字**包含**找英雄（大小写不敏感；命中多个时返回第一个）。</summary>
+        private static object FindHeroByName(string nameFragment)
+        {
+            foreach (object h in AllHeroes())
+            {
+                object n = P(h, "Name");
+                if (n != null
+                    && n.ToString().IndexOf(nameFragment, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return h;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>全部英雄（`AllAliveHeroes` 只含活着，故把 `DeadOrDisabledHeroes` 也并进来）。</summary>
+        private static List<object> AllHeroes()
+        {
+            List<object> outList = new List<object>();
+            foreach (string prop in new string[] { "AllAliveHeroes", "DeadOrDisabledHeroes" })
+            {
+                try
+                {
+                    PropertyInfo pi = typeof(Hero).GetProperty(prop,
+                        BindingFlags.Public | BindingFlags.Static);
+                    if (pi == null) continue;
+                    IEnumerable en = pi.GetValue(null, null) as IEnumerable;
+                    if (en == null) continue;
+                    foreach (object h in en)
+                    {
+                        if (h != null) outList.Add(h);
+                    }
+                }
+                catch
+                {
+                }
+            }
+            return outList;
+        }
     }
 }

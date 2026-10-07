@@ -1318,6 +1318,39 @@ TOOLS = [
             "required": ["name"], "additionalProperties": False},
     },
     {
+        "name": "bl_get_hero",
+        "description": ("**读取英雄的运行时血量与状态（只读，需战役上下文）**："
+                        "返回 `hitPoints` / `maxHitPoints` / `overflow` / `isOverflow` / "
+                        "`isWounded` / `isDead` / `isAlive` / `clan` / `party` 等。"
+                        "★ 它补的是一个**真实缺口**：三合一 MOD 的 C6-④「溢出修复」把"
+                        "『当前血量 > 最大血量』的英雄夹回上限，**其验收判据就是比较这两个值**，"
+                        "而此前**没有任何工具能读运行时血量** —— "
+                        "`get_entity` 读的是**静态索引库**（预计算表，非运行时），"
+                        "`bl_list_parties` 无 hp 字段，RBM 的 Debug.Print 也不落盘。"
+                        "用法：不传参 ⇒ 列**玩家队伍**的英雄（主角+同伴）；"
+                        "`heroId`（StringId 精确）或 `name`（名字包含）指名查；`all=true` 列全战役英雄。"
+                        "⚠️ **`overflow = hitPoints - maxHitPoints`**（>0 即溢出，正是要夹回的量）；"
+                        "⚠️ `hpReadable=false` 表示该字段**没读到** —— 此时 `hp/max` 的 0 **不是真值**，"
+                        "别据此得出「没溢出」；"
+                        "⚠️ **不提供 `woundedLimit`** —— `Hero.WoundedLimit` 在 1.4.8 上**实测不存在**，"
+                        "宁缺勿造（重伤状态请看 `isWounded`/`isAlive`）。"
+                        "⚠️ 血量只在**战役**里有意义（战斗里是 `Agent.Health`，另一套）⇒ "
+                        "主菜单/自定义战斗下报 `no_campaign`。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "heroId": {"type": "string",
+                           "description": "英雄 StringId（**精确**匹配）"},
+                "name": {"type": "string",
+                         "description": "英雄名字（**包含**匹配，大小写不敏感）"},
+                "all": {"type": "boolean",
+                        "description": "true = 列全战役英雄（默认只列玩家队伍）"},
+                "limit": {"type": "integer", "description": "最多几个，默认不限"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "bl_campaign_time",
         "description": ("只读：战役时间/暂停状态诊断。"
                         "status（默认，也是唯一可用的 mode）回读 "
@@ -2027,6 +2060,7 @@ TOOL_GROUPS = {
         "bl_list_saves", "bl_load_save", "bl_campaign_time",
         "bl_campaign_overview", "bl_list_kingdoms", "bl_list_clans",
         "bl_list_settlements", "bl_list_parties", "bl_campaign_log",
+        "bl_get_hero",
     ],
     "config": [
         "bl_read_config", "bl_apply_config", "bl_rts_config", "bl_apply_rts_config",
@@ -3507,6 +3541,26 @@ def call_tool(name, args):
         if not resp.get("ok"):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "campaign_overview 失败",
+                    "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_get_hero":
+        # B7（2026-10-07，隔壁项目需求）：读英雄运行时血量（只读，需战役上下文）。
+        params = {}
+        if args.get("heroId"):
+            params["heroId"] = str(args["heroId"])
+        if args.get("name"):
+            params["name"] = str(args["name"])
+        if args.get("all"):
+            params["all"] = "true"
+        if args.get("limit"):
+            params["limit"] = int(args["limit"])
+        resp, err = send_command("get_hero", params, timeout=15)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "get_hero 失败",
                     "code": e.get("code"), "response": resp}
         return {"ok": True, "result": resp.get("result"), "response": resp}
 

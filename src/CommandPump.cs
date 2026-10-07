@@ -517,6 +517,13 @@ namespace BlBridge
             {
                 return CampaignReadProbe.HandleCampaignLog(id, raw);
             }
+            // B7（2026-10-07，隔壁项目需求）：读英雄**当前血量**（只读）。
+            // 用途：三合一 C6-④「溢出修复」的验收判据 = 比较 hitPoints vs maxHitPoints，
+            // 而此前没有任何工具能读运行时血量（静态索引库读不到、日志也不落）。
+            if (method == "get_hero")
+            {
+                return CampaignReadProbe.HandleGetHero(id, raw);
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 

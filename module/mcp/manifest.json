@@ -51,7 +51,7 @@
     "blbridge": {
       "controlChannel": "file-ipc",
       "uiEntryId": "CustomBattle",
-      "toolCount": 62,
+      "toolCount": 63,
       "note": "本目录是 **BlBridge mod 包内部的 MCP 子包**，不是外置服务 —— 装了 BlBridge 就同时拥有它，AI 读完本清单即可把控制通道接成 MCP 工具。详见同目录 `mcp/README.md` 与 `mcp/AI-TUTORIAL.md`（后者是完整教程：装 MCP → 加载进游戏 → 用能力干活，外加 JSONL 事件格式与常见报错归因）。★ 重要：`mcp/*.py` 是**构建产物**，唯一真相源是开发仓库的 `tools/*.py`；**手改本目录会在下次 `build.ps1 -Deploy` 时被整份覆盖**。"
     }
   }

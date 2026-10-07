@@ -246,6 +246,12 @@
       "kind": "read",
       "needs": "campaign",
       "note": "控制面 A 阶段 · 只读：战役日志快照（最近 N 条 LogEntry，默认 20 / 上限 200）"
+    },
+    "get_hero": {
+      "gabp": "campaign/get_hero",
+      "kind": "read",
+      "needs": "campaign",
+      "note": "B7（隔壁项目需求）· 只读**运行时**英雄血量：hitPoints/maxHitPoints/overflow/isOverflow/isWounded/isDead/isAlive/clan/party。补真实缺口：C6-④「溢出修复」的验收判据就是比较当前与最大血量，而此前 get_entity 读的是静态索引库（预计算表、非运行时）、bl_list_parties 无 hp 字段、RBM 的 Debug.Print 也不落盘。overflow = hitPoints - maxHitPoints（>0 即要夹回的量）。hpReadable=false 时 hp/max 的 0 不是真值。**不提供 woundedLimit** —— Hero.WoundedLimit 在 1.4.8 实测不存在。"
     }
   },
   "tools": {
@@ -471,6 +477,10 @@
     "bl_source_map": {
       "gabp": "telemetry/locate_source",
       "note": "宿主侧只读：把崩溃栈帧映射到**源码 文件:行号**并附真实源码片段，让 agent 能直接读上下文、动手改（补 AbBridge 的缺口：栈原本只有方法名）。两条路径：A 栈里自带行号（需该 DLL 用 /debug:full 编译，.NET Framework 不认 portable）；B 本地符号索引（PDB→方法→文件:行号）。★ 解析**与语言无关**（中文 Windows 是\"位置 X.cs:行号 24\"，英文是\"in X.cs:line 24\"）——只认英文关键词的判据会在中文系统上把\"有行号\"判成\"没有\"（实测踩过）。★ 第三方帧**如实说\"无法定位\"**，绝不编造行号。实测边界：真实 194 栈帧里仅 2 帧属我们工程（99% 是 BCL/框架帧）=> 对第三方 mod 崩溃，本工具结构上给不出行号。"
+    },
+    "bl_get_hero": {
+      "gabp": "campaign/get_hero",
+      "note": "只读运行时英雄血量（需战役上下文）：hitPoints/maxHitPoints/overflow/isOverflow/isWounded/isDead/isAlive/clan/party。补真实缺口 —— C6-④「溢出修复」的验收判据就是比较当前与最大血量，而此前无工具可读（get_entity 读静态索引库非运行时、bl_list_parties 无 hp）。overflow = hitPoints - maxHitPoints（>0 即要夹回的量）。hpReadable=false 时 hp/max 的 0 不是真值。**不提供 woundedLimit** —— 该成员在 1.4.8 上实测不存在，宁缺勿造。血量仅战役有意义（战斗里是 Agent.Health）。"
     }
   }
 }

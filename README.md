@@ -76,7 +76,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **62** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **58** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **63** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **59** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -114,7 +114,7 @@ BlBridge/
   build.ps1                       一键编译 + 部署（查游戏进程 + 备份旧 DLL + SHA256 + 写构建清单）
   blbridge.example.json           MCP 侧配置模板
   blbridge_game.example.json      游戏端配置模板
-  tools/bl_mcp.py                 MCP server（stdio，61 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
+  tools/bl_mcp.py                 MCP server（stdio，63 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
@@ -216,7 +216,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 
 ---
 
-## 六、MCP 工具（62 个）
+## 六、MCP 工具（63 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -239,6 +239,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 | `bl_get_inventory` | **只读读战役库存**（v0.8.36，L2 #2）：主队伍 `ItemRoster` + 主英雄金币。返回 `gold` / `itemCount` / `totalElements` / `items[]`（name、id、quantity、type、value、weight、tier），`limit` 默认 50。脱壳抄自上游 `inventory/get_inventory`。⚠️ 前置 = **战役内**：主菜单 / 自定义战斗如实报 `no_campaign`（needs=campaign，命名表 C6 已登记） | 是 |
 | `bl_list_saves` / `bl_load_save` | **存档列表 / 按名直载**（v0.8.36）：`MBSaveLoad.GetSaveFiles`（meta 含 `Module_*` 模组启停键值）+ `LoadSaveGameData + StartNewGame` 直载——**不经过存档选择界面**，无人值守换档的正门，也是复现读档期弹窗的测试入口。⚠️ `load_save` 前置 = 主菜单（战役中拒 `in_campaign`）；名字不存在 = `save_not_found` 并列出可用档；读档期"模组不匹配"确认框（引擎自绘，回车=『是』）会被自动应答。脱壳抄自上游 `core/list_saves` / `core/load_save` | 是 |
 | `bl_campaign_time` | **只读：战役时间/暂停诊断**（v0.8.36 起，v0.8.39 收成只读）：`mode` 只接受 `status`，回读 `timeControlMode` / `inMenuContext` / `campaignDays` / `pauseMenuOpen`。`pauseMenuOpen` = 地图上的暂停菜单（ESC 菜单）是否开着——原版失焦 + `BannerlordConfig.StopGameOnFocusLost=true` 会自动打开它，而它会 `RegisterActiveStateDisableRequest` ⇒ MapState 不再 Tick ⇒ 战役冻结（档位却仍是 StoppablePlay）。`campaignDays` = `CampaignTime.Now.ToDays`，失焦前后各读一次才证明"时间真的在走"。⚠️ **时间保活（原 mode=on/off）已在 v0.8.39 移除**（用户明确不需要改游戏的时间暂停；且它看不见上面那种暂停、副作用会顶掉手动暂停）⇒ 传 on/off 会显式报 `keep_awake_removed`。真机 A/B 见 `PROGRESS.md` §三十二 | 是 |
+| `bl_get_hero` | **只读：英雄运行时血量与状态**（v0.8.51，B7）：`hitPoints` / `maxHitPoints` / **`overflow`** / `isOverflow` / `isWounded` / `isDead` / `isAlive` / `clan` / `party`。不传参 ⇒ 列**玩家队伍**英雄（主角+同伴）；`heroId`（StringId 精确）/ `name`（包含）/ `all=true`（全战役）。★ 补一个**真实缺口**：C6-④「溢出修复」把"当前血量 > 最大血量"夹回上限，**其验收判据就是比较这两个值**，而此前无工具可读（`get_entity` 读的是**静态索引库**非运行时、`bl_list_parties` 无 hp、RBM 的 `Debug.Print` 不落盘）。**`overflow = hitPoints - maxHitPoints`**（>0 即要夹回的量）。⚠️ `hpReadable=false` 表示字段没读到 —— 此时 `hp/max` 的 0 **不是真值**，别据此判"没溢出"；⚠️ **不提供 `woundedLimit`**（`Hero.WoundedLimit` 在 1.4.8 **实测不存在**，宁缺勿造）。血量仅战役有意义（战斗里是 `Agent.Health`）| 是 |
 | `bl_battle_status` | 推演状态机 + 双方存活数 + 战果 | 是 |
 | `bl_start_battle` | 开一场 AI 对 AI 战斗（支持靶场参数：`dummySide` / `dummyArmor` / `dummyBodyItem` / `freezeDummies` / `unlimitedAmmo`；`spectate` = 兜底观战镜头（**本机装了 RTSCamera 时自动让位**，v0.8.16 起写明这条）；**`rtsPreset` = 开战前套用 RTSCamera 预设**；返回 `formationWarnings` = 开战 DSL 的 `formation` 只是**回显**，与兵种实际编队不一致时逐条点名，**不阻断开战**）；**v0.8.41**：`attackerTacticLevel`/`defenderTacticLevel`（战术档位，需配 `orders=default` 才看得出效果）、`terrain`/`randomTerrainSeed`、`aiFriendlyFireMultiplier`、`keepCorpses`、`sceneLevel`/`timeOfDay`（攻城）；返回另带 `tactics`（请求值 + 引擎原生值）、`env`、`envNotes`（被显式忽略的参数**逐条报出**） | 是 |
 | `bl_wait_for_state` | 等状态（idle/loading/running/ended/error） | 是 |
