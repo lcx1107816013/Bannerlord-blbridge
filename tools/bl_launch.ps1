@@ -230,16 +230,78 @@ if ($selected.Count -gt 0) {
     $selected = $fallbackMods
 }
 
-# Existence pre-check: a module named in the list but absent on disk is silently skipped by the
-# engine, which is exactly how a stale entry (the old 'Warbandlord') hid in plain sight.  Report it
-# loudly instead.  This is a WARNING, not a hard failure: the engine tolerates it and aborting here
-# would be a behaviour change for anyone mid-edit.
+# ---------- Existence gate: DROP stale/absent entries (do not just warn) ----------
+#
+# FIX 2026-10-08 (real defect found by the user, measured on this machine):
+#
+# The previous version only WARNED here, and its comment claimed "the engine will skip them".
+# **That assumption was wrong.**  Real sequence observed on this machine:
+#   - 01:18 / 01:20  BannerlordSage was installed and selected  -> launches fine
+#   - ~01:22         BannerlordSage was uninstalled, but LauncherData.xml still said
+#                    IsSelected=true, so it stayed in `$selected`
+#   - 01:23 onward   every launch through THIS script died **at the loading screen**,
+#                    while the user's own Steam launch (which does not pass `_MODULES_`)
+#                    still worked.
+#   => A module name in `_MODULES_` that has no SubModule.xml on disk is NOT skipped;
+#      it kills the load.  So it must be REMOVED from the list, not merely reported.
+#
+# Two more things handled here, both from the same real data:
+#   - **case**: LauncherData said `Sandbox`, disk has `SandBox`.  Resolve to the on-disk
+#     name instead of passing a name the engine cannot match.
+#   - **duplicates**: `Native` appeared twice in LauncherData; dedupe so the wildcard
+#     string has no repeats.
+#
+# Kept loud on purpose: silently dropping modules would recreate the "changed but did not
+# take effect" trap this repo keeps hitting (see the B1 defect in the sibling project).
 $modulesDir = Join-Path $GameDir 'Modules'
-$absent = @($selected | Where-Object { -not (Test-Path (Join-Path $modulesDir ($_ + '\SubModule.xml'))) })
-if ($absent.Count -gt 0) {
-    Write-Host ("WARNING: module(s) selected but NOT on disk (engine will skip them): " + ($absent -join ', '))
+$resolved = New-Object System.Collections.ArrayList
+$droppedAbsent = New-Object System.Collections.ArrayList
+$fixedCase = New-Object System.Collections.ArrayList
+$seenMods = @{}
+foreach ($name in $selected) {
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    if ($seenMods.ContainsKey($name.ToLowerInvariant())) { continue }   # dedupe (case-insensitive)
+    $seenMods[$name.ToLowerInvariant()] = $true
+
+    $exact = Join-Path $modulesDir ($name + '\SubModule.xml')
+    if (Test-Path -LiteralPath $exact) {
+        [void]$resolved.Add($name)
+        continue
+    }
+    # Case-insensitive fallback: find the real directory spelling.
+    $real = $null
+    if (Test-Path -LiteralPath $modulesDir) {
+        $real = Get-ChildItem -LiteralPath $modulesDir -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ieq $name } |
+                Select-Object -First 1
+    }
+    if ($real -and (Test-Path -LiteralPath (Join-Path $real.FullName 'SubModule.xml'))) {
+        [void]$resolved.Add($real.Name)
+        if ($real.Name -cne $name) { [void]$fixedCase.Add(($name + ' -> ' + $real.Name)) }
+        continue
+    }
+    [void]$droppedAbsent.Add($name)
 }
-# Same check the other way: BlBridge must be in the list or this whole exercise is pointless.
+$selected = @($resolved)
+
+if ($selected.Count -gt 0) {
+    Write-Host ("module list ready: " + $selected.Count + " module(s)")
+} else {
+    Write-Host ("WARNING: LauncherData.xml produced no usable module; falling back to " + $fallbackMods.Count + " built-in module(s)")
+    $selected = @($fallbackMods | Where-Object { Test-Path -LiteralPath (Join-Path $modulesDir ($_ + '\SubModule.xml')) })
+}
+
+if ($fixedCase.Count -gt 0) {
+    Write-Host ("note: fixed module-name case to match disk: " + ($fixedCase -join ', '))
+}
+if ($droppedAbsent.Count -gt 0) {
+    # Loud, and says WHY it matters: this exact condition crashed the game at load.
+    Write-Host ("DROPPED module(s) that are selected in LauncherData.xml but have no SubModule.xml on disk: " + ($droppedAbsent -join ', '))
+    Write-Host "  reason: passing these in _MODULES_ crashes the game at the loading screen (measured 2026-10-08),"
+    Write-Host "          so they are removed from THIS launch only; LauncherData.xml itself is NOT modified."
+    Write-Host "  fix: uncheck/remove them in the launcher, or reinstall the module."
+}
+# BlBridge must be in the list or this whole exercise is pointless.
 if ($selected -notcontains 'BlBridge') {
     Write-Host "WARNING: 'BlBridge' is NOT in the module list; the bridge will not load"
 }
