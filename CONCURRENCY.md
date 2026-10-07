@@ -18,7 +18,7 @@
 |---|---|
 | **可以 `-Deploy` 吗** | ✅ **已部署**（2026-10-08 04:04:52）。**新 DLL sha256 = `31B97ED6DB2AE7FA…`，286720 B**。★ 部署时 48 个副本 `.py` **全部与仓库一致**（漂移已消除） |
 | 会话 A 当前在做什么 | 本轮**全部交付完成**：A5 判据 / A3 物品全队伍 / A4+A4b config `path` 与双格式 / R1 `bl_get_perk` / **B8+B9+B10 三条写路径缺陷修复** |
-| 提交 | **`36938c8`**（主体）+ **`8e97e23`**（状态牌更新），工作区 clean。★ **这两个提交只在本地** —— `git push` 报网络错误（`Failed to connect to github.com:443`），重试 3 次均失败 ⇒ **`main` 领先 `origin/main` 2 个提交**。**不要以为远端已有**（这正是本项目反复吃过的"状态与事实不符"）；网络恢复后需重推 |
+| 提交 | **`36938c8`**（主体）+ **`8e97e23`**（状态牌）+ **`d0d9bd8`**（推送状态），工作区 clean。★ **已推送成功**：`032b58c..d0d9bd8 main -> main`，**`main` 与 `origin/main` 同步（ahead 0）**。（推送前曾连续 3 次 `Failed to connect to github.com:443`，网络恢复后重推即成功。）|
 | 未提交改动 | **无**（`git status` 干净）|
 | ★ **部署状态自检** | `bl_check_deploy_consistency.py` → **全部通过**（A/B/C/D 四段）；`--strict-drift` → **exit=0**（48 个副本一致）|
 | ★ **全局闸门** | `bl_selftest.py` / `bl_check_dispatch.py`(+`--selftest`) / `bl_check_gabp_names.py --selftest` / `bl_patches_selftest.py` / `bl_metrics_selftest.py` / `baddataspec/run_selftest.py`(52/52) / A5(含 `--selftest`) / `check_repo_encoding.py` ⇒ **10/10 绿** |
