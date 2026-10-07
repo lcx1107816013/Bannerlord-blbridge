@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Module xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/BUTR/Bannerlord.XmlSchemas/master/SubModule.xsd">
+  <Id value="ZzCrashProbe" />
+  <Name value="ZzCrashProbe (third-party crash simulator)" />
+  <Version value="v1.0.0" />
+  <DefaultModule value="false" />
+  <ModuleCategory value="Singleplayer" />
+  <ModuleType value="Community" />
+  <!--
+    ⚠️ 加载顺序：必须**晚于** BlBridge，否则本模块的异常可能在 BlBridge 装钩子之前抛出
+    => 那就测不到"守卫吞掉"与"落盘定位"。
+    `Zz` 前缀同时也是为了让它在字母序上靠后（引擎按 LauncherData 顺序加载，此处只是双保险）。
+  -->
+  <DependedModules>
+    <DependedModule Id="Native" />
+    <DependedModule Id="BlBridge" />
+  </DependedModules>
+  <SubModules>
+    <SubModule>
+      <Name value="ZzCrashProbe" />
+      <DLLName value="ZzCrashProbe.dll" />
+      <SubModuleClassType value="ZzCrashProbe.SubModule" />
+    </SubModule>
+  </SubModules>
+</Module>

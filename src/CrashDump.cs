@@ -198,6 +198,11 @@ namespace BlBridge
             //    `MINIDUMP_EXCEPTION_INFORMATION`（成本高、且托管异常本就有
             //    别的采集通道 —— `ExceptionProbe` 的 `exceptions.jsonl`）。
             //    ⇒ 取舍：**托管路径留空，原生路径带异常**（见 `OnTopLevelFilter`）。
+            //
+            // ⚠️ 注意：**异常队列的排空不在这里**，而在 `WriteOnce`（两个钩子的公共入口）。
+            //    原因见那里的注释：真机实测发现这条托管路径**常常根本不被调用**
+            //    （CLR 异常 `0xE0434352` 走的是 Win32 顶层过滤器），
+            //    把排空挂在这里等于没挂。
             WriteOnce("managed", IntPtr.Zero);
         }
 
@@ -227,6 +232,30 @@ namespace BlBridge
             if (Interlocked.CompareExchange(ref _dumpTaken, 1, 0) != 0)
             {
                 return;                     // 另一个钩子已经在写了
+            }
+            // ★★ v0.8.51：**在写 dump 之前，先把异常队列同步排空**。
+            //
+            // 为什么放这里（真机两次实测，2026-10-07）：
+            //   `ExceptionProbe` 是"FirstChance 入队 + **主线程 tick 排空**"两段式。
+            //   托管异常无人 catch 时进程立刻终结，主线程再也不会 tick
+            //   ⇒ 队列里最后那条（**真正致命的那条**）永远不落盘
+            //   ⇒ 用户看到"游戏崩了，日志里什么都没有"，无法归因。
+            //
+            // ⚠️ **第一次我把排空挂在 `OnManagedUnhandled` 上，没用** ——
+            //    真机证据：dump 文件名是 `blbridge-native-*`，且
+            //    `exceptionCode=0xE0434352`（CLR 托管异常）由 **Win32 SEI 顶层过滤器**触发，
+            //    那个钩子**根本没被调用**。⇒ 挂错钩子 = 修复无效，而且**看起来像已修**。
+            //    `WriteOnce` 才是**两个钩子唯一的公共入口**、且由 Interlocked 保证只跑一次，
+            //    所以排空放这里才覆盖全部路径。
+            //
+            // ⚠️ 只能同步写（此刻不能指望"下一帧再排"）；量给足（每帧上限是 64，这里 4096）。
+            // ⚠️ 整体 try：排空失败绝不影响 dump（dump 是更重要的证据）。
+            try
+            {
+                ExceptionProbe.Drain(4096);
+            }
+            catch
+            {
             }
             try
             {

@@ -77,7 +77,16 @@ param(
     # is neither reproducible nor available at all in unattended launches. Usage:
     #   .\bl_launch.ps1 -ExcludeModules RTSCamera,RTSCamera.CommandSystem
     # Names must match the list below exactly (a typo aborts instead of silently doing nothing).
-    [string[]]$ExcludeModules = @()
+    [string[]]$ExcludeModules = @(),
+    # Module names to ADD to the _MODULES_ list for THIS launch only (v0.8.51).
+    #
+    # WHY: `bl_launch.ps1` derives the list from the user's own LauncherData.xml.  A crash-probe
+    # module must be selectable WITHOUT editing that file (editing it mutates the user's saved
+    # preferences and is easy to forget to revert).  This parameter leaves LauncherData.xml
+    # untouched and appends only for this one process.
+    #   .\bl_launch.ps1 -IncludeModules ZzCrashProbe
+    # The named module must exist on disk (SubModule.xml present) or this aborts.
+    [string[]]$IncludeModules = @()
 )
 
 $ErrorActionPreference = 'Continue'
@@ -236,6 +245,42 @@ if ($selected -notcontains 'BlBridge') {
 }
 
 $mods = '_MODULES_*' + ($selected -join '*') + '*_MODULES_'
+
+# ---------- -IncludeModules: append modules for THIS launch only (v0.8.51) ----------
+# Runs BEFORE $mods is finalized so the appended names land inside the wildcard string.
+# Follows the same "a typo aborts instead of silently doing nothing" rule as -ExcludeModules:
+# a missing SubModule.xml would otherwise be skipped by the engine and the whole run would
+# look like "the probe never loaded" -- impossible to tell apart from a real failure.
+if ($IncludeModules.Count -gt 0) {
+    # Accept both "-IncludeModules A,B" and the quoted single-element form (see -ExcludeModules).
+    $IncludeModules = @($IncludeModules | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+    $missingInc = @($IncludeModules | Where-Object {
+        -not (Test-Path (Join-Path $modulesDir ($_ + '\SubModule.xml')))
+    })
+    if ($missingInc.Count -gt 0) {
+        # Keep the message on ONE line: PowerShell 5.1 rejects `throw (` followed by a
+        # newline + continuation (observed: "missing ')' in expression").  A single line
+        # is also what the -ExcludeModules branch effectively does.
+        $msg = "-IncludeModules names module(s) with no SubModule.xml on disk: " + ($missingInc -join ', ') + "  (expected under $modulesDir)"
+        throw $msg
+    }
+    $appended = @()
+    foreach ($m in $IncludeModules) {
+        if ($selected -contains $m) {
+            Write-Host ("include: " + $m + " already in the list")
+            continue
+        }
+        $selected += $m
+        $appended += $m
+    }
+    if ($appended.Count -gt 0) {
+        # Rebuild $mods AFTER appending (it was built from the pre-append list).
+        $mods = '_MODULES_*' + ($selected -join '*') + '*_MODULES_'
+        # Single line again: PowerShell 5.1 rejects a `(`-expression continued on the next line.
+        $note = "including module(s) for this launch only: " + ($appended -join ', ') + "  (now " + $selected.Count + " module(s); LauncherData.xml NOT modified)"
+        Write-Host $note
+    }
+}
 
 if ($ExcludeModules.Count -gt 0) {
     # Accept BOTH "-ExcludeModules A,B" and '-ExcludeModules "A,B"'. The quoted form binds the
