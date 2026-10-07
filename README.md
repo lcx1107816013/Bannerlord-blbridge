@@ -76,7 +76,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **61** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **57** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **62** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **58** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -216,7 +216,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 
 ---
 
-## 六、MCP 工具（61 个）
+## 六、MCP 工具（62 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|

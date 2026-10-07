@@ -262,7 +262,15 @@ def c5_selftest(declared):
 BACKEND_IMPORT_RE = re.compile(r"^\s*import\s+(bl_[a-z_]+)\s+as\s+", re.M)
 # 模块级 import（行首无缩进）
 MODULE_LEVEL_SIBLING_RE = re.compile(r"^import\s+(bl_[a-z_]+)", re.M)
-CLI_EXEMPT = {"bl_rts"}          # 纯库，无 CLI 用途（历史如此）
+# 纯库 / 共享代码 —— 没有、也不该有 CLI 入口。
+#
+# ⚠️ `bl_common` 是 **2026-10-07 加入**的：`bl_source_map` 分支里写了
+#    `import bl_common as _bc`（读 exceptions.jsonl），这是**第一次**把这个
+#    共享库纳入本判据的扫描范围 ⇒ C4 立刻报"缺 def main()/__main__ 块"。
+#    那是**误报**：它不是"后端工具"，是所有人共用的工具库（被十几个模块 import）。
+#    判据本身没错（"能直接跑的工具必须有 CLI"），错在它把**库**也当成了**工具**。
+#    ⇒ 与既有的 `bl_rts` 同理，登记进豁免表，而不是给库里硬塞一个假 main。
+CLI_EXEMPT = {"bl_rts", "bl_common"}
 
 
 def backend_modules(src=None):
@@ -343,7 +351,17 @@ def c4_selftest():
     print("   [OK] 真实源码 C4 零报错（%d 个后端模块都合格）" % len(mods))
 
     # ② 注入故障 A：去掉 `__main__` 块
-    probe = sorted(mods)[0]
+    #
+    # ⚠️ **必须挑一个"未豁免"的模块**（2026-10-07 实测踩到）：
+    #    原用 `sorted(mods)[0]`，而 `bl_common` 加入 CLI_EXEMPT 后它正好排第一
+    #    ⇒ 注入故障的对象是被**故意跳过**的库 ⇒ `_cli_missing` 根本不检查它
+    #    ⇒ 自测报"注入 A 失败"，**闸门失去区分力**而看起来像"测试写错了"。
+    #    ⇒ 先从候选里剔掉 CLI_EXEMPT；剔完为空才算判据失效。
+    cands = [m for m in sorted(mods) if m not in CLI_EXEMPT]
+    if not cands:
+        print("   [FAIL] 没有可注入的非豁免模块（全部被 CLI_EXEMPT 跳过）⇒ 判据失效")
+        return False
+    probe = cands[0]
     import os as _os
     here = _os.path.dirname(_os.path.abspath(__file__))
     with io.open(_os.path.join(here, probe + ".py"), "r", encoding="utf-8",

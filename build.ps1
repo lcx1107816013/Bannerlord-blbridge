@@ -187,8 +187,25 @@ $genLines = @(
 $sources += $genVersion
 Write-Host ("[1/3] version: BridgeConfig={0} assembly={1}" -f $version, $asmVersion)
 
+# /debug:full + /pathmap (v0.8.50, 2026-10-07): ship line numbers, without leaking the build path.
+#
+# WHY: crash stacks used to carry ONLY method names, so an agent could not jump to
+#      the source line -> the "read the data, then fix the code" loop broke at step 1.
+#
+# MEASURED (controlled experiment, not assumed):
+#   /debug-          -> stack has NO line number          (the old setting)
+#   /debug:portable  -> stack has NO line number          (.NET Framework ignores portable PDBs!)
+#   /debug:full      -> stack HAS `... .cs:line 24`       (24 == the real throw line)
+#   => /debug:full is required; portable silently does nothing on net472.
+#
+# /pathmap rewrites the absolute build path to a symbolic root. MEASURED: line numbers
+#   stay correct, and the absolute path disappears from the stack AND the PDB.
+#   Without it the PDB embeds e.g. C:\Users\<name>\... -> username leak if shipped.
+#   (PathMap value must be the repo root; keep ASCII-only for PS 5.1.)
+$pathMapFrom = ($root.TrimEnd('\'))
 $cscArgs = @(
-    '/nologo', '/target:library', '/platform:x64', '/optimize+', '/debug-',
+    '/nologo', '/target:library', '/platform:x64', '/optimize+', '/debug:full',
+    ('/pathmap:' + $pathMapFrom + '=/'),
     ('/langversion:' + $LangVersion), '/codepage:65001', '/utf8output',
     ('/out:' + $outDll)
 )
@@ -365,6 +382,26 @@ if ($Deploy) {
     }
 
     Copy-Item $outDll $dllTarget -Force
+
+    # Deploy the PDB next to the DLL (v0.8.50, 2026-10-07).
+    #
+    # WHY: measured -- without the PDB the runtime stack has NO line numbers, so
+    #      `bl_source_map` can only fall back to the symbol index. With it, frames
+    #      from OUR code carry `file:line` directly (the most authoritative source).
+    #      Measured first: `-Deploy` copied only the DLL, so the deployed build was
+    #      STILL symbol-less even though the build produced a PDB -- the whole
+    #      line-number feature silently did nothing in the real (deployed) game.
+    #
+    # Privacy: the PDB is built with /pathmap, so it carries /src/X.cs -- verified
+    #          no build-machine path (no username) is embedded.
+    $pdbSrc = [System.IO.Path]::ChangeExtension($outDll, '.pdb')
+    if (Test-Path $pdbSrc) {
+        Copy-Item $pdbSrc ([System.IO.Path]::ChangeExtension($dllTarget, '.pdb')) -Force
+        $pdbHash = (Get-FileHash $pdbSrc -Algorithm SHA256).Hash.Substring(0, 16)
+        Write-Host ("      pdb  sha256 (head) = {0}..." -f $pdbHash)
+    } else {
+        Write-Warning "no PDB produced by the build -- stacks will have no line numbers"
+    }
 
     $srcHash = (Get-FileHash $outDll -Algorithm SHA256).Hash
     $dstHash = (Get-FileHash $dllTarget -Algorithm SHA256).Hash

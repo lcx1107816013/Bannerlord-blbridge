@@ -1532,6 +1532,33 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_source_map",
+        "description": ("**源码定位（栈帧 → 文件:行号）**：把崩溃栈帧映射到源码位置并附"
+                        "**真实源码片段**，补「栈只有方法名、agent 无法跳到那一行」的缺口。"
+                        "两条路径：① 栈里自带行号（该 DLL 需用 `/debug:full` 编译 —— "
+                        "**`.NET Framework` 不认 portable PDB**）；② 本地符号索引 "
+                        "（`out/BlBridge.symbols.json`，由 PDB 抽出的 方法→文件:行号）。"
+                        "⚠️ **解析与语言无关**：中文 Windows 的栈是 `位置 X.cs:行号 24`、"
+                        "英文是 `in X.cs:line 24` —— 只认英文关键词的判据会在中文系统上"
+                        "把「有行号」判成「没有」。"
+                        "⚠️ **第三方帧如实说「无法定位」，绝不编造行号**"
+                        "（如 `HarmonyLib.*` / `TaleWorlds.*`，它们的 DLL 不在我们仓库里）。"
+                        "⚠️ **实测边界**：真实 194 个栈帧里只有 **2 帧**属我们工程（99% 是 "
+                        "BCL/框架帧）⇒ 对**第三方 mod 崩溃**，本工具**结构上给不出行号**。"
+                        "生成索引：`python tools/bl_symbols.py --build`。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "resolve": {"type": "string",
+                            "description": "解析一个方法全名（如 BlBridge.CrashGuard.Finalizer）"},
+                "stack": {"type": "string", "description": "直接给一段栈文本"},
+                "fromExceptions": {"type": "boolean",
+                                   "description": "读 exceptions.jsonl 逐条定位"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 同口径）"},
+            },
+        },
+    },
+    {
         "name": "bl_save_diag",
         "description": ("**存档诊断（宿主侧，只读）**：比对「存档里记录的模组集」与"
                         "「启动器当前启用的模组集」，找出**会导致读档崩溃的不一致**："
@@ -1900,7 +1927,7 @@ TOOL_GROUPS = {
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_lexicon",
         "bl_crashguard",
-        "bl_report", "bl_save_diag",
+        "bl_report", "bl_save_diag", "bl_source_map",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
         # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
         "bl_dump", "bl_crash_test",
@@ -2591,6 +2618,29 @@ def call_tool(name, args):
             limit=int(args.get("limit") or 20),
             explain=bool(args.get("explain", True)),
         )
+
+    if name == "bl_source_map":
+        # 宿主侧工具：栈帧 → 源码 文件:行号（+ 源码片段）。**不碰游戏、不需要游戏在跑**。
+        import bl_source_map as _sm
+        records = None
+        if args.get("fromExceptions"):
+            import bl_common as _bc
+            records = []
+            p = os.path.join(args.get("logDir") or _bc.default_log_dir(), "exceptions.jsonl")
+            if os.path.isfile(p):
+                with io.open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            o = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(o, dict):
+                            records.append(o)
+        return _sm.analyze(stack_text=args.get("stack"), records=records,
+                           resolve=args.get("resolve"))
 
     if name == "bl_save_diag":
         # 宿主侧工具：存档诊断（**只读** —— 不写/不改/不备份存档）。
