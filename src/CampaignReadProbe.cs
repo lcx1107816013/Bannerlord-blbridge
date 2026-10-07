@@ -470,9 +470,32 @@ namespace BlBridge
                 {
                     object main = Hero.MainHero;
                     if (main != null) heroes.Add(main);
-                    foreach (object ch in MainPartyCompanions())
+                    // ★ 真机实测修正（2026-10-07）：**不要**遍历 `MemberRoster.data`
+                    //   去找同伴 —— 第一版那么写，实测**静默漏报**：
+                    //   存档里玩家部队有 4 个英雄（主角 + 3 个：Wanderer/Lord/Lord），
+                    //   默认路径只给出 1 个。**看起来成功、实际少给数据**，是最危险的一类
+                    //   （不报错，调用方无从察觉）。
+                    //
+                    // ⇒ 改用**已验证可靠**的路径：遍历全部英雄，按
+                    //   `PartyBelongedTo` 与主角的**同一性**（ReferenceEquals）筛选。
+                    //   判据可独立对照：这与 `all=true` 后按 party 名筛出的集合**必然同集**
+                    //   （见 tools 里的 `_b7_diag.py` 对照）。
+                    //
+                    //   为什么这样更稳：`MemberRoster.data` 是**内部字段**，
+                    //   名字/结构随版本可能变；而 `Hero.PartyBelongedTo` 是**公开属性**、
+                    //   且是本工具已经在用的同一个访问器。
+                    object mainParty = P(main, "PartyBelongedTo");
+                    if (mainParty != null)
                     {
-                        if (!ReferenceEquals(ch, main)) heroes.Add(ch);
+                        foreach (object h in AllHeroes())
+                        {
+                            if (ReferenceEquals(h, main)) continue;
+                            object hp2 = P(h, "PartyBelongedTo");
+                            if (hp2 != null && ReferenceEquals(hp2, mainParty))
+                            {
+                                heroes.Add(h);
+                            }
+                        }
                     }
                 }
 
@@ -497,7 +520,13 @@ namespace BlBridge
                     object nameO = P(h, "Name");
                     StringBuilder one = new StringBuilder();
                     one.Append('{');
-                    one.Append("\"stringId\":").Append(Protocol.Q(JVal(P(h, "StringId"))));
+                    // ⚠️ 真机实测修正（2026-10-07）：`JVal` **自带** JSON 引号
+                    //    （它是"把任意值安全转成 JSON 片段"），第一版又包了层 `Protocol.Q`
+                    //    ⇒ 输出成 `"stringId":""main_hero""`（**双重引号**），
+                    //    直接把它回传当 `heroId` 就会匹配失败。
+                    //    ⇒ 属性值只用 `JVal`；**只有**需要手动取字段（name/clan/party）时
+                    //      才先 `.ToString()` 再 `Protocol.Q`（此时是纯字符串，无引号）。
+                    one.Append("\"stringId\":").Append(JVal(P(h, "StringId")));
                     one.Append(",\"name\":").Append(Protocol.Q(nameO == null ? "" : nameO.ToString()));
                     one.Append(",\"hitPoints\":").Append(hpO == null ? "null" : hp.ToString());
                     one.Append(",\"maxHitPoints\":").Append(maxO == null ? "null" : max.ToString());
@@ -511,8 +540,8 @@ namespace BlBridge
                     one.Append(",\"isAlive\":").Append(JVal(P(h, "IsAlive")));
                     one.Append(",\"isFugitive\":").Append(JVal(P(h, "IsFugitive")));
                     one.Append(",\"occupation\":").Append(JVal(P(h, "Occupation")));
-                    one.Append(",\"clan\":").Append(Protocol.Q(clan == null ? "" : JVal(P(clan, "Name"))));
-                    one.Append(",\"party\":").Append(Protocol.Q(party == null ? "" : JVal(P(party, "Name"))));
+                    one.Append(",\"clan\":").Append(Protocol.Q(clan == null ? "" : (P(clan, "Name") == null ? "" : P(clan, "Name").ToString())));
+                    one.Append(",\"party\":").Append(Protocol.Q(party == null ? "" : (P(party, "Name") == null ? "" : P(party, "Name").ToString())));
                     one.Append('}');
                     rows.Add(one.ToString());
                 }
@@ -538,31 +567,9 @@ namespace BlBridge
             }
         }
 
-        /// <summary>玩家队伍的同伴 Hero（只读遍历 MemberRoster）。取不到就返回空表，不抛。</summary>
-        private static List<object> MainPartyCompanions()
-        {
-            List<object> outList = new List<object>();
-            try
-            {
-                object main = Hero.MainHero;
-                object pb = P(main, "PartyBelongedTo");
-                object members = P(pb, "MemberRoster");
-                if (members == null) return outList;
-                object data = P(members, "data");
-                IEnumerable den = data as IEnumerable;
-                if (den == null) return outList;
-                foreach (object el in den)
-                {
-                    object ch = P(el, "Character");
-                    object hero = P(ch, "HeroObject");
-                    if (hero != null) outList.Add(hero);
-                }
-            }
-            catch
-            {
-            }
-            return outList;
-        }
+        // ⚠️ 这里曾有 `MainPartyCompanions()`（遍历 `MemberRoster.data` 找同伴）——
+        //    **已删除**。真机实测它**静默漏报**（部队里 4 个英雄只给出 1 个），
+        //    见 `HandleGetHero` 里的注释：改用 `Hero.PartyBelongedTo` + ReferenceEquals 筛选。
 
         /// <summary>按 StringId 精确找英雄（只读）。</summary>
         private static object FindHeroByStringId(string sid)

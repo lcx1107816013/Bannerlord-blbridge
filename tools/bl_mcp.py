@@ -384,6 +384,21 @@ def build_manifest_path():
     return os.path.join(module_dir(), "build_manifest.json")
 
 
+def _iso_utc(epoch_seconds):
+    """epoch 秒 → `YYYY-MM-DDTHH:MM:SSZ`（UTC）。失败返回 None（不抛）。
+
+    B6 用：给 `changedSources` 附 mtime，让调用方能判断"这个改动是不是我做的"
+    —— 本仓库被**两个会话**共用，没有 mtime 就只能靠人去问。
+    """
+    try:
+        # ⚠️ 用**模块级**的 `time`（顶部 import time）。`_time` 只是 `send_command`
+        #    里的**函数局部**别名，在这里不可见 —— 我第一版就写错成 `_time`，
+        #    被自己的实测抓出来（NameError）。这正是"改完必须真跑一遍"的价值。
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 def build_check(src_dir=None, mod_dir=None):
     """构建一致性判定：把「源码 → 构建产物 → 部署文件 → 进程内 DLL」四段串起来核验。
 
@@ -461,9 +476,38 @@ def build_check(src_dir=None, mod_dir=None):
         missing = [n for n in want if n not in have]
         if changed or missing:
             out["code"] = "stale_source"
-            out["detail"] = ("源码与上次构建不一致（改动 %d 个、缺失 %d 个）—— 需要重新构建后部署"
-                             % (len(changed), len(missing)))
+            # ── B6 修复（2026-10-07，隔壁项目测试表发现）──────────────────────
+            #
+            # 现象：报 `stale_source` 但战斗照常执行；而 `changedSources` 里出现
+            # **调用方自己没改过**的文件（本例：另一个会话在写的 `BadDataSpec.cs`）
+            # ⇒ 调用方无法判断"这个警告与我当前操作有关吗"，只能靠人去问。
+            #
+            # ★ 关键澄清（B6 的分析里漏了一点）：`stale_source` 说的**永远是 BlBridge 自己**
+            #   （`src/*.cs` ↔ 部署的 DLL），**与三合一 MOD 的 DLL 无关**。
+            #   所以对"测 RBM 行为"无影响；但**若你在改 BlBridge 本身，这个警告必须当真**
+            #   （否则测的是旧 DLL）。两种情形都取决于"那个改动的文件是不是你的" ——
+            #   而**判断依据就是 mtime**。
+            #
+            # ⇒ 故：给每个改动文件附 mtime（B6 自己的建议），并显式提示并发写入的可能。
+            det = []
+            for n in changed[:8]:
+                p = os.path.join(src, n)
+                try:
+                    mt = os.path.getmtime(p)
+                    det.append({"name": n,
+                                "mtimeUtc": _iso_utc(mt),
+                                "sizeBytes": os.path.getsize(p)})
+                except OSError:
+                    det.append({"name": n, "mtimeUtc": None, "sizeBytes": None})
+            for n in missing[:8]:
+                det.append({"name": n, "missing": True})
             out["changedSources"] = changed[:8]
+            out["changedSourcesDetail"] = det
+            out["detail"] = ("源码与上次构建不一致（改动 %d 个、缺失 %d 个）—— 需要重新构建后部署。"
+                             "⚠️ 见 changedSourcesDetail 的 mtime：**若有你没改过的文件**，"
+                             "说明**另一个会话/进程正在同一源码树里写**（本仓库被两个会话共用）"
+                             "⇒ 先确认再决定是否重编，别把别人的中间态部署进游戏。"
+                             % (len(changed), len(missing)))
             return out
 
     sess = _game_session() or {}
@@ -2621,6 +2665,29 @@ def call_tool(name, args):
         st["latestBattle"] = bl[-1] if bl else None
         st["buildCheck"] = build_check()
         st["sessionDiagnosis"] = run_state_diagnosis()
+        # ── B5（2026-10-07，隔壁项目测试表发现）────────────────────────────
+        #
+        # 现象：同一响应里 `sessionDiagnosis.verdict` 报 `crashed_in_battle`，
+        # 而 `buildCheck.code` 报 `ok`（"四段一致"）—— 并列出现易被读成**自相矛盾**。
+        #
+        # ★ 复核结论：**两者说的不是同一件事，所以都"对"**：
+        #   · `sessionDiagnosis.verdict` —— 上次会话**是否正常退出**（运行时/行为面）；
+        #   · `buildCheck.code`         —— 「源码→产物→部署→进程内 DLL」**文件链条是否一致**
+        #                                 （静态/构建面）。
+        #   ⇒ 崩溃 + 文件链条一致，是**完全正常**的组合（崩了不等于文件坏了）。
+        #
+        # ⇒ 所以不是"改文案"，而是**把两者的作用域写明**，让并列不再被误读。
+        #   ⚠️ 刻意**不加**"互斥提示" —— 那会暗示两者应该有因果关系，反而是错的。
+        st["scopes"] = {
+            "sessionDiagnosis": ("**运行时/行为面**：上次会话是正常结束、还活着，还是崩了/被强杀。"
+                                 "回答『游戏**跑得**怎么样』。"),
+            "buildCheck": ("**静态/构建面**：源码 → 构建产物 → 部署文件 → 进程内 DLL "
+                           "**四段是否一致**。回答『文件**对不对**』。"),
+            "note": ("两者**互不蕴含**：崩溃而文件链一致是正常组合（崩了 ≠ 文件坏了）；"
+                     "文件链不一致也不代表上次崩过。"
+                     "⇒ 判『上次怎么结束的』看 `sessionDiagnosis.verdict`；"
+                     "判『现在这份 DLL 是不是源码构建的』看 `buildCheck.code`。"),
+        }
         return st
 
     if name == "bl_config":
@@ -3466,7 +3533,28 @@ def call_tool(name, args):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "get_patches 失败",
                     "code": e.get("code"), "response": resp}
-        return {"ok": True, "result": resp.get("result"), "response": resp}
+        # ── B4（2026-10-07，隔壁项目测试表发现）：把**边界**写进返回 ──────────
+        #
+        # `bl_patches` 是只读内省，回答的是「**谁补了哪个方法**」= **注册在册**，
+        # 它**看不到"补丁有没有生效"**。
+        #
+        # ★ 这个边界本身是**正确**的（不是 bug）—— 而且它是个**利器**：
+        #   隔壁项目实测（C6 的 ③）补丁因 `Prepare()` 返回 false **静默不装**，
+        #   正是 `bl_patches` 报 `matchedMethods: 0` 把它抓了出来。
+        #
+        # ⇒ 但调用方容易误读成"在册 = 生效"（或反之"没在册 = 没跑"），所以补一句口径。
+        #   ⚠️ 注意 `Prepare()` 返回 false 的补丁**不会出现在这里** ——
+        #     所以"这里没有"**不能**推断"没装过"。
+        result = resp.get("result")
+        return {"ok": True, "result": result,
+                "scope": ("**注册在册 ≠ 生效**。本工具只读 Harmony 的公开内省 API，"
+                          "回答「谁补了哪个方法」；判「是否真的生效」需要**行为证据**"
+                          "（例如值/伤害真的变了）。"
+                          "⚠️ `Prepare()` 返回 `false` 的补丁**不会出现在这里** ⇒ "
+                          "「这里没有」**不能**推断「没装过」；"
+                          "但反过来，`matchedMethods: 0` 是**静默失效的强信号**"
+                          "（隔壁项目正是靠它抓到 C6-③ 的静默不装的）。"),
+                "response": resp}
 
     if name == "bl_get_inventory":
         params = {}
