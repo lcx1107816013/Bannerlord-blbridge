@@ -16,3 +16,15 @@ __pycache__/
 /blbridge.json
 /blbridge_game.json
 .sdd/
+
+# ── 崩溃词典（lexicon）的**数据**，刻意不入库 ──
+# 词条数据派生自一个**没有任何许可声明**的上游作品（默认「保留所有权利」），
+# 因此**不得随本 MIT 仓库再分发**。本仓库只放读取器 tools/bl_lexicon.py；
+# 数据由使用者本地准备，用 BLBRIDGE_LEXICON_DIR 指向它。
+# 这条 ignore 是**防误提交的护栏**：少了它，一次 `git add -A` 就会把
+# 无许可内容推进公开仓库（那正是本次评估要避免的事）。
+#
+# 注：只忽略**数据子目录**而不忽略整个 /tools/data/，
+#     这样 tools/data/README.md 能入库，用来说明"这里为什么没有数据"。
+/tools/data/lexicon/
+/tools/data/*.json

@@ -451,6 +451,10 @@
     "bl_campaign_log": {
       "gabp": "campaign/log",
       "note": "只读日志快照；count 默认 20 / 上限 200"
+    },
+    "bl_lexicon": {
+      "gabp": "telemetry/explain_crash",
+      "note": "宿主侧只读：崩溃词典（人话 + 常见场景 + 修复建议），补 bl_crash/bl_exceptions 只有符号栈的那一层。数据不随本仓库分发（上游无许可 ⇒ 默认保留所有权利），用 BLBRIDGE_LEXICON_DIR 指本地目录；缺数据如实报 installed=false。匹配是短语子串（MatchAny 任一 / MatchAll 全部 / ExcludeAny 排除），不是语义匹配；priority 只排序、不是置信度；zh 缺失时回退英文并如实标注 langFellBackToEn。"
     }
   }
 }

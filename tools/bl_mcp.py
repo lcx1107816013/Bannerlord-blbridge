@@ -1507,6 +1507,35 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_lexicon",
+        "description": ("**崩溃词典（人话解释 + 修复建议）**：按异常类型或一段崩溃文本匹配词条，"
+                        "返回描述、常见场景、修复建议。补的是 `bl_crash --deep` / `bl_exceptions` "
+                        "**只有符号栈、说不出'该怎么办'** 的那一层。"
+                        "⚠️ **词条数据不随本仓库分发**（上游作品无许可声明 ⇒ 默认保留所有权利）"
+                        "⇒ 需用 `BLBRIDGE_LEXICON_DIR` 指向本地词条目录；**缺数据时如实报 installed=false**，"
+                        "不会返回空结果冒充'没有匹配'。"
+                        "口径：匹配是**短语子串**（MatchAny 任一 / MatchAll 全部 / ExcludeAny 排除），"
+                        "**不是语义匹配** ⇒ 匹配不到**不等于**没问题。"
+                        "`priority` 只用于排序，**不是置信度**。"
+                        "词条 `zh` 缺失时会回退英文并**如实标注** `langFellBackToEn`（上游 legacy 档只有英文）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string",
+                         "description": "异常类型（短名或全名，如 NullReferenceException）"},
+                "text": {"type": "string",
+                         "description": "按一段崩溃报告/日志片段做短语匹配"},
+                "lang": {"type": "string", "enum": ["zh", "en"],
+                         "description": "文本语言，默认 zh"},
+                "limit": {"type": "integer", "description": "最多几条匹配，默认 10"},
+                "dir": {"type": "string",
+                        "description": "词条目录（默认取环境变量 BLBRIDGE_LEXICON_DIR）"},
+                "statusOnly": {"type": "boolean",
+                               "description": "只报词典装载状态（装没装上、为什么）"},
+            },
+        },
+    },
+    {
         "name": "bl_concurrency_guide",
         "description": ("**并发纪律（宿主侧，只读，不碰游戏）**：告诉你**哪些工具能并发、最多几路**。"
                         "为什么需要：**所有走游戏通道的工具共用同一条串行泵**"
@@ -1801,6 +1830,7 @@ TOOL_GROUPS = {
         "bl_list_battles", "bl_analyze", "bl_read_events", "bl_run_batch", "bl_batch_report",
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
+        "bl_lexicon",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
         # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
         "bl_dump", "bl_crash_test",
@@ -2491,6 +2521,23 @@ def call_tool(name, args):
             limit=int(args.get("limit") or 20),
             explain=bool(args.get("explain", True)),
         )
+
+    if name == "bl_lexicon":
+        # 宿主侧工具：崩溃词典（人话 + 修复建议）。**词条数据不随本仓库分发**
+        # （上游无许可）⇒ 缺数据时如实报 installed=false，不返回空结果冒充"没有匹配"。
+        # **不碰游戏、不需要游戏在跑**（与 bl_crash / bl_exception_detail 同类）。
+        import bl_lexicon as _lx
+        if args.get("statusOnly"):
+            _lex, _st = _lx.load_lexicon(path=args.get("dir"))
+            return {"ok": _st["installed"], "status": _st}
+        _lex, _st = _lx.load_lexicon(path=args.get("dir"))
+        if _lex is None:
+            return {"ok": False, "reason": _st.get("reason"), "status": _st}
+        res = _lx.describe(_lex, exc_type=args.get("type"), text=args.get("text"),
+                           lang=args.get("lang") or "zh",
+                           limit=int(args.get("limit") or 10))
+        res["status"] = _st
+        return res
 
     if name == "bl_concurrency_guide":
         # 宿主侧工具：从源码闭包推导「工具→通道方法」，从实测账本取耗时分位。

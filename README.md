@@ -76,7 +76,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **57** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **53** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **58** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **54** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -114,7 +114,7 @@ BlBridge/
   build.ps1                       一键编译 + 部署（查游戏进程 + 备份旧 DLL + SHA256 + 写构建清单）
   blbridge.example.json           MCP 侧配置模板
   blbridge_game.example.json      游戏端配置模板
-  tools/bl_mcp.py                 MCP server（stdio，57 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
+  tools/bl_mcp.py                 MCP server（stdio，58 个工具；部署时整份复制进 Modules\BlBridge\mcp\）
   tools/bl_analyze.py             分析器（可独立命令行运行）
   tools/bl_dummy_analyze.py       伤害分布分析器（阶段 2① 靶场的读侧；range / battle 双口径；--compare 跨档对比：按部位给 Δ%/Welch t + 生效判据）
   tools/bl_batch.py               跑批编排：按 plan.json 跑 N 场（阶段 2④；plan 支持靶场参数 dummySide / freezeDummies / unlimitedAmmo / dummyArmor）
@@ -216,7 +216,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 
 ---
 
-## 六、MCP 工具（57 个）
+## 六、MCP 工具（58 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -257,6 +257,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 | `bl_desktop_screenshot` | 截图（可叠带标签网格，按格定位） | 否 |
 | `bl_desktop_click` | 按格点击（`gridhand` 后端） | 否 |
 | `bl_desktop_key` | 发送按键 | 否 |
+| `bl_lexicon` | **崩溃词典**（宿主侧，只读）：按异常类型或一段崩溃文本匹配**人话描述 / 常见场景 / 修复建议**，补 `bl_crash --deep` 与 `bl_exceptions` 只有符号栈、说不出"该怎么办"的那一层。⚠️ **词条数据不随本仓库分发**（上游无许可）⇒ 用 `BLBRIDGE_LEXICON_DIR` 指向本地目录；**缺数据时如实报 `installed=false`**，不返回空结果冒充"没有匹配"。匹配是**短语子串**（`MatchAny` 任一 / `MatchAll` 全部 / `ExcludeAny` 排除），**不是语义匹配** ⇒ 匹配不到不等于没问题；`priority` 只排序、不是置信度；`zh` 缺失时回退英文并如实标注。详见 [`tools/data/README.md`](tools/data/README.md) | 否 |
 
 ### 战斗加速通道（v0.3.0 新增）
 
