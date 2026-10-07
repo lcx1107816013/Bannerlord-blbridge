@@ -76,7 +76,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 包** | `Modules\BlBridge\`（DLL + `ModuleData\` + `mcp\`） | 游戏与启动器 | **界面**：官方自定义战斗（游戏自带，玩家用）／**控制通道**：文件 IPC（AI） |
-| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **58** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **54** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
+| **B：MCP 包** | `Modules\BlBridge\mcp\`（服务器 + `manifest.json` + `README.md`） | AI（读完介绍即可加载） | MCP 工具 **59** 个（不设 `BLBRIDGE_TOOLSET` 时全量暴露；常用的 `core+config+lab` 组合是 **55** 个）（`bl_open_ui` / `bl_start_battle` / `bl_order` / `bl_control_agent` / `bl_ghost_camera` / `bl_camera_speed` / `bl_skip_video` / `bl_cheat_mode` / `bl_get_screen` / `bl_get_viewmodel_property` / `bl_get_inventory` / …） |
 
 关键约束：**界面就是官方那一个，我们只负责"进得去"的那扇门**。v0.8.14 之前我们自建过一套面板，
 并宣称"界面与端口不是两套实现"；面板删掉后这句话更彻底地成立 —— 人走官方界面、AI 走端口，
@@ -216,7 +216,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 
 ---
 
-## 六、MCP 工具（58 个）
+## 六、MCP 工具（59 个）
 
 | 工具 | 作用 | 需游戏在跑 |
 |---|---|---|
@@ -258,6 +258,7 @@ BlBridge **本身不依赖**四前置 —— 它的 `SubModule.xml` 只声明官
 | `bl_desktop_click` | 按格点击（`gridhand` 后端） | 否 |
 | `bl_desktop_key` | 发送按键 | 否 |
 | `bl_lexicon` | **崩溃词典**（宿主侧，只读）：按异常类型或一段崩溃文本匹配**人话描述 / 常见场景 / 修复建议**，补 `bl_crash --deep` 与 `bl_exceptions` 只有符号栈、说不出"该怎么办"的那一层。⚠️ **词条数据不随本仓库分发**（上游无许可）⇒ 用 `BLBRIDGE_LEXICON_DIR` 指向本地目录；**缺数据时如实报 `installed=false`**，不返回空结果冒充"没有匹配"。匹配是**短语子串**（`MatchAny` 任一 / `MatchAll` 全部 / `ExcludeAny` 排除），**不是语义匹配** ⇒ 匹配不到不等于没问题；`priority` 只排序、不是置信度；`zh` 缺失时回退英文并如实标注。详见 [`tools/data/README.md`](tools/data/README.md) | 否 |
+| `bl_crashguard` | **崩溃守卫账本 + 修复建议**（宿主侧，只读）：读 `crashguard.jsonl`，答「**哪些异常本来会杀掉游戏、被我们吞掉了**」与「**哪些我们不敢吞**」。与 `bl_exceptions` 的分工：那个答"发生过哪些异常"，本工具只答"守卫放过了什么"——FirstChance **只能观察不能阻止**，Harmony Finalizer 才是唯一能阻止传播的钩子。⚠️ **`action=swallow` 不等于已修复**：吞掉只保证游戏没死，被吞的方法**没做完它该做的事**，可能留下**不报错**的静默损坏。⚠️ `reason=breaker_open`/`quota_exhausted` 是**坏消息**（守卫已停止保护）会被判 critical 并置顶；`fatal_passthrough` 说明游戏**很可能仍崩了** ⇒ 用 `bl_crash` 看 dump。守卫**默认关闭** ⇒ 文件不存在**不等于**没崩溃，以 `enabled` 为准。详见 [`docs/crash-guard.md`](docs/crash-guard.md) | 否 |
 
 ### 战斗加速通道（v0.3.0 新增）
 

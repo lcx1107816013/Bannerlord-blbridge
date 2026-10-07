@@ -92,6 +92,27 @@ namespace BlBridge
                 //   86 MB × 10 = 860 MB 太多 ⇒ 降到 3（最坏 ~260 MB），
                 //   而且**崩溃 dump 是最新落的那份**，历史份数价值低。
                 CrashDump.Install(DumpDir, 3);
+
+                // v0.8.49：崩溃守卫（在关键 tick 路径吞托管异常，让游戏继续跑）。
+                //
+                // ★ **默认关闭**（`BridgeConfig.CrashGuardEnabled = false`），要用必须在
+                //   `blbridge_game.json` 里显式打开。这是**安全决定，不是保守**：
+                //   吞异常 = 让"本该崩"的进程继续跑，而那个方法**没做完它该做的事**
+                //   ⇒ 可能产生**不崩溃、不报错**的静默损坏（存档不一致 / AI 卡死 / 数值错乱），
+                //   比崩溃更难查。需要它的场合：无人值守长跑、演示、定位。
+                //
+                // ★ 与 ExceptionProbe 的分工（**能力不同，不是重复建设**）：
+                //   `ExceptionProbe`（FirstChance）能**观察**但不能**阻止** ——
+                //   它是通知，返回值被忽略；
+                //   `CrashGuard`（Harmony Finalizer）是唯一能**阻止传播**的钩子。
+                //   两者互补：前者记录全集，后者记录"我们放过了哪些"。
+                //
+                // ★ 仍然零 Harmony 硬依赖：CrashGuard 用**反射**挂 Finalizer，
+                //   Harmony 没装就退化成 no-op 并如实记 `installError`。
+                if (BridgeConfig.CrashGuardEnabled)
+                {
+                    CrashGuard.Install();
+                }
             }
             catch
             {
@@ -194,6 +215,10 @@ namespace BlBridge
                 //   与本项目"零 Harmony"的立场一致（我们没改任何别人的代码，
                 //   只是订阅了一个 .NET 原生事件）。
                 ExceptionProbe.Uninstall();
+                // v0.8.49：撤掉崩溃守卫的 Finalizer —— 同样是"删模块即完全回退"的一部分。
+                // ⚠️ 这里**必须撤**：Finalizer 是**改别人方法 IL**的补丁（与 ExceptionProbe
+                //   只是订阅事件不同），不撤的话模块卸载后钩子仍指向我们的方法 ⇒ 悬空引用。
+                CrashGuard.Uninstall();
                 // 传最近一场的真实事件数：第一版这里写死 0，把 lastBattleEvents 抹成了 0
                 WriteStatus("exited", _currentBattleFile, _lastBattleEventCount);
             }
@@ -242,6 +267,15 @@ namespace BlBridge
             try
             {
                 ExceptionProbe.Drain(64);
+            }
+            catch
+            {
+            }
+            // v0.8.49：排空崩溃守卫账本（同为 I/O，同样只在主线程做）。
+            // ★ 独立 try，理由同上：不让它被前一段的影响吃掉，也不让它影响后面的段。
+            try
+            {
+                CrashGuard.Drain(64);
             }
             catch
             {
@@ -305,6 +339,9 @@ namespace BlBridge
             sb.Append(",\"cleanExit\":").Append(Jw.B(_cleanExit));
             sb.Append(",\"missionInProgress\":").Append(Jw.B(_missionInProgress));
             sb.Append(",\"enabled\":").Append(Jw.B(true));
+            // v0.8.49：崩溃守卫概览 —— 让外部（MCP 侧 / 人）一眼看到
+            // "吞了多少、放行多少、配额/熔断有没有触发"。**不吞时这些是 0**，不是缺失。
+            sb.Append(",\"crashGuard\":").Append(CrashGuard.SummaryJson());
             // v0.8.45：账本健康 —— 把"写失败静默"变成外部**一眼可见**。
             // 缺口的全部危害在于"少行而无人知"；有了这两个字段，bl_cmd/bl_mcp 就能报警。
             sb.Append(",\"ledger\":{");

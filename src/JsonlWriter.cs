@@ -279,5 +279,95 @@ namespace BlBridge
                 _sideWriter = null;
             }
         }
+
+        // ─────────────────────────────────────────────────────────────────
+        // 崩溃守卫账本（v0.8.49）：**第三个**独立写手
+        // ─────────────────────────────────────────────────────────────────
+        //
+        // 为什么要独立第三个，而不是复用 `_sideWriter`：
+        //   侧信道是 `ExceptionProbe`（FirstChance 观察者）的，**全程打开**；
+        //   而守卫账本由 `CrashGuard` 在启用时开。两者**生命周期不同**，
+        //   共用一个写手会互相把对方关掉（`OpenSide` 里第一件事就是关旧的）。
+        //   ⇒ 各自持有自己的写手，互不干扰。
+        //
+        // ⚠️ 与侧信道一样**强制逐行 flush**：守卫记录的都是"即将出事的时刻"，
+        //   缓冲住就等于没记。
+        private static readonly object _guardLock = new object();
+        private static StreamWriter _guardWriter;
+        private static string _guardFile;
+        private static string _guardLastError;
+
+        /// <summary>守卫账本路径（未打开时为空）。</summary>
+        public static string GuardFile
+        {
+            get { lock (_guardLock) { return _guardFile; } }
+        }
+
+        /// <summary>守卫账本最近一次错误（为空表示正常）。</summary>
+        public static string GuardLastError
+        {
+            get { lock (_guardLock) { return _guardLastError; } }
+        }
+
+        /// <summary>打开守卫账本（追加模式）。返回实际路径；失败返回 null 并记错误（**不抛**）。</summary>
+        public static string OpenGuardLog(string path, bool append)
+        {
+            lock (_guardLock)
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    FileStream fs = new FileStream(path,
+                        append ? FileMode.Append : FileMode.Create,
+                        FileAccess.Write, FileShare.ReadWrite);
+                    _guardWriter = new StreamWriter(fs, new UTF8Encoding(false));
+                    _guardWriter.AutoFlush = true;
+                    _guardFile = path;
+                    _guardLastError = null;
+                    return path;
+                }
+                catch (Exception ex)
+                {
+                    _guardWriter = null;
+                    _guardFile = null;
+                    _guardLastError = "OpenGuardLog: " + ex.GetType().Name + ": " + ex.Message;
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>写守卫账本一行（**无 writer 时静默返回**）。</summary>
+        public static void WriteGuardLog(string line)
+        {
+            lock (_guardLock)
+            {
+                if (_guardWriter == null) return;
+                try
+                {
+                    _guardWriter.WriteLine(line);
+                }
+                catch (Exception ex)
+                {
+                    _guardLastError = "WriteGuardLog: " + ex.GetType().Name + ": " + ex.Message;
+                }
+            }
+        }
+
+        /// <summary>关守卫账本（模块卸载）。</summary>
+        public static void CloseGuardLog()
+        {
+            lock (_guardLock)
+            {
+                if (_guardWriter == null) return;
+                try
+                {
+                    _guardWriter.Flush();
+                    _guardWriter.Dispose();
+                }
+                catch { }
+                _guardWriter = null;
+            }
+        }
     }
 }

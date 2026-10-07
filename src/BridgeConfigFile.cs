@@ -126,6 +126,29 @@ namespace BlBridge
                     }
                 }
 
+                if (Jmini.Has(raw, "crashGuardEnabled"))
+                {
+                    BridgeConfig.CrashGuardEnabled = Jmini.Bool(raw, "crashGuardEnabled",
+                        BridgeConfig.CrashGuardEnabled);
+                    any = true;
+                }
+
+                if (Jmini.Has(raw, "crashGuardSessionQuota"))
+                {
+                    double v = Jmini.Num(raw, "crashGuardSessionQuota", double.NaN);
+                    // 0 = 不限（仅调试）；上限 10000 —— 再高就等于"关掉配额"，
+                    // 而配额正是防"静默假活"的那道闸门，不该被配置绕过去。
+                    if (double.IsNaN(v) || v < 0.0 || v > 10000.0)
+                    {
+                        errs.Append("crashGuardSessionQuota 必须在 0（不限，仅调试）或 1~10000 之间，已忽略；");
+                    }
+                    else
+                    {
+                        BridgeConfig.CrashGuardSessionQuota = (int)v;
+                        any = true;
+                    }
+                }
+
                 Loaded = any;
                 Errors = errs.ToString();
                 return Errors;
@@ -149,6 +172,9 @@ namespace BlBridge
             sb.Append(",\"maxRequestAgeSeconds\":").Append(Jw.N(BridgeConfig.MaxRequestAgeSeconds));
             sb.Append(",\"maxActionLogBytes\":").Append(Jw.N(BridgeConfig.MaxActionLogBytes));
             sb.Append(",\"actionLogKeepFiles\":").Append(Jw.N(BridgeConfig.ActionLogKeepFiles));
+            // v0.8.49：崩溃守卫（默认 false —— 见 BridgeConfig 里的安全说明）
+            sb.Append(",\"crashGuardEnabled\":").Append(Jw.B(BridgeConfig.CrashGuardEnabled));
+            sb.Append(",\"crashGuardSessionQuota\":").Append(Jw.N(BridgeConfig.CrashGuardSessionQuota));
             sb.Append(",\"errors\":\"").Append(Jw.Esc(Errors)).Append('"');
             sb.Append(",\"note\":\"").Append(Jw.Esc(Loaded
                 ? "以上值已被配置文件覆盖（改完需重启游戏生效）"

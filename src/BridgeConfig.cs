@@ -56,6 +56,26 @@ namespace BlBridge
         /// <summary>v0.8.42：轮转时保留的归档个数（只在 `MaxActionLogBytes &gt; 0` 时生效）。</summary>
         public static int ActionLogKeepFiles = 5;
 
+        // ── 崩溃守卫（CrashGuard，v0.8.49）────────────────────────────────
+        //
+        // ★ 默认 false 是**刻意的安全决定**，不要"为了方便"改成 true。
+        //   吞异常 = 让"本该崩"的进程继续跑，但那个方法**没做完它该做的事**。
+        //   后果可能是**不崩溃、不报错**的静默损坏（存档不一致 / AI 卡死 / 数值错乱），
+        //   比崩溃更难查。⇒ 需要它的场合（无人值守长跑、演示、定位）显式打开。
+        //   详见 `CrashGuard` 类注释的"安全边界"一节。
+
+        /// <summary>
+        /// 是否启用崩溃守卫（在关键 tick 路径装 Harmony Finalizer 吞托管异常）。
+        /// **默认 false**；打开后仍需满足配额与熔断两道闸门，致命异常永不吞。
+        /// </summary>
+        public static bool CrashGuardEnabled = false;
+
+        /// <summary>
+        /// 本会话吞异常的**总配额**。0 = 不限（仅调试，不推荐）。
+        /// 默认 200：够熬过一次偶发崩溃，又不至于让游戏"假装活着"跑几小时。
+        /// </summary>
+        public static int CrashGuardSessionQuota = 200;
+
         private static string _logDir;
 
         public static string LogDir

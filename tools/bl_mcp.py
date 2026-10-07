@@ -1507,6 +1507,31 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_crashguard",
+        "description": ("**崩溃守卫账本（跳过崩溃的记账 + 修复建议）**："
+                        "读 `<日志目录>\\crashguard.jsonl`，回答「**哪些异常本来会杀掉游戏、"
+                        "被我们吞掉了**」以及「**哪些我们不敢吞**」，并**按异常类型给出修复建议**。"
+                        "与 `bl_exceptions` 的分工：那个答「发生过哪些异常」（FirstChance，全集），"
+                        "本工具只答「守卫放过了什么」——"
+                        "FirstChance **只能观察不能阻止**，Harmony Finalizer 才是唯一能阻止传播的钩子。"
+                        "⚠️ **`action=swallow` 不等于已修复**：吞掉只保证游戏没死，"
+                        "被吞的方法**没做完它该做的事**，可能留下**不报错**的静默损坏"
+                        "（存档不一致 / AI 卡死 / 数值错乱）—— 本工具据此标注，不报成「已修复」。"
+                        "⚠️ `reason=breaker_open`/`quota_exhausted` 是**坏消息**（守卫已停止保护），"
+                        "会被判 critical 并排在报告最前；`fatal_passthrough` 说明游戏**很可能仍崩了**"
+                        "（那类异常永不吞）⇒ 用 `bl_crash` 看 minidump。"
+                        "守卫**默认关闭**（`blbridge_game.json` 的 `crashGuardEnabled`）"
+                        "⇒ 文件不存在**不等于**没崩溃，以 `enabled` 字段为准。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "最多列几条，默认 20"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 同口径）"},
+                "path": {"type": "string", "description": "直接指定 crashguard.jsonl 路径"},
+            },
+        },
+    },
+    {
         "name": "bl_lexicon",
         "description": ("**崩溃词典（人话解释 + 修复建议）**：按异常类型或一段崩溃文本匹配词条，"
                         "返回描述、常见场景、修复建议。补的是 `bl_crash --deep` / `bl_exceptions` "
@@ -1831,6 +1856,7 @@ TOOL_GROUPS = {
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_lexicon",
+        "bl_crashguard",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
         # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
         "bl_dump", "bl_crash_test",
@@ -2520,6 +2546,16 @@ def call_tool(name, args):
             type_filter=args.get("type"),
             limit=int(args.get("limit") or 20),
             explain=bool(args.get("explain", True)),
+        )
+
+    if name == "bl_crashguard":
+        # 宿主侧工具：读崩溃守卫账本（谁被吞了/谁没敢吞）+ 给修复建议。
+        # **不碰游戏、不需要游戏在跑**（与 bl_crash / bl_exception_detail 同类）。
+        import bl_crashguard as _cg
+        return _cg.build_report(
+            log_dir=args.get("logDir"),
+            path=args.get("path"),
+            limit=int(args.get("limit") or 20),
         )
 
     if name == "bl_lexicon":

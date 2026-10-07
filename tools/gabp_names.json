@@ -455,6 +455,10 @@
     "bl_lexicon": {
       "gabp": "telemetry/explain_crash",
       "note": "宿主侧只读：崩溃词典（人话 + 常见场景 + 修复建议），补 bl_crash/bl_exceptions 只有符号栈的那一层。数据不随本仓库分发（上游无许可 ⇒ 默认保留所有权利），用 BLBRIDGE_LEXICON_DIR 指本地目录；缺数据如实报 installed=false。匹配是短语子串（MatchAny 任一 / MatchAll 全部 / ExcludeAny 排除），不是语义匹配；priority 只排序、不是置信度；zh 缺失时回退英文并如实标注 langFellBackToEn。"
+    },
+    "bl_crashguard": {
+      "gabp": "telemetry/audit_crash_guard",
+      "note": "宿主侧只读：读 crashguard.jsonl（Harmony Finalizer 吞异常的记账），回答「哪些异常本来会杀进程、被吞掉了」与「哪些没敢吞」，并按类型给修复建议。action=swallow **不等于已修复**（半完成调用可能已造成不报错的静默损坏）；reason=breaker_open/quota_exhausted 是坏消息（守卫已停止保护）；fatal_passthrough 说明游戏很可能仍崩了（OOM/栈溢出等永不吞）=> 用 bl_crash。守卫默认关闭 => 文件不存在不等于没崩溃，以 enabled 为准。"
     }
   }
 }
