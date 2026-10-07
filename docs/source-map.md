@@ -226,14 +226,58 @@ python tools\bl_source_map.py --stack "at Foo.Bar() 位置 /src/X.cs:行号 12"
 **且行号对得上**（实测）：索引 `get_Fade` → `line=69`，源码第 69 行正是方法体的 `{`
 （PDB 给的是**方法体第一个序列点**，所以落在 `{` 而非声明行 —— 语义正确）。
 
-### 6.2 ★ 但**绝不能按文件名跨 mod 找源码**
+### 6.2 ★ 实现方式：用 **PDB 里的原始路径**，不按文件名猜
 
-那正是本轮抓到的撞车 bug：`SubModule.cs` 在 **RBM / Bloodlust / BellumCivile /
-StrategicCampaignAI 每一个**第三方索引里都存在，而我们的主入口同名。
-按 basename 找 ⇒ 一条 RBM 的帧配上**我们的**源码 ⇒ agent 照着错代码改。
+更正早前的两处说法。实测发现 **PDB 里本来就记着完整源码路径**：
 
-⇒ 正确做法（尚未实现）：**先确定这帧属于哪个程序集，再在该程序集的源码根里找**。
-判据是"索引的 assembly ↔ 源码根"的映射，而不是文件名。
+```
+RBM.pdb 内含：G:\...\Modules\RBMDev\RBM\SubModule.cs
+```
+
+而首版抽取器用 `Path.GetFileName` 把它**截成 basename** ⇒ 目录信息永久丢失
+⇒ 只能靠文件名找 ⇒ 那正是撞车 bug（`SubModule.cs` 在每个第三方索引里都有）的根因。
+
+**修法**：索引里同时保留 `file`（basename，兼容既有消费者）与 **`docUrl`**（PDB 原始路径），
+定位时按 `docUrl` 读。
+
+**实测效果**（RBM 帧，`RBM.SubModule.OnSubModuleLoad` → `SubModule.cs:86`）：
+
+```
+   85 |         protected override void OnSubModuleLoad()
+>> 86 |         {
+   87 |             RBMConfig.RBMConfig.LoadConfig();
+   88 |             CustomBattlePreset.LoadPreset();
+```
+
+⇒ 这是 **RBM 自己的源码**，行号精确对上。
+
+### 6.3 ★★ 安全红线：PDB 路径是**不可信输入**
+
+那条路径是**第三方作者写进 PDB 的**。若照读，一个恶意/损坏的 PDB 就能让本工具
+去读任意文件（如 `C:\Users\<名字>\.ssh\id_rsa`）并渲染进报告。
+
+**三重判据（缺一不可）** —— `is_safe_source_path()`：
+
+| 判据 | 拒绝的输入（实测） |
+|---|---|
+| ① 必须落在**游戏目录内** | `C:\Windows\System32\drivers\etc\hosts` → 拒 |
+| ② 拒绝任何 `..` 段（防穿越） | `<game>\Modules\..\..\..\Windows\win.ini` → 拒 |
+| ③ 必须存在且是常规文件 | 不存在的路径 → 拒 |
+
+自测判据 14g-1..6 钉住这四条（含"合法样本必须允许"的反向对照，防判据过严）。
+
+⚠️ **边界（如实）**：仍可能读到"**游戏目录里的任意文件**" —— 这是刻意放宽的
+（源码树就该在游戏目录下，本机 RBMDev 正是如此）。要更严可限制在"该 mod 自己的
+模块目录"内；**本轮没做**，因为实测源码树常与 DLL 分属不同模块目录
+（DLL 在 `Modules/RBM/bin/...`，源码在 `Modules/RBMDev/RBM/`）。
+
+### 6.4 覆盖率（哪些第三方能配上源码）
+
+| 索引 | 源码覆盖 |
+|---|---|
+| RBM 全家族（RBM/RBMAI/RBMCampaign/RBMCombat/RBMConfig/RBMTournament）+ StrategicCampaignAI | **100%** |
+| 其余 56 个索引 | 部分覆盖（如 ButterLib 1/26 —— 只装了 DLL，没装源码） |
+| 剩下一批 | 完全无源码（PDB 里也没有源码路径） |
 
 ---
 

@@ -299,6 +299,34 @@ def main():
                       "bannerlord.mboptionscreen.v1.4.0" in vk and "rbm" not in vk,
                       repr(sorted(vk)))
 
+            # ── 14g ★ 第三方源码片段 + **路径安全检查**（v0.8.51）──
+            #
+            # 更正：本文件早前断言"第三方不给片段"。实测发现 **PDB 里记着完整源码路径**
+            # （RBM.pdb 内含 `G:\...\Modules\RBMDev\RBM\SubModule.cs`），
+            # 而本机模块目录下确实有 413 个 .cs ⇒ 片段**可以给**。
+            # 但那条路径是**第三方作者写的、不可信** ⇒ 必须过安全检查。
+            print("\n[14g] 第三方源码片段 + 路径安全检查")
+            g = sm._game_root()
+            # 应拒（三条互不相同的原因）
+            ok1, w1 = sm.is_safe_source_path(r"C:\Windows\System32\drivers\etc\hosts")
+            check("14g-1 游戏目录外的路径**必须被拒**", not ok1, w1)
+            ok2, w2 = sm.is_safe_source_path(g + r"\Modules\..\..\..\Windows\win.ini")
+            check("14g-2 含 `..` 的路径**必须被拒**（防穿越）", not ok2, w2)
+            ok3, _ = sm.is_safe_source_path("")
+            check("14g-3 空路径被拒", not ok3)
+            ok4, _ = sm.is_safe_source_path(g + r"\Modules\NoSuchFile_xyz.cs")
+            check("14g-4 不存在的文件被拒", not ok4)
+            # 应允：游戏目录内、真实存在的源码（拿我们自己的 SubModule.cs 当样本，
+            # 它在游戏目录外 ⇒ 需要临时把 game_root 指到仓库根来构造"合法"样本）
+            ok5, w5 = sm.is_safe_source_path(os.path.join(sm.REPO, "src", "SubModule.cs"),
+                                             game_root=sm.REPO)
+            check("14g-5 对照：位于受信根内的真实文件**允许**",
+                  ok5, "合法样本也被拒 ⇒ 判据过严：%s" % w5)
+            # 端到端：恶意路径不得渲染进片段
+            snip, why = sm.read_foreign_snippet(r"C:\Windows\win.ini", 1)
+            check("14g-6 端到端：读游戏目录外文件返回 None",
+                  snip is None and bool(why), repr((snip, why)))
+
         # ── 12：只读 ──
         print("\n[12] 只读（不修改源文件）")
         before = {}

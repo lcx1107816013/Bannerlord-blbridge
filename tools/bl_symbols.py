@@ -191,10 +191,20 @@ public static class Extractor
                 var first = pts.First();
                 var last = pts.Last();
                 string full = t.FullName + "." + m.Name;
+                // ★ 同时保留 `file`（basename，兼容既有消费者）与 `docUrl`（PDB 原始路径）。
+                //
+                // 为什么留 docUrl（实测 2026-10-07）：PDB 里其实**记着完整源码路径** ——
+                // 实测 RBM.pdb 内含
+                //   `G:\...\Modules\RBMDev\RBM\SubModule.cs`
+                // 而首版用 `Path.GetFileName` 把它截成 basename ⇒ **目录信息永久丢失**
+                // ⇒ 无法按"程序集 → 源码根"定位，只能靠文件名猜（那正是撞车 bug 的根因）。
+                // ⚠️ 该路径来自第三方 PDB，是**不可信输入** —— 消费侧必须做前缀校验
+                //     （只允许落在游戏目录内），见 bl_source_map 的 foreign_source_root。
                 rows.Add(string.Format(
-                    "{{\"method\":{0},\"type\":{1},\"name\":{2},\"file\":{3},\"line\":{4},\"endLine\":{5},\"points\":{6}}}",
+                    "{{\"method\":{0},\"type\":{1},\"name\":{2},\"file\":{3},\"line\":{4},\"endLine\":{5},\"points\":{6},\"docUrl\":{7}}}",
                     J(full), J(t.FullName), J(m.Name),
-                    J(Path.GetFileName(first.Document.Url)), first.StartLine, last.EndLine, pts.Count));
+                    J(Path.GetFileName(first.Document.Url)), first.StartLine, last.EndLine, pts.Count,
+                    J(first.Document.Url)));
             }
         }
         if (withPts == 0) return 1;

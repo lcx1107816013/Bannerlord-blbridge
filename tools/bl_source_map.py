@@ -419,6 +419,80 @@ def read_source_snippet(file_name, line, before=4, after=6, src_dir=None,
     return {"path": p, "startLine": lo, "endLine": hi, "text": "\n".join(out)}
 
 
+# ── 第三方源码片段（v0.8.51）─────────────────────────────────────────────
+#
+# ## 修正一个错误说法
+#
+# 本文件早前写过"第三方源码片段永远没有" —— **那是错的**。实测：
+#   · 本机模块目录下有 **413 个 `.cs`**（`RBMDev` 394 + `StrategicCampaignAI` 19）；
+#   · 更关键：**PDB 里本来就记着完整源码路径**，实测 RBM.pdb 内含
+#     `G:\...\Modules\RBMDev\RBM\SubModule.cs`（首版用 Path.GetFileName 截成了 basename，
+#     把目录信息丢了 ⇒ 只能靠文件名猜 ⇒ 那正是撞车 bug 的根因）。
+#
+# ## ★ 但 PDB 里的路径是**不可信输入**，必须过安全关
+#
+# 那条路径是**第三方作者写进 PDB 的**。若直接照读，一个恶意/损坏的 PDB
+# 就能让本工具去读任意文件（如 `C:\Users\<名字>\.ssh\id_rsa`）并把它渲染进报告。
+#
+# ⇒ 判据（三重，缺一不可）：
+#   ① **必须落在游戏目录内**（`<game>/Modules/**` 或 `<game>/bin/**`）；
+#   ② 拒绝任何 `..` 段（防路径穿越）；
+#   ③ 文件必须真实存在且是常规文件。
+#
+# ⚠️ 边界（如实）：**仍可能读到"游戏目录里的任意文件"** —— 这是刻意放宽的：
+#    源码树就该在游戏目录下（本机 RBMDev 正是如此）。要更严，可把它限制在
+#    "<该 mod 自己的模块目录>" 内；本轮没做，因为源码树常与 DLL 分属不同模块目录
+#    （实测：DLL 在 `Modules/RBM/bin/...`，源码在 `Modules/RBMDev/RBM/`）。
+
+def _game_root():
+    return (os.environ.get("BANNERLORD_DIR")
+            or r"G:\Program Files (x86)\Steam\steamapps\common\Mount & Blade II Bannerlord")
+
+
+def is_safe_source_path(path, game_root=None):
+    """第三方 PDB 里的路径是否**允许读取**（三重判据，见上方长注释）。"""
+    if not path:
+        return False, "路径为空"
+    p = str(path).replace("\\", "/")
+    # ② 拒绝路径穿越
+    if ".." in p.split("/"):
+        return False, "含 `..` 段（路径穿越）"
+    # ① 必须落在游戏目录内
+    g = (game_root or _game_root()).replace("\\", "/").rstrip("/")
+    if not p.lower().startswith(g.lower() + "/"):
+        return False, "不在游戏目录内（第三方 PDB 的路径不可信，只允许读游戏目录）"
+    # ③ 存在且是常规文件
+    try:
+        if not os.path.isfile(path):
+            return False, "文件不存在"
+    except Exception as exc:                              # noqa: BLE001
+        return False, "路径不可访问：%s" % type(exc).__name__
+    return True, ""
+
+
+def read_foreign_snippet(doc_url, line, before=4, after=6, game_root=None):
+    """按 **PDB 原始路径**读第三方源码片段（经安全检查）。读不到就如实返回 None。"""
+    ok, why = is_safe_source_path(doc_url, game_root)
+    if not ok:
+        return None, why
+    try:
+        lines = io.open(doc_url, "r", encoding="utf-8-sig", errors="replace").read().split("\n")
+    except Exception as exc:                              # noqa: BLE001
+        return None, "读取失败：%s" % type(exc).__name__
+    if not line or int(line) < 1 or int(line) > len(lines):
+        # 行号越界 ⇒ 该 PDB 与磁盘源码**不是同一份**（很可能源码已改动）
+        # ⇒ 如实不给片段，绝不截断出一个错位置。
+        return None, ("行号 %s 超出该文件 %d 行 ⇒ PDB 与磁盘源码**不是同一份**"
+                      "（源码可能已改动）" % (line, len(lines)))
+    lo = max(1, int(line) - before)
+    hi = min(len(lines), int(line) + after)
+    out = []
+    for i in range(lo, hi + 1):
+        mark = ">>" if i == int(line) else "  "
+        out.append("%s %5d | %s" % (mark, i, lines[i - 1].rstrip("\r")))
+    return {"path": doc_url, "startLine": lo, "endLine": hi, "text": "\n".join(out)}, ""
+
+
 def analyze(stack_text=None, records=None, resolve=None, src_dir=None):
     """主入口：解析栈 → 逐帧定位 → 附源码片段。"""
     index = load_index()
@@ -520,11 +594,29 @@ def analyze(stack_text=None, records=None, resolve=None, src_dir=None):
                         item["locatedBy"] = "thirdparty"
                         item["assembly"] = tp.get("assembly")
                         item["alsoIn"] = tp.get("alsoIn")
-                        # 第三方源码**不在我们仓库** ⇒ 没有源码片段可给
-                        # （如实标注，不要让调用方以为"片段缺失 = 工具坏了"）
-                        item["snippet"] = None
-                        item["sourceNote"] = ("第三方程序集 —— 行号来自其自带 PDB；"
-                                              "本仓库没有它的源码，故无片段。")
+                        # ★ 第三方源码片段：按 **PDB 里的原始路径**读（经安全检查）。
+                        #
+                        # ⚠️ 更正：本文件早前写"第三方源码片段永远没有" —— **那是错的**。
+                        #    实测 PDB 里记着完整路径（如 RBM.pdb 内含
+                        #    `G:\...\Modules\RBMDev\RBM\SubModule.cs`），且本机模块目录下
+                        #    确实有 413 个 .cs（RBMDev 394 + StrategicCampaignAI 19）。
+                        #    首版把路径截成 basename ⇒ 目录信息丢了 ⇒ 只能靠文件名猜。
+                        # ⚠️ 该路径是**第三方作者写的，不可信** ⇒ 必须过三重安全检查
+                        #    （在游戏目录内 / 无 `..` / 文件真实存在），见 is_safe_source_path。
+                        snip, why = (None, "")
+                        doc_url = tp.get("docUrl")
+                        if doc_url:
+                            snip, why = read_foreign_snippet(doc_url, tp.get("line"))
+                        if snip:
+                            item["snippet"] = snip
+                            item["snippetFrom"] = "pdb-path"
+                        else:
+                            item["snippet"] = None
+                            item["sourceNote"] = (
+                                ("第三方程序集 —— 行号来自其自带 PDB；未能给出源码片段：%s" % why)
+                                if why else
+                                ("第三方程序集 —— 行号来自其自带 PDB；"
+                                 "该 PDB 未记录源码路径，故无片段。"))
                     elif cands and not any(_line_is_plausible(c.get("line"))
                                            for c in cands):
                         # ★ 有命中但行号**不可信**（实测 16707566 那种 PDB 损坏）
