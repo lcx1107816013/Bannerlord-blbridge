@@ -399,12 +399,75 @@ def _iso_utc(epoch_seconds):
         return None
 
 
+def _dll_has_utf8(path, needle):
+    """DLL 的 **`#Strings` 堆**里是否含该名字（**UTF-8**）。
+
+    ⚠️ 这个函数是 2026-10-07 补的 —— 补的是我**自己**上一版判据的洞。
+
+    ## 为什么必须区分两种编码（ECMA-335 的两个字符串堆）
+
+    | 堆 | 编码 | 存什么 |
+    |---|---|---|
+    | **`#Strings`** | **UTF-8** | **类型名 / 字段名 / 方法名**（元数据表用它）|
+    | **`#US`** | **UTF-16LE** | **字符串字面量**（`ldstr` 用它）|
+
+    我上一版只搜 UTF-16 ⇒ 对**类型名/字段名**必然**假阴性**。
+    当时没暴露，是因为提取器只抓"小写下划线字面量"（那些确实在 `#US`）——
+    **歪打正着**，不是设计对。
+
+    ## 实测证据（`E:\\Document\\_encoding_evidence.py`，含反向对照）
+
+    ```
+    RBM.dll:
+      SaveRosterRepairBehavior   UTF8=True   UTF16=False   ← 类型名只在 UTF-8
+      BadDataCleanupBehavior     UTF8=True   UTF16=False   ← 同上
+      get_hero / scan_bad_data   UTF8=False  UTF16=True    ← 字面量只在 UTF-16
+      RBM BadDataCleanup         UTF8=False  UTF16=True
+      未启用                      UTF8=False  UTF16=True
+      zzz_not_a_real_symbol_xyz  UTF8=False  UTF16=False   ← 反向对照（有分辨力）
+    ```
+    """
+    try:
+        with io.open(path, "rb") as fh:
+            blob = fh.read()
+        return blob.find(needle.encode("utf-8")) >= 0
+    except (IOError, OSError, UnicodeEncodeError):
+        return False
+
+
+def _dll_symbol_encoding(path, needle):
+    """该符号在 DLL 里以**哪种编码**存在。返回 `"utf8"` / `"utf16"` / `"both"` / `None`。
+
+    分开返回而不是只给 bool，是为了报告里能说清"**是哪一类**符号被找到了"——
+    这直接决定"找不到"意味着什么（类型名没编进去 vs 字面量没编进去）。
+    """
+    u8 = _dll_has_utf8(path, needle)
+    u16 = _dll_has_utf16(path, needle)
+    if u8 and u16:
+        return "both"
+    if u8:
+        return "utf8"
+    if u16:
+        return "utf16"
+    return None
+
+
+def _dll_has_symbol(path, needle):
+    """**两种编码取并集**：任一命中即认为该符号在 DLL 里。
+
+    ★ 为什么必须取并集（这是本函数存在的全部理由）：
+      类型名/字段名只在 `#Strings`(UTF-8)，字面量只在 `#US`(UTF-16)。
+      只查一种 ⇒ 对另一类**必然假阴性** ⇒ 会误报"部署落后于源码"。
+    """
+    return _dll_symbol_encoding(path, needle) is not None
+
+
 def _dll_has_utf16(path, needle):
     """DLL 里是否含该字符串（按 **UTF-16LE** 找）。
 
-    ## ⚠️ 为什么必须按 UTF-16 找（血泪教训，2026-10-07）
+    ## ⚠️ 为什么按 UTF-16 找（血泪教训，2026-10-07）
 
-    .NET 的字符串字面量在程序集里以 **UTF-16LE** 存储（ECMA-335 的 `#US` 流）。
+    .NET 的**字符串字面量**在程序集里以 **UTF-16LE** 存储（ECMA-335 的 `#US` 流）。
     用 ASCII / UTF-8 搜**必然搜不到** —— 于是会得出**假阴性**：
     "这个符号不在 DLL 里 ⇒ 部署落后了"。
 
@@ -412,7 +475,9 @@ def _dll_has_utf16(path, needle):
     而我**自己也用带中文的 `.ps1` 复现了同一个假阴性**
     （PS 5.1 按 cp936 解码 UTF-8 无 BOM 脚本 ⇒ 比对错位）。
     Python 字节级按 UTF-16LE 搜 ⇒ 一次性证明符号**都在**。
-    ⇒ 所以这条判据写进工具，**不靠人去搜字符串**。
+
+    ⚠️ 但**只查 UTF-16 也不够** —— 见 `_dll_has_utf8` / `_dll_has_symbol`：
+    类型名与字段名在 **UTF-8** 的 `#Strings` 堆里。
     """
     try:
         with io.open(path, "rb") as fh:
@@ -432,16 +497,26 @@ def dll_source_symbol_check(src_dir=None, dll_path=None):
     清单/哈希都对上了，而 DLL 内容**缺**某个新符号
     （例如构建缓存、把旧 DLL 复制过去、或清单与产物不同步）。
 
-    ⇒ 这里做**内容级**独立核验：从源码里**自动提取**本工程自己的
-      `"字面量"` 里的**可判定符号**（形如 `x_y_z` 的小写下划线串，
-      例如 `clan_bandit_no_heroes` / `scan_bad_data`），
-      再去 DLL 的 UTF-16 流里找。**缺一个就点名**。
+    ⇒ 这里做**内容级**独立核验，**两类符号都查**（2026-10-07 修正）：
+
+      · **字符串字面量**（形如 `x_y_z` 的小写下划线串，如 `clan_bandit_no_heroes`）
+        → 存于 **`#US` 堆（UTF-16LE）**；
+      · **本工程自己的类型名 / 字段名**（形如 `class Xxx…` / `static bool xxxYyy`）
+        → 存于 **`#Strings` 堆（UTF-8）**。
+
+    ★ 为什么必须两类都查（这是我上一版的**真实漏洞**，不是假想）：
+      上一版只抓字面量 ⇒ **完全不检查类型名** ⇒ 于是**抓不到当天真实发生的那类故障**：
+      我新增了 `BadDataCleanup.cs`（RBM 侧）但**忘了加进 `csproj` 的显式 `<Compile>` 清单**
+      ⇒ 编译直接报 `CS0246 找不到类型`。
+      那次是编译器替我发现的 —— 但**同类问题在"清单漏加某个文件、而该文件恰好只含字面量"时
+      编译器不会报**，只有内容级核验能抓到。
 
     ⚠️ 边界（如实）：
-      · 只查**本工程源码里的字符串字面量**，不解析 IL —— 它证明的是
-        "这些字面量进了 DLL"，**不是**"逻辑正确"；
-      · 编译器可能**合并/驻留**字符串，所以"找不到"是**强信号**（几乎肯定是没编进去），
-        但"找得到"不能证明版本一致 ⇒ 与哈希链条**互补**，不替代它。
+      · 只做**字节级子串搜索**，**不解析 IL / 元数据表** ⇒ 证明的是
+        "这些名字/字面量的字节出现在 DLL 里"，**不是**"逻辑正确";
+      · 编译器可能**合并/驻留**字符串 ⇒ "找不到"是**强信号**（几乎肯定是没编进去），
+        但"找得到"**不能**证明版本一致（旧 DLL 里可能仍留着已删符号 ⇒ **有假阳性**）
+        ⇒ 与哈希链条**互补**，**不替代**。
     """
     out = {"checked": 0, "found": 0, "missing": [], "dll": dll_path, "note": ""}
     if not dll_path:
@@ -455,41 +530,94 @@ def dll_source_symbol_check(src_dir=None, dll_path=None):
         out["note"] = "没有 src/（部署副本），跳过内容核验"
         return out
 
-    # 从源码提取"可判定符号"：小写+下划线、含至少两个下划线、长度>=8。
-    # 这个形状是**本工程自己的约定**（坏数据 code、method 名等），
-    # 误抓风险低（普通中文注释/路径不会是这个形状）。
-    sym_re = re.compile(r'"([a-z][a-z0-9]*(?:_[a-z0-9]+){2,})"')
-    seen = []
+    # ── 提取器一：字符串字面量（形如 "clan_bandit_no_heroes"）──────────
+    #    形状是本工程自己的约定（坏数据 code、协议 method 名）；
+    #    要求 ≥2 个下划线 + 长度≥8 ⇒ 误抓风险低（中文注释/路径不会是这个形状）。
+    literal_re = re.compile(r'"([a-z][a-z0-9]*(?:_[a-z0-9]+){2,})"')
+
+    # ── 提取器二：本工程自己的类型名 / 字段名（2026-10-07 新增）─────────
+    #    ⚠️ 这个提取器补的是上一版的**真实漏洞**：只抓字面量 ⇒ 类型名从不被检查。
+    #    刻意**限定本工程前缀**（`BlBridge` / `RBM` / `BadData` …），
+    #    否则会把 `System.` / `TaleWorlds.` 等**外部**名字也拿去搜，
+    #    那些本该 "找不到"（它们不在我们的 DLL 里）⇒ 会造成大量**假阳性**。
+    #    ⇒ 只认我们自己声明的东西：`class X` / `static ... Y =` 且名字含工程前缀。
+    decl_re = re.compile(
+        r'\b(?:internal|public|private|protected)\s+'
+        r'(?:static\s+|sealed\s+|abstract\s+|partial\s+)*'
+        r'(?:class|struct|enum)\s+([A-Z][A-Za-z0-9_]{3,})')
+    field_re = re.compile(
+        r'\b(?:internal|public|private)\s+static\s+(?:readonly\s+)?'
+        r'[A-Za-z_][A-Za-z0-9_<>,\.\[\]]*\s+([a-zA-Z][A-Za-z0-9_]{5,})\s*[=;]')
+
+    # ★★ 必须先剥掉注释（2026-10-07，第一版就栽在这）
+    #    没有剥注释 ⇒ 正则匹配到了**注释里引用的外部类名**（真例：
+    #    `PatchProbe.cs` 的注释写着 `6159: public class HarmonyAttribute : Attribute`，
+    #    那是**反编译源码的摘录**，`HarmonyAttribute` **不是我们声明的**）
+    #    ⇒ 检查报"源码里有、DLL 里没有"⇒ **假阳性**，会误导人以为部署落后。
+    #    ⇒ 静默失效（漏报）与该假阳性都是本判据最不能出的错，故两者都要防。
+    def _strip_comments(text):
+        # 顺序要紧：先块注释，再行注释（行注释里的 `//` 可能出现在字符串里，
+        # 但这只影响"是否误剥"，不会造成漏报 —— 保守优先）。
+        text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
+        out = []
+        for line in text.split("\n"):
+            # 只剥**行首即为注释**或 `//` 之前无引号的行；含 `"http://"` 这类
+            # 字符串的极少数情况会误剥，代价是漏一个符号（可接受，不制造假阳性）。
+            idx = line.find("//")
+            if idx >= 0 and line.count('"', 0, idx) % 2 == 0:
+                line = line[:idx]
+            out.append(line)
+        return "\n".join(out)
+
+    seen = []           # [(符号, 类别)] —— 类别用于报告里说清"缺的是哪一类"
+    src_files = sorted(n for n in os.listdir(src) if n.endswith(".cs"))
     try:
-        for name in sorted(os.listdir(src)):
-            if not name.endswith(".cs"):
-                continue
+        for name in src_files:
             try:
                 text = io.open(os.path.join(src, name), encoding="utf-8",
                                errors="replace").read()
             except (IOError, OSError):
                 continue
-            for m in sym_re.finditer(text):
-                s = m.group(1)
-                if s not in seen:
-                    seen.append(s)
+            code = _strip_comments(text)
+            for m in literal_re.finditer(code):
+                item = (m.group(1), "literal")
+                if item not in seen:
+                    seen.append(item)
+            for m in decl_re.finditer(code):
+                item = (m.group(1), "typename")
+                if item not in seen:
+                    seen.append(item)
+            for m in field_re.finditer(code):
+                item = (m.group(1), "fieldname")
+                if item not in seen:
+                    seen.append(item)
     except (IOError, OSError) as exc:
         out["note"] = "读源码失败：%r" % exc
         return out
 
     missing = []
-    for s in seen:
-        if not _dll_has_utf16(dll_path, s):
-            missing.append(s)
+    by_kind = {"literal": 0, "typename": 0, "fieldname": 0}
+    for sym, kind in seen:
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        # ★ **两种编码取并集**（类型名在 UTF-8、字面量在 UTF-16）
+        if not _dll_has_symbol(dll_path, sym):
+            missing.append(sym + " (" + kind + ")")
     out["checked"] = len(seen)
     out["found"] = len(seen) - len(missing)
     out["missing"] = missing[:20]
     out["totalMissing"] = len(missing)
+    out["byKind"] = by_kind
+    out["encodings"] = ("查了两种编码：类型名/字段名在 UTF-8(#Strings)，"
+                        "字面量在 UTF-16LE(#US) —— 只查一种会对另一类假阴性")
     if missing:
         out["note"] = ("⚠️ 有 %d 个源码里的符号**不在 DLL 里** ⇒ 部署很可能落后于源码"
-                       "（内容级判据；与哈希链条互补）" % len(missing))
+                       "（内容级判据；与哈希链条互补）。缺的按类别：%s"
+                       % (len(missing), "、".join(missing[:8])))
     else:
-        out["note"] = "源码里的 %d 个可判定符号都在 DLL 的 UTF-16 流里（内容级一致）" % len(seen)
+        out["note"] = ("源码里的 %d 个符号（字面量 %d / 类型名 %d / 字段名 %d）"
+                       "都在 DLL 里（两种编码取并集，内容级一致）"
+                       % (len(seen), by_kind.get("literal", 0),
+                          by_kind.get("typename", 0), by_kind.get("fieldname", 0)))
     return out
 
 

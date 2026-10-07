@@ -1576,17 +1576,32 @@ def main():
     except Exception as exc:  # noqa: BLE001
         check(False, "config 读写检查", repr(exc))
 
-    # ── 源码 ↔ 已部署 DLL 的**内容级**核验（2026-10-07 用户要求补）──────────
+    # ── 源码 ↔ 已部署 DLL 的**内容级**核验（2026-10-07 用户要求补；同日修正）──
     #
     # 为什么要它：`build_check` 的四段链条用**哈希**，抓不到"DLL 内容缺新符号"
     #   （构建缓存、把旧 DLL 复制过去、清单与产物不同步都会造成）。
     #   实测背景：隔壁会话用 **ASCII** 搜 DLL 报"部署落后（缺 get_hero）" —— 那是**假阴性**
     #   （.NET 字符串是 **UTF-16LE**）。⇒ 把正确的查法写进工具，不靠人去搜。
+    #
+    # ★ 同日修正（**这条是补我自己上一版的洞**）：
+    #   ECMA-335 有**两个**字符串堆，编码不同：
+    #     · `#Strings` = **UTF-8**  ⇒ 类型名 / 字段名 / 方法名
+    #     · `#US`      = **UTF-16LE** ⇒ 字符串字面量
+    #   上一版只搜 UTF-16 ⇒ 对**类型名/字段名必然假阴性**（当时因提取器只抓字面量而未暴露，
+    #   属**歪打正着**）。而且它**从不检查类型名** ⇒ 抓不到当天真实发生的故障形态：
+    #   新增 `BadDataCleanup.cs` 却**忘加进 csproj 显式 <Compile>**（编译报 CS0246 才发现）。
+    #   ⇒ 现在：**提取器查三类**（字面量/类型名/字段名），**核验取两种编码的并集**。
     print()
     print("=" * 90)
-    print("③b 源码 ↔ 已部署 DLL 内容核验（UTF-16 字节级；含反向对照）")
+    print("③b 源码 ↔ 已部署 DLL 内容核验（两类编码 + 三类符号；含多重反向对照）")
     print("=" * 90)
     try:
+        # ⚠️ **不要**在这里 `import tempfile` / `import bl_mcp` 之类 ——
+        #    函数级的 `import X` 会让 `X` 在整个 `main()` 里变成**局部变量**（Python 作用域规则），
+        #    于是它**前面**的 `tempfile.mkdtemp(...)` 会抛
+        #    `UnboundLocalError: cannot access local variable 'tempfile'`。
+        #    （我第一版就这么写，把整个自测跑挂了 —— 实测抓出来的。）
+        #    ⇒ `tempfile` / `shutil` / `bl_mcp` / `io` / `os` 在文件顶部或上文已导入，直接用。
         import bl_mcp
         dll = bl_mcp.deployed_dll_path()
         print("  dll = %s" % dll)
@@ -1594,26 +1609,74 @@ def main():
             check(True, "③b 跳过（本机没有部署副本）", "deployed dll 不存在")
         else:
             r = bl_mcp.dll_source_symbol_check()
-            print("  源码可判定符号 %s 个，DLL 里找到 %s 个，缺 %s 个"
-                  % (r.get("checked"), r.get("found"), r.get("totalMissing")))
+            print("  检查了 %s 个符号（%s），缺 %s 个"
+                  % (r.get("checked"), r.get("byKind"), r.get("totalMissing")))
             check(r.get("checked") > 0,
                   "③b 确实提取到了符号（不是空跑）", r.get("checked"))
+
+            # ★ 三类符号**都要**被提取到（否则等于某个维度没查）
+            bk = r.get("byKind") or {}
+            check((bk.get("literal") or 0) > 0, "③b 提取到**字面量**（#US/UTF-16 那一类）", bk)
+            check((bk.get("typename") or 0) > 0, "③b 提取到**类型名**（#Strings/UTF-8 那一类）", bk)
+            check((bk.get("fieldname") or 0) > 0, "③b 提取到**字段名**", bk)
+
             check((r.get("totalMissing") or 0) == 0,
                   "③b 源码符号都在已部署 DLL 里（内容级一致）", r.get("missing"))
-            # ★ 反向对照：这个检查必须**有分辨力**，否则"恒通过"毫无意义
-            check(bl_mcp._dll_has_utf16(dll, "scan_bad_data") is True,
-                  "③b 对照: 真符号（scan_bad_data）判 True", "应为 True")
-            check(bl_mcp._dll_has_utf16(dll, "zzz_not_a_real_symbol_xyz") is False,
-                  "③b 对照: 假符号判 False ⇒ 检查有分辨力（非恒过）", "应为 False")
-            # ★ 反向对照 2：UTF-16 与 ASCII 的差别必须被体现
-            #   （这正是隔壁会话假阴性的根因 —— ASCII 搜不到 UTF-16 字符串）
-            with io.open(dll, "rb") as fh:
-                blob = fh.read()
-            check(blob.find(b"scan_bad_data") < 0,
-                  "③b 对照: 同一符号用 **ASCII** 搜确实找不到 ⇒ 证实 UTF-16 是必须的",
-                  "ASCII 竟找到了（那 UTF-16 的说明要复核）")
-            check(r.get("symbolCheckSkipped") is None and "note" in r,
-                  "③b 返回里带可读说明（便于人复核）", r.get("note"))
+
+            # ── 对照 1：编码归属必须**可区分**（这是本次修正的核心）────────
+            #    类型名应只在 UTF-8 命中；字面量应只在 UTF-16 命中。
+            check(bl_mcp._dll_symbol_encoding(dll, "CampaignReadProbe") == "utf8",
+                  "③b ★ 类型名只在 UTF-8(#Strings) 命中 ⇒ 证实必须查两种编码",
+                  bl_mcp._dll_symbol_encoding(dll, "CampaignReadProbe"))
+            check(bl_mcp._dll_symbol_encoding(dll, "scan_bad_data") == "utf16",
+                  "③b ★ 字面量只在 UTF-16(#US) 命中 ⇒ 证实必须查两种编码",
+                  bl_mcp._dll_symbol_encoding(dll, "scan_bad_data"))
+
+            # ── 对照 2：旧实现（只搜 UTF-16）对类型名会**假阴性** ──────────
+            check(bl_mcp._dll_has_utf16(dll, "CampaignReadProbe") is False,
+                  "③b ★ 证据：只搜 UTF-16 会**漏掉**类型名（旧版判据的洞）", "应为 False")
+            check(bl_mcp._dll_has_symbol(dll, "CampaignReadProbe") is True,
+                  "③b ★ 并集判据能正确判出类型名（修好了）", "应为 True")
+
+            # ── 对照 3：假符号必须两种编码都不命中（有分辨力）──────────────
+            check(bl_mcp._dll_symbol_encoding(dll, "zzz_not_a_real_symbol_xyz") is None,
+                  "③b 对照: 假符号两种编码都不命中 ⇒ 检查有分辨力（非恒过）", "应为 None")
+
+            # ── 对照 4（最强）：**模拟"类型名没编进 DLL" ⇒ 必须报出来** ──────
+            #    这是判据的**存在理由**：恒返回 [] 的检查毫无价值。
+            #    做法：临时 src + 真 DLL 副本，注入一个源码里有、DLL 里没有的类型。
+            tmp = tempfile.mkdtemp(prefix="symcheck_selftest_")
+            try:
+                srcdir = os.path.join(tmp, "src")
+                os.makedirs(srcdir)
+                with io.open(os.path.join(srcdir, "Injected.cs"), "w",
+                             encoding="utf-8") as fh:
+                    fh.write("namespace BlBridge {\n"
+                             "    internal static class ZzzInjectedFakeTypeXyzQq\n"
+                             "    {\n"
+                             "        internal static bool zzzInjectedFakeFieldQq = false;\n"
+                             "    }\n"
+                             "}\n")
+                dllcopy = os.path.join(tmp, "copy.dll")
+                shutil.copy2(dll, dllcopy)
+                inj = bl_mcp.dll_source_symbol_check(src_dir=srcdir, dll_path=dllcopy)
+                print("  注入假类型后: checked=%s totalMissing=%s missing=%s"
+                      % (inj.get("checked"), inj.get("totalMissing"), inj.get("missing")))
+                check((inj.get("totalMissing") or 0) >= 2,
+                      "③b ★★ 注入'类型名没编进 DLL' ⇒ 检查**报出来了**（判据真的在判定）",
+                      inj.get("missing"))
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+            # ── 对照 5：注释里的外部类名**不许**被当成本工程符号（防假阳性）──
+            #    真例：`PatchProbe.cs` 注释摘录了 `public class HarmonyAttribute`
+            #    （那是反编译源码里的**外部**类），第一版没剥注释 ⇒ 报了假阳性。
+            check("HarmonyAttribute" not in " ".join(r.get("missing") or []),
+                  "③b ★ 注释里引用的外部类名**不**被判为缺失（防假阳性）",
+                  r.get("missing"))
+
+            check("note" in r and r.get("encodings"),
+                  "③b 返回里带可读说明 + 编码口径（便于人复核）", r.get("note"))
     except Exception as exc:  # noqa: BLE001
         check(False, "源码↔DLL 内容核验", repr(exc))
 
