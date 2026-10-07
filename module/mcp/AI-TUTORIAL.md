@@ -14,7 +14,7 @@
 | 单元 | 位置 | 谁读它 | 入口 |
 |---|---|---|---|
 | **A：mod 本体** | `<游戏根>\Modules\BlBridge\`（`SubModule.xml` + `bin\Win64_Shipping_Client\BlBridge.dll`） | 游戏与启动器 | 官方自定义战斗界面（玩家用） |
-| **B：MCP 子包** | `<游戏根>\Modules\BlBridge\mcp\`（**本目录**） | **AI（你）** | MCP 工具（**59 个**；不设 `BLBRIDGE_TOOLSET` 时全量暴露，常用的 `core+config+lab` 组合是 55 个） |
+| **B：MCP 子包** | `<游戏根>\Modules\BlBridge\mcp\`（**本目录**） | **AI（你）** | MCP 工具（**61 个**；不设 `BLBRIDGE_TOOLSET` 时全量暴露，常用的 `core+config+lab` 组合是 57 个） |
 
 两个单元**共用同一条后端**：玩家在界面上的操作与 MCP 的工具最终落到同一条官方开战链。
 所以谱系上不存在"界面能做、端口做不了"——唯一例外是"用鼠标点选"这个动作本身。

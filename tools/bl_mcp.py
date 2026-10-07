@@ -1532,6 +1532,49 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_save_diag",
+        "description": ("**存档诊断（宿主侧，只读）**：比对「存档里记录的模组集」与"
+                        "「启动器当前启用的模组集」，找出**会导致读档崩溃的不一致**："
+                        "① 存档需要但当前**未启用**的模组；② **版本漂移**（框架级高风险）；"
+                        "③ 存档自身的 `isCorrupted` 标记；④ 当前新加的模组（多数无害）。"
+                        "⚠️ **本工具只读**：不写、不改、不备份存档 —— 存档修复是最难验证的一环"
+                        "（能读到'文件能打开'≠'战役数据没被改坏'），所以只给判断与建议。"
+                        "⚠️ **缺模组 ≠ 一定崩**，只说明风险：那个 mod 的数据还在存档里、代码不在。"
+                        "⚠️ **版本不同 ≠ 不安全**：按 framework/content 分级标风险，不搞一刀切。"
+                        "游戏本体模块（Native/SandBox 等）随游戏版本变，已降级处理，否则人人报错。"
+                        "存档清单取自**最近一次** `bl_list_saves` 的响应；没采集过会如实说明。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "最多诊断几个存档"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 同口径）"},
+                "launcher": {"type": "string", "description": "LauncherData.xml 路径（默认自动定位）"},
+            },
+        },
+    },
+    {
+        "name": "bl_report",
+        "description": ("**崩溃报告导出（宿主侧，只读）**：把三个数据源合成一份"
+                        "**自包含**报告 —— `crashguard.jsonl`（守卫账本）+ `exceptions.jsonl`"
+                        "（全量异常）+ `bridge_status.json`（会话身份），并可选联动词典给出"
+                        "修复建议。输出**单文件 HTML**（内联 CSS、**无外部依赖、不联网**）"
+                        "或 Markdown。"
+                        "⚠️ 报告口径与 `bl_crashguard` 一致：**「被吞掉」不等于「已修复」**。"
+                        "报告内**不含**存档内容、账号或凭据；导出**不修改**任何源文件；"
+                        "默认**不覆盖**已有文件（同秒自动加序号）。"
+                        "日志内容一律 HTML 转义（日志是不可信输入）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": ["html", "md"],
+                           "description": "默认 html"},
+                "out": {"type": "string", "description": "输出目录（默认 <LogDir>\\reports）"},
+                "stdout": {"type": "boolean", "description": "直接返回文本而不写文件"},
+                "logDir": {"type": "string", "description": "日志目录（与 bl_status 同口径）"},
+            },
+        },
+    },
+    {
         "name": "bl_lexicon",
         "description": ("**崩溃词典（人话解释 + 修复建议）**：按异常类型或一段崩溃文本匹配词条，"
                         "返回描述、常见场景、修复建议。补的是 `bl_crash --deep` / `bl_exceptions` "
@@ -1857,6 +1900,7 @@ TOOL_GROUPS = {
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_lexicon",
         "bl_crashguard",
+        "bl_report", "bl_save_diag",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
         # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
         "bl_dump", "bl_crash_test",
@@ -2547,6 +2591,31 @@ def call_tool(name, args):
             limit=int(args.get("limit") or 20),
             explain=bool(args.get("explain", True)),
         )
+
+    if name == "bl_save_diag":
+        # 宿主侧工具：存档诊断（**只读** —— 不写/不改/不备份存档）。
+        # **不碰游戏、不需要游戏在跑**（LauncherData.xml 是纯文件；存档清单取自历史响应）。
+        import bl_save_diag as _sd
+        return _sd.build_report(
+            log_dir=args.get("logDir"),
+            launcher_path=args.get("launcher"),
+            limit=(int(args["limit"]) if args.get("limit") else None),
+        )
+
+    if name == "bl_report":
+        # 宿主侧工具：把三源合成自包含报告（HTML/Markdown）。**不碰游戏**。
+        import bl_report as _rp
+        data = _rp.collect(log_dir=args.get("logDir"))
+        fmt = args.get("format") or "html"
+        text = _rp.build_html(data) if fmt == "html" else _rp.build_markdown(data)
+        if args.get("stdout"):
+            return {"ok": True, "format": fmt, "text": text}
+        path = _rp.write_report(text, out_dir=args.get("out"),
+                                log_dir=args.get("logDir"), fmt=fmt)
+        return {"ok": True, "format": fmt, "path": path,
+                "bytes": len(text.encode("utf-8")),
+                "guardRows": len(data["guard"]), "exceptionRows": len(data["exc"]),
+                "note": "报告只读汇总，未修改任何源文件"}
 
     if name == "bl_crashguard":
         # 宿主侧工具：读崩溃守卫账本（谁被吞了/谁没敢吞）+ 给修复建议。

@@ -247,6 +247,51 @@ def main():
         prios = [x[0] for x in m10]
         check("10a 降序排列", prios == sorted(prios, reverse=True), repr(prios))
 
+        # ---------- 判据 10b：多代同名条目必须**合并**而非重复报告 ----------
+        # ★ 立项理由（实测 2026-10-07）：真机上 `access violation 0xC0000005` 返回 **2 条**
+        #   同名规则、`DXGI_ERROR_DEVICE_REMOVED` 返回 **3 条** —— 因为
+        #   ① `diagnosticRules` 内部有 legacy/crashdoctor 两代同 id；
+        #   ② `knownIssues` 43 条**完全是** `diagnosticRules` 的子集，而旧代码两处都遍历。
+        #   后果：调用方以为有多个问题。**这里必须有判据钉住"同一条只报一次"**。
+        print("\n[10b] 多代同名条目合并（不重复报告）")
+        # 造两代同名条目：legacy 无元数据 + 新代有元数据，且匹配面不同
+        d10 = make_fixture(os.path.join(tmp, "merged"))
+        with io.open(os.path.join(d10, "diagnostic-rules.json"), "w",
+                     encoding="utf-8", newline="\n") as fh:
+            json.dump([
+                {"id": "dup", "source": {"file": "crashdoctor.json", "kind": "diagnosticRules",
+                                         "index": 0},
+                 "matchAny": ["harmony.patchexception"], "matchAll": [], "excludeAny": [],
+                 "category": {"en": "Cat", "zh": "类", "zhHant": None},
+                 "severity": {"en": "High", "zh": "高", "zhHant": None},
+                 "confidence": None, "evidence": None, "priority": 76,
+                 "action": {"en": "Fix it", "zh": "修复", "zhHant": None},
+                 "risk": None, "reason": None, "backupRecommended": False,
+                 "sourceRepairAction": None},
+                {"id": "dup", "source": {"file": "legacy.json", "kind": "diagnosticRules",
+                                         "index": 0},
+                 # ⚠️ legacy 的短语**更宽**（`harmony patch`）—— 合并必须保住它
+                 "matchAny": ["harmony.patchexception", "harmony patch"], "matchAll": [],
+                 "excludeAny": [], "category": None, "severity": None, "confidence": None,
+                 "evidence": None, "priority": None,
+                 "action": {"en": "Fix it", "zh": "修复", "zhHant": None},
+                 "risk": None, "reason": None, "backupRecommended": False,
+                 "sourceRepairAction": None},
+            ], fh, ensure_ascii=False)
+        lex10, _ = bl_lexicon.load_lexicon(path=d10)
+        m_dup = bl_lexicon.match_text(lex10, "harmony.patchexception occurred")
+        check("10b-1 同 id 只报一次", len(m_dup) == 1, "报道 %d 条" % len(m_dup))
+        # 并集必须保住 legacy 独有的短语（丢了这个 = 匹配能力缩水）
+        m_wide = bl_lexicon.match_text(lex10, "a harmony patch problem")
+        check("10b-2 匹配面取并集（legacy 独有短语仍命中）",
+              len(m_wide) == 1 and m_wide[0][2]["id"] == "dup",
+              repr([x[2]["id"] for x in m_wide]))
+        # 元数据必须取最全的那条（不能降级成 legacy 的空值）
+        check("10b-3 元数据取最全（priority 保住）",
+              m_dup[0][2].get("priority") == 76, repr(m_dup[0][2].get("priority")))
+        check("10b-4 如实标出由多代合成", bool(m_dup[0][2].get("mergedFrom")),
+              repr(m_dup[0][2].get("mergedFrom")))
+
         # ---------- 判据 11/12：语言回退与如实标注 ----------
         print("\n[11][12] 语言回退与 langMissing")
         resH = bl_lexicon.describe(lex3, exc_type="HarmonyException", lang="zh")

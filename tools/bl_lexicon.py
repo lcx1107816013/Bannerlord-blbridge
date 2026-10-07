@@ -190,17 +190,112 @@ def lookup_exception(lex, exc_type):
     return None
 
 
-def match_text(lex, text, limit=10):
-    """按一段文本（崩溃报告 / 日志片段）匹配诊断词条与已知问题。
+def _meta_richness(r):
+    """该条目的元数据丰富度（用于多代同名条目择一合并时定"谁更全"）。
 
-    返回按 priority 降序的命中列表（**不含**未命中的词条）。
+    ★ 为什么需要它（实测 2026-10-07）：数据里同一问题常有**两代**条目 ——
+      `legacy-*`（旧档，元数据全空、priority=None）与 `crashdoctor-*`（新档，四项俱全）。
+      合并时必须让**信息量大的那条**提供元数据，否则会把好数据降级成空。
+    """
+    n = 0
+    for k in ("category", "severity", "confidence", "evidence"):
+        v = r.get(k)
+        if isinstance(v, dict) and v.get("en"):
+            n += 1
+    if r.get("priority") is not None:
+        n += 1
+    return n
+
+
+def _merge_rules(rules):
+    """把同一个 `id` 的多代条目**合并成一条**（不是丢弃）。
+
+    ## 为什么必须合并而不是去重丢弃（实测依据，2026-10-07）
+
+    首次实测发现两件事，各自都会导致**错误结果**：
+
+    1. **同一条规则在 `diagnosticRules` 里出现两次**（84 条按匹配面去重只剩 62 条）：
+       `bl_crashguard` 同时遍历 `diagnosticRules` 与 `knownIssues`，而后者 43 条
+       **完全是前者的子集** ⇒ 每次命中都被**报告两遍**，调用方以为有多个问题。
+    2. **但按 `id` 去重也是错的**：47 个 id 里有 **15 个**对应**不同的匹配面**
+       （同 id 的两代用了不同短语，如 legacy 的 `harmony patch` 比新档宽）。
+
+    ⇒ 正确做法是**按 id 合并**：匹配面取**并集**（保住两代的匹配能力，一条都不丢），
+      元数据取**最全的那条**（避免把有 priority/severity 的降级成 legacy 的空值）。
+
+    合并结果里额外带 `mergedFrom`，**如实标出这条是由几代合成的** ——
+    否则"84 条变 47 条"会让人以为数据丢了。
+    """
+    by_id = collections.OrderedDict()
+    for r in rules:
+        rid = r.get("id")
+        if rid is None:
+            continue
+        by_id.setdefault(rid, []).append(r)
+
+    merged = []
+    for rid, group in by_id.items():
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        # 元数据最全的当基底
+        base = max(group, key=_meta_richness)
+        item = dict(base)
+        # 匹配面取并集（去重且**保持原有顺序**，便于人读 diff）
+        def union(key):
+            seen, out = set(), []
+            for r in group:
+                for p in (r.get(key) or []):
+                    if p not in seen:
+                        seen.add(p)
+                        out.append(p)
+            return out
+        item["matchAny"] = union("matchAny")
+        item["matchAll"] = union("matchAll")
+        item["excludeAny"] = union("excludeAny")
+        item["priority"] = base.get("priority")
+        item["mergedFrom"] = [
+            {"file": (r.get("source") or {}).get("file"), "id": r.get("id")}
+            for r in group
+        ]
+        merged.append(item)
+    return merged
+
+
+def _deduped_rules(lex):
+    """取**已合并去重**的规则集（结果缓存在 lex 上，避免每次匹配都重算）。
+
+    ★ 只读诊断规则 + 已知问题两处；合并后**不再分别遍历**它们 ——
+      因为 `knownIssues` 是 `diagnosticRules` 的子集（实测 43/43 命中），
+      分别遍历正是"同一条报两遍"的直接原因。
+    """
+    cached = lex.get("_rulesMerged")
+    if cached is not None:
+        return cached
+    pool = list(lex.get("diagnosticRules") or [])
+    # 已知问题里若有诊断规则没有的 id，也要纳进来（当前实测是子集，但不写死假设）
+    have = {r.get("id") for r in pool}
+    for r in (lex.get("knownIssues") or []):
+        if r.get("id") not in have:
+            pool.append(r)
+    lex["_rulesMerged"] = _merge_rules(pool)
+    return lex["_rulesMerged"]
+
+
+def match_text(lex, text, limit=10):
+    """按一段文本（崩溃报告 / 日志片段）匹配诊断词条。
+
+    ★ 返回的每条都带 `kind`（固定为 `"rule"`）与 `mergedFrom`。
+      早先这里会对 `diagnosticRules` / `knownIssues` **各遍历一次** ⇒
+      `knownIssues` 是其子集时，同一条命中会**出现两遍**（实测
+      `access violation 0xC0000005` 命中 2 条、`DXGI_ERROR_DEVICE_REMOVED` 命中 3 条）。
+      现在只遍历**合并后**的集合，同一问题**只报一次**。
     """
     hits = []
-    for kind in ("diagnosticRules", "knownIssues"):
-        for r in (lex.get(kind) or []):
-            if _matches(r, text):
-                hits.append((r.get("priority") if isinstance(r.get("priority"), int) else -1,
-                             kind, r))
+    for r in _deduped_rules(lex):
+        if _matches(r, text):
+            prio = r.get("priority")
+            hits.append((prio if isinstance(prio, int) else -1, "rule", r))
     hits.sort(key=lambda t: -t[0])
     return hits[:max(1, int(limit))]
 

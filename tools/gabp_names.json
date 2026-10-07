@@ -459,6 +459,14 @@
     "bl_crashguard": {
       "gabp": "telemetry/audit_crash_guard",
       "note": "宿主侧只读：读 crashguard.jsonl（Harmony Finalizer 吞异常的记账），回答「哪些异常本来会杀进程、被吞掉了」与「哪些没敢吞」，并按类型给修复建议。action=swallow **不等于已修复**（半完成调用可能已造成不报错的静默损坏）；reason=breaker_open/quota_exhausted 是坏消息（守卫已停止保护）；fatal_passthrough 说明游戏很可能仍崩了（OOM/栈溢出等永不吞）=> 用 bl_crash。守卫默认关闭 => 文件不存在不等于没崩溃，以 enabled 为准。"
+    },
+    "bl_save_diag": {
+      "gabp": "campaign/diagnose_save",
+      "note": "宿主侧**只读**：比对「存档记录的模组集」与「启动器当前启用的模组集」，找出会导致读档崩溃的不一致（缺框架级模组/版本漂移/损坏标记）。只读是红线：不写、不改、不备份存档——存档修复是最难验证的一环，交回给人。缺模组≠一定崩（只说风险）；版本不同按 framework/content 分级，不搞一刀切；游戏本体模块已降级（否则人人报错）。存档清单取自最近一次 list_saves 响应。"
+    },
+    "bl_report": {
+      "gabp": "telemetry/export_report",
+      "note": "宿主侧只读：把崩溃守卫账本 + 全量异常 + 会话身份合成一份**自包含**报告（单文件 HTML，内联 CSS，无外部依赖、不联网）+ Markdown 版。HTML/CSS 全部自写（报告模板是有版权的表达，只借鉴栏目思路，不引第三方模板）。日志内容一律 HTML 转义（不可信输入）。默认不覆盖已有文件（同秒加序号）。"
     }
   }
 }
