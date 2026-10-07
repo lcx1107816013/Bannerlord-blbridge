@@ -12,38 +12,38 @@
 
 ## 一、当前状态牌（会话 A 维护，改完请更新）
 
-> **更新于 2026-10-08（A 线：A5 一致性判据 + A3/A4/A4b + R1 + **三条写路径缺陷修复**）**
+> **更新于 2026-10-08（A 线：A5 + A3/A4/A4b + R1 + **三条写路径缺陷修复**，**已部署 + 已提交**）**
 
 | 项 | 值 |
 |---|---|
-| **可以 `-Deploy` 吗** | ⏳ **代码已就绪、但【尚未部署】** —— 上一次部署（`94F721E4`）后我又修了**三条写路径缺陷**（见下），`build.ps1 -Deploy` 被 **B 线窗口占用的 DLL 锁**挡住（`The deployed DLL is locked`），按 Lead 裁定**等窗口结束后再部署**。★ **如实记：当前部署副本落后于仓库 `tools/`** |
-| 会话 A 当前在做什么 | 本轮四项交付（A5/A3/A4b/R1）**已部署**（`94F721E4`）；随后修的**三条缺陷**（裸 dict / CRLF / RTS `path` 未转发）**待部署** |
-| 未提交改动 | 见 `git status`（本轮：`tools/bl_mcp.py`、`tools/bl_rts.py`、`tools/bl_selftest.py`、`tools/bl_check_deploy_consistency.py`、`src/*.cs`、`docs/config-tool-safety.md`、`module/mcp/manifest.json` 等）|
-| `src/BadDataSpec.cs` | **完整判据层**（纯 BCL，可离线单测）|
-| ★ **部署状态自检** | `python tools\bl_check_deploy_consistency.py` → **全部通过**（A/B/C 三段 + 反向对照）；D 段如实报"**4 个副本 .py 与仓库不一致**"（默认只作 note）。要强制核对：`--strict-drift`（会 FAIL）|
-| ★ **C# 侧本轮无新改动** | 三条缺陷都是 **Python 侧**；`src/*.cs` 与已部署 `94F721E4` 时相同 ⇒ **无"进程里是旧 DLL"风险** |
+| **可以 `-Deploy` 吗** | ✅ **已部署**（2026-10-08 04:04:52）。**新 DLL sha256 = `31B97ED6DB2AE7FA…`，286720 B**。★ 部署时 48 个副本 `.py` **全部与仓库一致**（漂移已消除） |
+| 会话 A 当前在做什么 | 本轮**全部交付完成**：A5 判据 / A3 物品全队伍 / A4+A4b config `path` 与双格式 / R1 `bl_get_perk` / **B8+B9+B10 三条写路径缺陷修复** |
+| 提交 | **`36938c8`**（已本地提交，工作区干净）。★ **推送未成功**：`git push` 报网络错误（`Failed to connect to github.com:443`）⇒ **本地领先 origin 1 个提交**，待网络恢复后重推 |
+| 未提交改动 | **无**（`git status` 干净）|
+| ★ **部署状态自检** | `bl_check_deploy_consistency.py` → **全部通过**（A/B/C/D 四段）；`--strict-drift` → **exit=0**（48 个副本一致）|
+| ★ **全局闸门** | `bl_selftest.py` / `bl_check_dispatch.py`(+`--selftest`) / `bl_check_gabp_names.py --selftest` / `bl_patches_selftest.py` / `bl_metrics_selftest.py` / `baddataspec/run_selftest.py`(52/52) / A5(含 `--selftest`) / `check_repo_encoding.py` ⇒ **10/10 绿** |
 
-### ★★ 三条写路径缺陷（2026-10-08 修复，**待部署**）
+### ★★ 三条写路径缺陷（B8/B9/B10）—— 本轮最重要的交付，**已修 + 已部署 + 已提交**
 
-详见 `docs/config-tool-safety.md`（§〇 总览 + 逐起事故 + 各自的回归断言）：
+共同点：**报告与事实不符**（不会崩，只会让人得出**与磁盘相反**的结论）。
+详见 `docs/config-tool-safety.md`（三起事故档案）与 `E:\Document\BlBridge-缺陷记录-测试阶段.md`（B8/B9/B10）：
 
 | # | 缺陷 | 危害 | 回归断言 |
 |---|---|---|---|
-| **1** | `apply_config` 成功分支返回**裸 dict**（派发解包成 `(ok,payload)` ⇒ `ValueError`）| ★★★ 派发报错，**但文件已写盘** ⇒ 以为失败、实际已改 | **派发级**断言（dry_run/真写/错误路径三条）+ 返回形状断言 |
-| **2** | 写回**无条件 LF** ⇒ 静默把 CRLF 文件改成 LF-only | ★★ 报告只说改了 N 个键，实际**整个文件行尾被重写** | 写前**探测原行尾**并按原样拼回；返回加 `fileFacts`；**CRLF 不变 + LF 不变**双向断言 |
-| **3** | ★ `bl_apply_rts_config` **不转发 `path`** | ★★★ 调用方传副本 ⇒ **实际写真档**（**A 线自测踩中，已按备份逐字节还原**）| ★ **通用断言 `assert_param_retargets()`**：传非默认目标 ⇒ ①副本变了 ②**默认真档 sha 不变** |
+| **B8** | `apply_config` 成功分支返回**裸 dict**（派发解包 `ValueError`）| ★★★ 派发报错，**但文件已写盘**（异常在返回**之后**）⇒ 以为失败、实际已改。★ HEAD 里就有，但**长期不可达**（无 `path` 前总走 B1 错误分支），**由 A4 的 `path=` 激活** | **8 条派发级**断言 + 返回形状断言 |
+| **B9** | 写回**无条件 LF** ⇒ 静默把 CRLF 改成 LF-only（真档 `CRLF=1007 → 0`）| ★★ 只报"改了 N 个键"，实际**全文行尾被重写** | 写前探测原行尾并原样拼回；`fileFacts`；**CRLF 不变 + LF 不变双向断言** |
+| **B10** | ★ `bl_apply_rts_config` **不转发 `path`** | ★★★ 传副本 ⇒ **实际写真档**（A 线自测踩中，已逐字节还原）| ★ 通用断言 `assert_param_retargets()`（**双向**：副本变 + 默认真档 sha 不变）|
 
-★ 事故 3 立的**项目级纪律**：**凡"新增参数"必配"参数被转发"的断言**（双向取证）——
+★ 由此立的**项目级纪律**：**凡"新增参数"必配"参数被转发"的断言** ——
 不能只测"函数接受这个参数"，要测"这个参数**真的改变了目标**"。
 
-### ✅ 已部署（2026-10-08 03:32:42Z，`dllSha256 = 94f721e47fc1b16f…`）
+### ✅ 本轮交付明细（已部署，`dllSha256 = 31b97ed6db2ae7fa…`）
 
 | 项 | 内容 | 判据入口 |
 |---|---|---|
-| **A3** | `bl_scan_bad_data` 物品扫描扩到**全队伍 + 全聚落**（含与 `ItemRoster` 并列的 `Settlement.Stash`）；新增"扫了哪些 roster"口径回显 + finding 带来源 `@party/…`/`@stash/…` | `python tools\baddataspec\run_selftest.py`（49/49）|
-| **A4** | `bl_read_config` / `bl_apply_config` 加 **`path`**：**严格只读**（不碰任何 mod 的 parse 函数）、回显绝对路径 + `pathSource`、写前备份、写后回读、`restartRequired`；指定不存在路径**明确报错不回退** | `python tools\bl_selftest.py`（11 条 A4 断言）|
-| **A4b** | 支持 RBM 的**两种格式并存**（`<Option id=.. value=.. />` 468 项 + `<Tag>v</Tag>` 215 项）；形式①路径用**祖先标签名**（`Enabled` 四重碰撞已区分）；**写回保持原格式** | 同上（11 条 A4b 断言）|
-| **R1** | 🆕 **`bl_get_perk`**：只读运行时 Perk 值（C7 那 6 个），Primary/Secondary **分开返回**；★ 判据必须是**三态**（`changed`/`unchangedExpected`/`unexpected`），**不能**写成"两次读数必须不同" | 同上（16 条 R1 断言）|
+| **A3** | `bl_scan_bad_data` 物品扫描扩到**全队伍 + 全聚落**（含与 `ItemRoster` 并列的 `Settlement.Stash`）；新增 **`coverage`**（正常覆盖口径，与 `skipped` 异常分开）+ finding 带来源 `@party/…`/`@stash/…` | `baddataspec/run_selftest.py`（**52/52**）。★ 真机（B 线代跑）：**1918 个 roster / 11201 个条目**，与清理器独立实现逐个对上 |
+| **A4 / A4b** | `bl_read_config` / `bl_apply_config` 加 **`path`**：**严格只读**（不碰任何 mod 的 parse 函数）、回显绝对路径 + `pathSource`、写前备份、写后回读、`restartRequired`、`fileFacts`；指定不存在路径**明确报错不回退**。★ 支持 RBM 的**两种格式并存**（`<Option>` 468 + `<Tag>` 215）：形式①路径用**祖先标签名**（`Enabled` 四重碰撞已区分），**写回保持原格式** | `bl_selftest.py`（A4 11 条 + A4b 11 条）。★ 真机：`keyCount={total:689,option:468,bare:221}`，三个目标开关均读得到 |
+| **R1** | 🆕 **`bl_get_perk`**：只读运行时 Perk 值（C7 那 6 个），Primary/Secondary **分开返回**；★ 判据必须是**三态** | `bl_selftest.py`（16 条 R1 断言）。★ **真机 V2 PASS 6/6**（B 线代跑）：`_oneHandedWayOfTheSword` P/S 两向都变、`_bowDeadshot` Primary **恒 0.002**（本就不该变）|
 
 ★ **R1 的关键发现（写进工具描述与自测了）**：反编译实测 6 个 Perk 的**原版 Primary 全是 0.002、Secondary 全是 0.005**，
 而 C7 对 Primary/Secondary 赋**同一个**目标值 ⇒ `_bowDeadshot`/`_crossbowMightyPull`/`_throwingUnstoppableForce` 的
