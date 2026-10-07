@@ -1528,22 +1528,51 @@ def main():
 
     print()
     print("=" * 90)
-    print("③ Warbandlord config.xml：回读 + dry-run 写入")
+    print("③ Warbandlord config.xml：B1 闸门（模块已卸载则拒绝）+ 装好时可用")
     print("=" * 90)
     try:
         vals = bl_analyze  # noqa
         import bl_mcp
-        got = bl_mcp.read_config(["DamageCalc/ArmorEffect/ArmorBreakPoint",
-                                 "Creature/MonsterModify/Human/HitPoints"])
-        print("  回读: %s" % json.dumps(got, ensure_ascii=False))
-        check(got.get("DamageCalc/ArmorEffect/ArmorBreakPoint") is not None,
-              "能读到 ArmorBreakPoint", got)
-        dry = bl_mcp.apply_config([{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}],
-                                  dry_run=True)
-        check(dry.get("dryRun") is True and len(dry.get("changed") or {}) == 1,
-              "dry-run 能定位并预览改动", dry)
-        bad = bl_mcp.apply_config([{"path": "Not/Exist/Path", "value": "1"}], dry_run=True)
-        check("Not/Exist/Path" in (bad.get("missing") or []), "无效路径会被报告", bad.get("missing"))
+
+        # ── B1（2026-10-07，隔壁项目测试表发现）──
+        # 真机上 `Modules\Warbandlord\` **无 SubModule.xml、0 个 DLL**（已软卸载），
+        # 只剩一个没有消费者的残留 config.xml。旧行为是**静默读它** ⇒
+        # "改了没生效" ⇒ 会把工具问题误判成 MOD 问题。
+        # ⇒ 现在必须**明确拒绝**。下面两条同时断言"拒绝"与"拒绝得能看懂"。
+        st = bl_mcp.warbandlord_module_state()
+        print("  模块状态: %s" % json.dumps(
+            {k: st[k] for k in ("exists", "hasSubModuleXml", "dllCount",
+                                "hasConfig", "looksUninstalled")}, ensure_ascii=False))
+        if st["looksUninstalled"]:
+            ok_r, pay_r = bl_mcp.read_config(None, _structured=True)
+            check(ok_r is False and pay_r.get("error") == "target_module_not_installed",
+                  "B1: 模块已卸载 ⇒ read_config 明确拒绝（不静默读死人文件）",
+                  {k: pay_r.get(k) for k in ("error", "evidence")})
+            check(bool(pay_r.get("evidence")) and bool(pay_r.get("note")),
+                  "B1: 拒绝时附**判据**与**替代方案**（让人能复核、知道该改哪个文件）",
+                  pay_r.get("evidence"))
+            ok_a, pay_a = bl_mcp.apply_config(
+                [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}],
+                dry_run=True, _structured=True)
+            check(ok_a is False and pay_a.get("error") == "target_module_not_installed",
+                  "B1: 模块已卸载 ⇒ apply_config **写入前**就拒绝", pay_a.get("error"))
+            check(pay_a.get("module") == "Warbandlord",
+                  "B1: 返回里说明**操作的是哪个模块**", pay_a.get("module"))
+        else:
+            # 反向对照：模块**装好时**必须照常工作（防"闸门过严把正常用法也拒了"）
+            got = bl_mcp.read_config(["DamageCalc/ArmorEffect/ArmorBreakPoint",
+                                      "Creature/MonsterModify/Human/HitPoints"])
+            check(got.get("DamageCalc/ArmorEffect/ArmorBreakPoint") is not None,
+                  "B1 对照: 模块装好 ⇒ 能读到 ArmorBreakPoint", got)
+            dry = bl_mcp.apply_config(
+                [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}],
+                dry_run=True)
+            check(dry.get("dryRun") is True and len(dry.get("changed") or {}) == 1,
+                  "B1 对照: 模块装好 ⇒ dry-run 能定位并预览改动", dry)
+            bad = bl_mcp.apply_config([{"path": "Not/Exist/Path", "value": "1"}],
+                                      dry_run=True)
+            check("Not/Exist/Path" in (bad.get("missing") or []),
+                  "B1 对照: 无效路径会被报告", bad.get("missing"))
     except Exception as exc:  # noqa: BLE001
         check(False, "config 读写检查", repr(exc))
 

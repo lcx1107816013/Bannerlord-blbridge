@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using TaleWorlds.Core;
+using TaleWorlds.CampaignSystem;      // B2: Campaign（判定"是否战役模式"）
 using TaleWorlds.Library;
 using TaleWorlds.Localization;
 using TaleWorlds.ModuleManager;
@@ -195,6 +196,51 @@ namespace BlBridge
         /// 主菜单实测是 **`InitialState`**（真机 2026-09-25 23:00）—— `Game.Current` 为 null 的时期也取得到。
         /// `UiEntry` 的 list_ui/open_ui/close_ui 与这里的开战守卫**共用这一个判据**，
         /// 免得"两处各自算状态名"漂移（v0.8.10 的 B3/B5 就是这类"判定器自己没对照"的坑）。
+        /// </summary>
+        /// <summary>
+        /// 当前是否处于**战役模式**（B2 判据）。
+        ///
+        /// ## 为什么用 `Game.Current.GameType is Campaign`
+        ///
+        /// 反射核实（2026-10-07，本机 1.4.8）：
+        ///   · `TaleWorlds.CampaignSystem.Campaign` 的基类是 `TaleWorlds.Core.GameType`
+        ///     ⇒ 它**就是**一个 GameType，用 `is` 判定语义精确；
+        ///   · `Game.Current` 与 `Game.GameType` 都存在。
+        ///
+        /// ⚠️ 为什么不直接看 `Campaign.Current != null`：那个在**读档过程中**也会为 null，
+        ///    而 `GameType` 在 `Game` 建好后就确定了 —— 判"这一局是哪套 Game"，它更准。
+        ///    两个都兜一层（`Game.Current` 为 null 时退回看 `Campaign.Current`），
+        ///    任一路径为真即认定战役，**fail-closed**（宁可不放行，也不放行后才崩）。
+        /// </summary>
+        internal static bool IsCampaignActive()
+        {
+            try
+            {
+                Game game = Game.Current;
+                if (game != null && game.GameType is Campaign)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+            try
+            {
+                return Campaign.Current != null;
+            }
+            catch
+            {
+                // 取不到 ⇒ 保守返回 false（不误拒"非战役"的合法调用）
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 当前活动 GameState 的**类型名**（空串 = 取不到）。
+        ///
+        /// ⚠️ 它只是**判据的一半**：`MissionState` 在战役与自定义战斗里同名，
+        ///    所以判"能不能开战"还要看 <see cref="IsCampaignActive"/>。
         /// </summary>
         internal static string ActiveGameStateName()
         {
@@ -448,6 +494,41 @@ namespace BlBridge
             //    真正的前提其实是"MBObjectManager 里的兵种/文化已加载"（裸主菜单下所有兵种 id
             //    都报 unknown_troop），而官方自定义战斗正是加载它们的正门 —— 所以就用它当判据。
             string stateName = ActiveGameStateName();
+
+            // ★★ B2 修复（2026-10-07，由隔壁项目的测试表实测发现）：
+            //    **战役模式下 `allowAnyState=true` 必崩**，所以在此**先拒绝、再谈其它**。
+            //
+            // 实测证据（`bl_crash --deep`，pid 2756）：
+            //   bucket : CLR_EXCEPTION_System.InvalidCastException_80004002_
+            //            SandBox.dll!SandboxAgentStatCalculateModel.InitializeMissionEquipment
+            //   message: 无法将类型为 `CustomBattleCombatant` 的对象
+            //            强制转换为类型 `PartyBase`
+            //   stack  : SandboxAgentStatCalculateModel.InitializeMissionEquipment
+            //            ← BloodlustAgentStatCalculateModel... ← Agent.Build ← Mission.SpawnAgent
+            //            ← Mission.SpawnTroop ← DefaultBattleMissionAgentSpawnLogic.CheckDeployment
+            //
+            // 根因（结构性，不是配置问题）：
+            //   战役模式下引擎注册的是 `SandboxAgentStatCalculateModel`（按 `PartyBase` 取队伍），
+            //   而我们造的是 `CustomBattleCombatant`（自定义战斗用的类型）⇒ spawn 第一个 agent 时崩。
+            //   `allowAnyState` 绕得过"必须停在自定义战斗界面"，**绕不过"战役用哪套 Model"**。
+            //
+            // ⚠️ 为什么必须在**这里**拒绝（而不是让它崩）：
+            //   崩溃发生在 spawn 第一个 agent 时 —— 此前我们已经返回 `accepted:true, state:loading`
+            //   ⇒ 调用方**看起来开战成功了**，30 秒后进程却没了（且 cleanExit=false 污染会话）。
+            //   这正是本项目最防的那类"先报成功、后失败"。
+            if (allowAnyState && IsCampaignActive())
+            {
+                return Protocol.Failure(id, "unsupported_in_campaign",
+                    "战役模式下 **不支持** allowAnyState —— 它会**必然崩溃**，故在此拒绝（不再先报成功）。"
+                    + "根因：战役模式注册的是 SandboxAgentStatCalculateModel（按 PartyBase 取队伍），"
+                    + "而桥造的是 CustomBattleCombatant，两套 Model 期望的队伍类型不同 ⇒ "
+                    + "在 spawn 第一个 agent 时抛 InvalidCastException。"
+                    + "allowAnyState 绕得过『必须停在自定义战斗界面』，绕不过『战役用哪套 Model』。"
+                    + "正确做法：回主菜单后用 open_ui（uiId=CustomBattle）进官方自定义战斗界面再开战；"
+                    + "若你需要在战役内验证战斗，那需要另做一条走 Campaign 队伍类型的通道（尚未实现）。",
+                    false);
+            }
+
             if (!allowAnyState && !IsBattleSetupState(stateName))
             {
                 return Protocol.Failure(id, "wrong_state",

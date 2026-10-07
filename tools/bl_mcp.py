@@ -596,6 +596,88 @@ def warbandlord_config():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# B1 修复（2026-10-07，由隔壁项目的测试表发现）：目标模块**可能已被软卸载**
+#
+# ## 症状（实测，非推测）
+#
+# `bl_read_config` / `bl_apply_config` 硬编码读
+# `<game>\Modules\Warbandlord\config.xml`，而本机上该目录：
+#   · **没有 `SubModule.xml`**、**0 个 DLL** —— 模块已软卸载；
+#   · 只剩一个 31,721 B 的残留 `config.xml` ⇒ **没有任何消费者**。
+# 而项目（三合一 MOD）真正读的是 `Configs\RBM\config.xml`。
+#
+# ⇒ 后果是**最坏的一类**：拿这两个工具改配置会"改了但没生效"，
+#   然后把**工具问题误判成 MOD 有问题**（本仓库纪律里明确要分开归因的两件事）。
+#   实证：两处同一项的值本就不一致（残留档 vs 真档），一眼可辨不是同一个文件。
+#
+# ## 修法（三件事，对应测试表给的三条建议）
+#
+#   ① **检测模块是否真的装好**：要求同目录存在 `SubModule.xml` **或** 至少一个 DLL；
+#   ② 不满足时**明确报错**（而不是静默读写一个死人文件）；
+#   ③ 返回值里**说清操作的是哪个模块**（`module` / `path` / `consumer` 字段）。
+#
+# ⚠️ 边界（如实）：**只有 `SubModule.xml`/DLL 的存在性**能判，判不了
+#    "该模块是否在本次启动的模块列表里"（那要看 LauncherData，且本工具不碰游戏）。
+#    ⇒ 所以措辞用"看起来已卸载"，并在返回里给出判据，让人能一眼复核。
+# ─────────────────────────────────────────────────────────────────────
+
+def warbandlord_module_state():
+    """看 `Modules\\Warbandlord` 是否像个**真的装好的模块**。
+
+    返回 dict：{exists, hasSubModuleXml, dllCount, hasConfig, looksUninstalled, why}
+    """
+    mod_dir = os.path.join(game_dir(), "Modules", "Warbandlord")
+    st = {"module": "Warbandlord", "dir": mod_dir, "exists": os.path.isdir(mod_dir),
+          "hasSubModuleXml": False, "dllCount": 0, "hasConfig": False,
+          "looksUninstalled": False, "why": ""}
+    if not st["exists"]:
+        st["looksUninstalled"] = True
+        st["why"] = "模块目录不存在"
+        return st
+    st["hasSubModuleXml"] = os.path.isfile(os.path.join(mod_dir, "SubModule.xml"))
+    st["hasConfig"] = os.path.isfile(os.path.join(mod_dir, "config.xml"))
+    try:
+        for root, _dirs, files in os.walk(mod_dir):
+            st["dllCount"] += sum(1 for f in files if f.lower().endswith(".dll"))
+    except Exception:                                     # noqa: BLE001
+        pass
+    # ⇒ 引擎靠 SubModule.xml 认识模块；没有它 + 一个 DLL 都没有 ⇒ 不可能被加载
+    if not st["hasSubModuleXml"] and st["dllCount"] == 0:
+        st["looksUninstalled"] = True
+        st["why"] = ("没有 SubModule.xml 且 0 个 DLL ⇒ 引擎不会加载它"
+                     "（残留目录只有一个没有消费者的 config.xml）")
+    elif not st["hasSubModuleXml"]:
+        st["why"] = "没有 SubModule.xml（有 DLL，但引擎靠 SubModule.xml 识模块）"
+    return st
+
+
+def _warbandlord_guard():
+    """读/写 Warbandlord 配置前的闸门。返回 (ok, payload)。
+
+    不 ok 时 payload 已经是可直接返回给调用方的**说明性错误**（含判据与替代方案）。
+    """
+    st = warbandlord_module_state()
+    if st["looksUninstalled"]:
+        return False, {
+            "ok": False,
+            "error": "target_module_not_installed",
+            "module": "Warbandlord",
+            "path": os.path.join(st["dir"], "config.xml"),
+            "pathExists": st["hasConfig"],
+            "message": ("`bl_read_config` / `bl_apply_config` 操作的是 **Warbandlord** 模块的"
+                        "config.xml，但该模块看起来**已被卸载**：" + st["why"]),
+            "evidence": {"hasSubModuleXml": st["hasSubModuleXml"],
+                         "dllCount": st["dllCount"], "hasConfig": st["hasConfig"]},
+            "note": ("⚠️ 这个文件**没有消费者** —— 改它不会影响任何在跑的模块。"
+                     "若你要改的是别的模组（例如三合一里的 RBM），"
+                     "它读的是 `<我的文档>\\Mount and Blade II Bannerlord\\Configs\\RBM\\config.xml`，"
+                     "请直接编辑那个文件（或等本工具支持 `path` 参数）。"),
+        }
+    return True, st
+
+
+
+# ─────────────────────────────────────────────────────────────────────
 # config.xml 读写（行级编辑，保留原文件其余内容与 BOM）
 # ─────────────────────────────────────────────────────────────────────
 
@@ -639,17 +721,32 @@ def _scan(text):
     return out
 
 
-def read_config(paths=None):
+def read_config(paths=None, _structured=False):
+    """读 Warbandlord 配置。
+
+    B1 修复：目标模块若已软卸载 ⇒ **明确拒绝**（不再读一个没有消费者的死人文件）。
+    `_structured=True` 时返回 `(ok, payload)` 而不抛异常（供 MCP 派发直接用）。
+    """
+    ok, st = _warbandlord_guard()
+    if not ok:
+        if _structured:
+            return False, st
+        raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
     path = warbandlord_config()
     if not os.path.isfile(path):
-        raise IOError("找不到 Warbandlord 配置: %s" % path)
+        err = {"ok": False, "error": "config_not_found", "path": path,
+               "message": "找不到 Warbandlord 配置: %s" % path}
+        if _structured:
+            return False, err
+        raise IOError(err["message"])
     text = _read_text(path)
     out = {}
     for _idx, full, val, _oid in _scan(text):
         out[full] = val
-    if paths:
-        return dict((p, out.get(p)) for p in paths)
-    return out
+    result = dict((p, out.get(p)) for p in paths) if paths else out
+    if _structured:
+        return True, {"values": result, "module": "Warbandlord", "path": path}
+    return result
 
 
 def _is_number(s):
@@ -661,8 +758,17 @@ def _is_number(s):
         return False
 
 
-def apply_config(edits, dry_run=False, allow_missing=False):
-    """edits: [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}, ...]"""
+def apply_config(edits, dry_run=False, allow_missing=False, _structured=False):
+    """edits: [{"path": "DamageCalc/ArmorEffect/ArmorBreakPoint", "value": "45"}, ...]
+
+    B1 修复：**写入前**先过模块存在性闸门 —— 目标模块若已软卸载，
+    改这个文件的唯一后果是"看起来改了、实际没人读"，进而把工具问题误判成 MOD 问题。
+    """
+    ok, st = _warbandlord_guard()
+    if not ok:
+        if _structured:
+            return False, st
+        raise IOError(st["message"] + " ｜ 判据: " + str(st["evidence"]))
     path = warbandlord_config()
     if not os.path.isfile(path):
         raise IOError("找不到 Warbandlord 配置: %s" % path)
@@ -2531,13 +2637,17 @@ def call_tool(name, args):
                 "count": len(page), "events": page}
 
     if name == "bl_read_config":
-        return {"ok": True, "values": read_config(args.get("paths"))}
+        # B1：目标模块若已软卸载 ⇒ 返回结构化错误（含判据与替代方案），不抛异常
+        ok, payload = read_config(args.get("paths"), _structured=True)
+        return payload if not ok else {"ok": True, **payload}
 
     if name == "bl_apply_config":
         edits = args.get("edits") or []
         if not edits:
             return {"ok": False, "error": "edits 不能为空"}
-        return apply_config(edits, dry_run=bool(args.get("dry_run")))
+        ok, payload = apply_config(edits, dry_run=bool(args.get("dry_run")),
+                                   _structured=True)
+        return payload if not ok else {"ok": True, **payload}
 
     # ── v0.8.15：RTSCamera 配置（B 方案：只当它的参数管理员，不碰它的代码）──────
     if name == "bl_rts_config":
