@@ -23,6 +23,17 @@ namespace BlBridge
         /// </summary>
         internal static string MissionOrigin = "game";
 
+        /// <summary>
+        /// v0.8.49：`crash_test mode=managed` 的**延迟抛异常**标志。
+        ///
+        /// ★ 为什么必须延迟到 `OnApplicationTick` **最末尾**：
+        ///   本方法的每一段都自带 `try`（照 AGENTS.md「主线程 tick 硬规则」要求三段隔离）。
+        ///   若在段内抛出，会被**自己的 try 吃掉** ⇒ 异常根本到不了
+        ///   `Managed.ApplicationTick` ⇒ CrashGuard 的 Finalizer 看不到它 ⇒ 验收**假通过**。
+        ///   所以抛出点必须在**所有 try 块之外**。
+        /// </summary>
+        internal static volatile bool PendingManagedThrow;
+
         /// <summary>本会话已完成的场次数（只读出口，给面板与状态文件共用）。</summary>
         internal static int MissionsThisSession
         {
@@ -112,6 +123,13 @@ namespace BlBridge
                 if (BridgeConfig.CrashGuardEnabled)
                 {
                     CrashGuard.Install();
+                    // ★ 必须**重写一次状态** —— `WriteStatus` 在 `Install` 之前跑过，
+                    //   那时 `CrashGuard.PatchedCount` 还是 0 ⇒ 状态文件会写
+                    //   `installed:false / patchedTargets:0`，而账本里明明写着"已挂 3 个目标"。
+                    //   实测踩到（2026-10-07 真机验收）：状态与账本**互相矛盾**，
+                    //   而 `bl_status` 读的是状态文件 ⇒ 外部会误判成"守卫没装上"。
+                    //   这类"两个产物说法不一致"比单纯漏写更难查，所以就地纠正顺序。
+                    WriteStatus("loaded", null, 0);
                 }
             }
             catch
@@ -279,6 +297,25 @@ namespace BlBridge
             }
             catch
             {
+            }
+
+            // ★★ v0.8.49：受控**托管**抛异常（仅 `crash_test mode=managed` 用）。
+            //
+            // ⚠️ 位置是**刻意**的 —— 必须在上面所有 `try` 隔离块**之外**：
+            //   段内抛出会被本方法自己的 `try` 吃掉，异常就到不了
+            //   `Managed.ApplicationTick`（CrashGuard 的挂载点）⇒ 验收会**假通过**
+            //   （游戏当然没崩，但那是因为我们自己吞了，不是因为守卫生效）。
+            //   放在末尾、try 之外，异常才能真的沿
+            //   CoreManaged → Module.OnApplicationTick → Managed.ApplicationTick 传上去。
+            //
+            // 正常发布版永远不会走到这里：闸门在 CommandPump（需显式调 method +
+            // 环境变量 `BLBRIDGE_ALLOW_CRASH_TEST=1`），标志恒为 false。
+            if (PendingManagedThrow)
+            {
+                PendingManagedThrow = false;
+                throw new InvalidOperationException(
+                    "BlBridge 受控托管异常（crash_test mode=managed）—— "
+                    + "用于验收 CrashGuard：守卫开则应被吞掉、游戏继续；守卫生效前应终止进程。");
             }
         }
 

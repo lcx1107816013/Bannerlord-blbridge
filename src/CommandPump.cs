@@ -297,6 +297,34 @@ namespace BlBridge
                         "受控崩溃被闸门拦住：需显式设置环境变量 "
                         + "BLBRIDGE_ALLOW_CRASH_TEST=1（默认关，防误崩）", false);
                 }
+                // v0.8.49：`mode=managed` ⇒ 造一次**托管**异常，用于验收 CrashGuard。
+                //
+                // ★ 为什么必须另加这个模式（不能复用 native）：
+                //   CrashGuard 靠 Harmony **Finalizer** 吞异常，而 Finalizer **只看得到托管异常**。
+                //   原生 SEH 崩溃（native 模式）**结构上**不可能被它拦住 ——
+                //   用 native 去验 CrashGuard 会得出"没吞掉 ⇒ 功能坏了"的**错误结论**。
+                //   两者测的是**不同的东西**：native 验 dump 落盘，managed 验崩溃跳过。
+                //
+                // ⚠️ 同样受上面那道环境变量闸门约束（复用同一个，不另立一个新闸门
+                //    让人记 —— 少一个"忘了设"的机会）。
+                string mode = Jmini.Str(raw, "mode", "native");
+                if (mode == "managed")
+                {
+                    // ★ 与 native 同样的两段式：这里只**置标志**（此刻响应还没落盘），
+                    //   真正的抛出在 `SubModule.OnApplicationTick` 末尾 ——
+                    //   那里在所有 `try` 隔离块**之外**，异常才能真的传播到
+                    //   `Managed.ApplicationTick`（即 CrashGuard 挂载的那个方法）。
+                    SubModule.PendingManagedThrow = true;
+                    return Protocol.Success(id, "{\"aboutToThrow\":true"
+                        + ",\"mode\":\"managed\""
+                        + ",\"exceptionType\":\"System.InvalidOperationException\""
+                        + ",\"patchTarget\":\"TaleWorlds.DotNet.Managed.ApplicationTick\""
+                        + ",\"note\":" + Protocol.Q(
+                            "本响应落盘后，下一次 ApplicationTick 会抛出受控托管异常。"
+                            + "守卫**开**时：游戏应继续运行，crashguard.jsonl 出现 action=swallow；"
+                            + "守卫**关**时：异常应传播出 Managed.ApplicationTick ⇒ 进程终止"
+                            + "（这就是 A/B 的对照腿）。") + "}");
+                }
                 // ★ 先把"即将崩溃"写进响应（外部据此对账：收到 ok=true ⇒ 确认是本次
                 //   主动崩的，不是随机崩溃），**再**崩。
                 // ⚠️ 但**不能在这里崩** —— 此刻响应还没落盘（`WriteResponse` 在

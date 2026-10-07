@@ -146,10 +146,107 @@ python tools\bl_crashguard.py --json
 | Finalizer 语义（真实 DLL） | `python tools\crashguardprobe\run_probe.py` | 8 条判据全过 |
 | 账本读取 + 建议 | `python tools\bl_crashguard_selftest.py` | 25/25（无词条）/ 27/27（有词条） |
 | MCP 四处一致性 | `python tools\bl_check_dispatch.py` | 59/59 |
-| 编译 | `build.ps1` | exit=0，DLL 253.5 KB |
+| 编译 | `build.ps1` | exit=0，DLL 260,608 B |
 
-> ⚠️ **未做真机验证**（游戏内实际吞掉一次崩溃）。
-> 已验的是：Finalizer 语义（真实 Harmony DLL）、账本读写、建议生成、编译通过。
-> **"真机崩溃被成功跳过"仍需在游戏里确认** —— 判据：
-> 打开 `crashGuardEnabled`，触发一次已知可控的崩溃（如部署一个有意的 NRE 补丁），
-> 看游戏是否继续跑 + `crashguard.jsonl` 是否出现 `action=swallow`。
+---
+
+## 七、真机验收（2026-10-07）· ✅ 通过
+
+### 7.1 A/B 对照实验（**这是本功能唯一的有效性证据**）
+
+同一次启动流程、同一个受控异常，**只改守卫开关一个变量**：
+
+| 腿 | 守卫 | 操作 | 结果 |
+|---|---|---|---|
+| **A** | **ON** | `crash_test mode=managed` | ✅ 游戏**存活**（3821 MB）+ 账本 `action=swallow` |
+| **B** | **OFF** | **同一条** `crash_test mode=managed` | ✅ 进程**终止** |
+
+> ★ **没有 B 腿，A 腿证明不了任何事** —— A 腿"存活"也可能只是"异常根本没抛"。
+> B 腿是这条结论的反向对照：**同一条异常在守卫关闭时确实杀死了进程**。
+
+### 7.2 A 腿证据（账本原文）
+
+```json
+{"action":"swallow","reason":"swallowed","type":"System.InvalidOperationException",
+ "target":"TaleWorlds.DotNet.Managed.ApplicationTick",
+ "frames":"at BlBridge.SubModule.OnApplicationTick(Single dt)
+           \nat TaleWorlds.MountAndBlade.Module.OnApplicationTick(Single dt)
+           \nat TaleWorlds.DotNet.Managed.ApplicationTick_Patch1(Single dt)"}
+```
+
+**栈帧本身就是证据链**，三行各证一件事：
+
+1. `BlBridge.SubModule.OnApplicationTick` —— 异常确实从**我们的代码**抛出；
+2. `TaleWorlds.MountAndBlade.Module.OnApplicationTick` —— 引擎这层**没有 catch**
+   （已用 Cecil 核 IL：只有 `finally`，见 §7.4）；
+3. **`Managed.ApplicationTick_Patch1`** —— ★ Harmony 补丁**真的装上了**
+   （`_Patch1` 后缀是 Harmony detour 的产物名）。没有它，前面两行无法证明是"守卫"起的作用。
+
+### 7.3 B 腿死因归因（排除"死于别的原因"）
+
+`bl_crash` 显示 dump 的异常代码是 **`0xE0434352`（CLR 托管异常）**，
+**不是** `0xC0000005`（访问违规）⇒ 进程确实死于**我们抛的那个托管异常未被捕获**，
+而不是别的东西。同时 `cleanExit=false`（走不到 `OnSubModuleUnloaded`）。
+
+### 7.4 前置静态核验（做实验前就排除了假通过风险）
+
+用 Mono.Cecil 读**真实游戏程序集**的 IL，确认异常传播路径：
+
+```
+Managed.ApplicationTick        无 try/catch  ← CrashGuard 的挂载点
+  → CoreManaged.OnApplicationTick   无 try/catch
+    → Module.OnApplicationTick      **只有 finally，没有 catch**
+      → MBSubModuleBase.OnApplicationTick   ← 我们的代码
+```
+
+⇒ 结论：托管异常**会**传播到被 patch 的方法。
+**这条必须先验**，否则"游戏存活"可能是引擎自己吞了异常 —— 那验收就是假的。
+
+另外核验了**抛点位置**（IL 级，不是数括号）：
+`SubModule.OnApplicationTick` 有 2 个异常处理器，唯一的 `throw`（`IL_004e`）
+落在**所有 handler 区间之外** ⇒ 不会被我们自己的 try 吃掉。
+
+> ⚠️ 这一点是**真陷阱**：该方法每段都自带 `try`（AGENTS.md「主线程 tick 硬规则」要求隔离）。
+> 若抛点在段内，会被**自己的 catch** 吃掉 ⇒ 异常到不了 `Managed.ApplicationTick`
+> ⇒ 游戏"没崩"但原因是**我们自己吞的**，与守卫生效无关 ⇒ **验收假通过**。
+
+### 7.5 真机验收**发现并修掉**的一个真 bug
+
+**症状（两个产物互相矛盾）**：`bridge_status.json` 写 `installed:false / patchedTargets:0`，
+而同一时刻 `crashguard.jsonl` 明明写着"已挂 3 个目标"。
+
+**根因**：`WriteStatus("loaded")` 在 `CrashGuard.Install()` **之前**执行 ⇒
+写状态时 `PatchedCount` 还是 0。而 `bl_status` 读的是**状态文件** ⇒
+外部（和 MCP）会误判成"守卫没装上"。
+
+**修法**：`Install()` 之后**重写一次状态**。已重编译部署（sha `67CE4420`）。
+
+**为什么值得单独记**：这不是"漏写一个字段"，而是**两个产物对同一事实给出不同说法** ——
+比单纯缺失更难查，因为两处看起来都"有值"。
+
+### 7.6 验收的边界（如实声明）
+
+- ✅ 已验：**托管异常**在 tick 路径被吞掉、游戏继续跑；守卫关闭时同一条异常终止进程。
+- ❌ **未验**：原生崩溃（SEH/`0xC0000005`）—— **结构上不可能**被 Finalizer 拦住，
+  那类仍走 `bl_crash` + minidump（这是设计边界，不是缺陷）。
+- ❌ **未验**：熔断/配额在真机上的触发（需要连续制造 >20 次同签名异常；
+  逻辑已有 25/27 条离线判据覆盖，但**真机未跑**）。
+- ❌ **未验**：真实场景（读档、战斗、AI 卡死）中的意外收益与副作用 ——
+  本轮用的是**受控注入**，不是"等一个自然崩溃"。
+
+### 7.7 真机测试怎么复现
+
+```powershell
+# 1) 开守卫
+#    <我的文档>\...\BlBridge\blbridge_game.json: {"crashGuardEnabled": true}
+
+# 2) 启动（受控抛异常需环境变量闸门）
+$env:BLBRIDGE_ALLOW_CRASH_TEST="1"
+powershell -ExecutionPolicy Bypass -File tools\bl_launch.ps1
+
+# 3) 发受控托管异常
+python -c "import sys;sys.path.insert(0,'tools');import bl_mcp;print(bl_mcp.send_command('crash_test',{'mode':'managed'}))"
+
+# 4) 判据：游戏存活 + crashguard.jsonl 出现 action=swallow
+#    对照组：把 crashGuardEnabled 改 false 重启，同样操作 ⇒ 进程应终止
+```
