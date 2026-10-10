@@ -12,7 +12,92 @@
 
 ## 一、当前状态牌（会话 A 维护，改完请更新）
 
-> **更新于 2026-10-08（A 线：A5 + A3/A4/A4b + R1 + **三条写路径缺陷修复**，**已部署 + 已提交**）**
+> **更新于 2026-10-10（战役观察者轮：工具 54→76 + CrashGuard 记账缺口；**已部署**）**
+> ⚠️ **本节由 2026-10-10 会话（记为会话 A'）重写** —— 原状态牌停留在 2026-10-08，
+> 而其后已有多次部署与提交（见 `git log`）。**状态牌是声明不是事实**（这条教训此前已记过一次）。
+
+### ✅ 本轮改动**已 `-Deploy`** —— 现役 DLL 为 `7492E6218274E62E`
+
+| 项 | 值 |
+|---|---|
+| **可以 `-Deploy` 吗** | ✅ **已部署且一致**。现役 DLL `7492E6218274E62E`（328.5 KB）＝ 仓库源码构建产物；`bl_check_dispatch.py` **79/79 通过**、`bl_selftest.py` **全绿** |
+| **本轮交付** | **战役事件观察者**（9 个 `CampaignEvents` 处理器，事件流**非轮询**）+ **6 个刺激器**（宣战/和平/时间流速/存档/回主菜单）+ **3 个遭遇对话工具** + **战役模式判定**（`isSandbox`/`isStoryMode`/`campaignType`）+ **CrashGuard 记账缺口修复** |
+| **工具数** | **54 → 79**（`module/mcp/manifest.json` 的 `toolCount` 已同步为 79）|
+| ★ **两个真 bug 已修** | ① **dup-key**：`"type"` 撞名 ⇒ 同一 JSON 两个同名键 ⇒ 事件类型被静默改写成 `town`/`castle`（101 行中招）；② **`index` 参数**发成字符串 ⇒ `Jmini.Num` 只扫裸数字读不到（**同 `multiplier` 的坑，本项目已重犯两次**）|
+| ★★ **CrashGuard 记账缺口** | 两段式记账（回调入队 + `Drain()` 下一帧写盘）在**"吞完同一 tick 就崩"**时丢账 ⇒ 修复前 `swallowed=0`（**看起来像守卫没干活**）。改为**决定性事件立即落盘**（`Jw.TryWriteGuardLog` 返回 `bool`）。**A/B 验收：0 条 → 20 条 + 1 条熔断** ✅ |
+| **契约测试** | `bl_selftest.py` 新增 **⑯ 组**（7 项）锁住上述形态；**注入回归已验证会变红并精确点名** |
+
+### ⚠️ 本轮给会话 B 的两条**环境提醒**（不是 BlBridge 的改动）
+
+1. **`Modules\RBM\` 是 Vortex 的符号链接部署** —— 实测 136 个链接**全部可读出内容**，
+   但 **PowerShell 报 `Length=0` 是"链接自身"的显示特性、不代表空文件**。
+   ⇒ 判"部署成功/失败"**必须 `ReadAllBytes` 实读**，不能只看 `Length`/`Get-Item`。
+2. **`DiplomacyModel` 被 `BellumCivile` 覆盖** ⇒ 该 mod 组合下 `MakePeace` **不可达**
+   （DLL 含 `BlockWhitePeacePatch`/`CivilWarMakePeacePatch`）⇒ **别把它当 BlBridge 的工具缺陷**。
+
+### ⚠️ `bl_selftest.py` 现有 **2 项环境相关失败**（★ 非本轮引入，如实标注）
+
+`A4b ★真机: RBM 真档两种形式的计数与独立正则吻合` / `A4b ★真机: 要改的三个 RBM 开关读得到`
+
+**根因**：这两条判据读 **真档** `Documents\…\Configs\RBM\config.xml`，并要求
+**形式②（`<Option …/>`）与形式①（`<Tag>V</Tag>`）都非空**。
+而 Vortex 于 **2026-10-10 23:15:58 重装 RBM** ⇒ 该文件被**重置为出厂态**：
+形式② = **0**、形式① = 206（`<Warbandlord>` 段与那三个开关**都不在了**）。
+
+**已核实与本轮改动无关**（三条独立证据）：
+① 本轮对 `bl_selftest.py` 的 diff **不落在 A4b 区域**（改动在 91 / 1418 / 2638+，A4b 在 ~2051）；
+② 直接用**独立正则**核对文件内容 ⇒ `n_opt=0`，**与任何代码版本无关**；
+③ 本轮新增的 **⑯ 组 7/7 全绿**。
+
+★ **这条判据本身有隐含前提："游戏跑过一次"**（形式②由游戏运行时写入）。
+⇒ 建议后续把它改成 **「文件存在则核对自洽、不满足前提则报 `[ENV]` 而非 FAIL」**（尚未实施）。
+
+### ★★ B11：探测失败被报成"已死"（与 B8/B9/B10 同族：报告与事实相反）
+
+`tools/bl_mcp.py` 的 `_pid_alive()` 只检查 `stdout`、**不看 `returncode`**：
+
+```python
+out = subprocess.run([...tasklist...], stdout=PIPE, ...).stdout   # 非 0 退出时 stdout 是空的
+return ('"%d"' % n) in out                                        # ⇒ 返回 False（= 已死）
+```
+
+**实测**（本机 `tasklist` 被安全策略拦成 `ERROR: Access denied`，rc=1、stdout 空）：
+
+```
+_pid_alive(一个明明活着的进程) = False     ← 应为 True
+```
+
+**消费点 `bl_mcp.py`**（等待循环）：`_pid_is_game(pid) is False` ⇒ **立刻 `_drop_pending()` 并报
+`process_exited`** ⇒ **游戏在跑，控制通道却把每个请求当"进程已退出"作废**（本该防幽灵战斗的
+`_drop_pending` 反向误伤）。
+
+**修复**：非 0 退出 ⇒ 回 `None`（**未知**，归因码走 `probe_unknown`）；`_pid_image_name` 同修；
+探针抽成可注入的 `_tasklist_query()`。
+
+**★★ 连带面（本轮最值得记的一条）**：`build_check()` 里原本只在 `alive is False` 时早退，
+`None` 只加一条 note **然后继续往下比**。修好"失败 ⇒ None"后这条分支**第一次真的可达** ⇒
+会对**根本没在跑**的游戏报 `game_running_other_build`（"进程内 DLL 与磁盘不同"）。
+已改成与"已退出"同级早退（带 `probeUnknown: true`）。
+⇒ **教训（B8 同款）：修正/放宽一处闸门 = 打开一条以前锁着的路，必须回头看那条路上有没有旧洞。**
+
+### ★ 备份不再被静默删除（`build.ps1`）
+
+原"只留最新 3 份"按 **mtime** 剪枝，而**文件名时间戳 = 部署时刻、mtime = DLL 构建时刻**（两者错开）
+⇒ 04:04:52 那次部署把 `bak_20261008_003506` 与 `bak_20261008_004143` **一起删掉**，
+而这两份正是下面那张旧表里"`scan_bad_data` = None"的**唯一反例样本** ⇒ 结论**无法就地复算**。
+⇒ 现改为 **归档**到 `<模块>\bak_archive\`（保留 3 份在旁 + 其余入档，逐份报 sha256，**不覆盖**同名）
+★ **纪律：被引用的证据样本必须留存，不能让构建脚本回收它。**
+
+> ### ⚠️ 下面这张 00:45 的备份表**已整体过期**（保留原文以示"曾经记过什么"）
+> 实测现状：`.bak_...003506` 与 `.bak_...004143` **在盘上已不存在**；现存 3 份备份是
+> `004523`(`F10558B390467E1F`) / `033242`(`4EC10B4F6CDEBAE1`) / `040452`(`94F721E47FC1B16F`)，
+> 且当时标为"现役"的 `4EC10B4F` **现在只是备份** —— 现役是 `31B97ED6`（286720 B @ 04:04:52）。
+> ⇒ 结论层不受影响，但**这张表的行不能再当事实引用**。
+
+---
+
+<details>
+<summary><b>▼ 以下是 <code>36938c8</code> 那一轮的旧状态牌（历史，勿当现状引用 —— 尤其是"未提交改动：无"与"strict-drift exit=0"两条）</b></summary>
 
 | 项 | 值 |
 |---|---|
@@ -23,7 +108,12 @@
 | ★ **部署状态自检** | `bl_check_deploy_consistency.py` → **全部通过**（A/B/C/D 四段）；`--strict-drift` → **exit=0**（48 个副本一致）|
 | ★ **全局闸门** | `bl_selftest.py` / `bl_check_dispatch.py`(+`--selftest`) / `bl_check_gabp_names.py --selftest` / `bl_patches_selftest.py` / `bl_metrics_selftest.py` / `baddataspec/run_selftest.py`(52/52) / A5(含 `--selftest`) / `check_repo_encoding.py` ⇒ **10/10 绿** |
 
-### ★★ 三条写路径缺陷（B8/B9/B10）—— 本轮最重要的交付，**已修 + 已部署 + 已提交**
+</details>
+
+> ★ 上面那轮**唯一仍然有效**的结论是：`31B97ED6` 那份 DLL 与**它自己那套**源码/清单一致
+> （A5 至今复跑仍全过）。其余（提交号、`strict-drift exit=0`、"未提交改动：无"）**都已被本轮取代**。
+
+### ★★ 三条写路径缺陷（B8/B9/B10）—— 上一轮最重要的交付，**已修 + 已部署 + 已提交**
 
 共同点：**报告与事实不符**（不会崩，只会让人得出**与磁盘相反**的结论）。
 详见 `docs/config-tool-safety.md`（三起事故档案）与 `E:\Document\BlBridge-缺陷记录-测试阶段.md`（B8/B9/B10）：
