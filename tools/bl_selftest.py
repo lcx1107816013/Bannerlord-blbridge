@@ -91,6 +91,48 @@ def check(cond, label, extra=""):
         FAIL.append(label)
 
 
+def _tasklist_env_ok(pid=None):
+    """本机 `tasklist` 到底能不能用（rc==0）。返回 True / False。
+
+    ★ 为什么需要这个（2026-10-08，B11）：存活/身份判据依赖 `tasklist`，而它在受限环境
+    （安全策略/EDR 拦成 `Access denied`、PATH 里没有、精简镜像）**整片不可用**。
+    此时**正确**行为是"探测失败 ⇒ 未知（None）"，而**错误**行为是"冒充已死（False）"。
+    两者在**同一个断言**下会给出相反结果，所以测试必须先知道自己在哪种环境里，
+    否则"本机 tasklist 恰好可用"会变成一条**未被声明的前置条件**（本项目的经典坑）。
+    """
+    try:
+        import bl_mcp as _bm
+        rc, _txt = _bm._tasklist_query(os.getpid() if pid is None else pid)
+        return rc == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fake_tasklist(image_by_pid):
+    """造一个**确定性的** `bl_mcp._tasklist_query`：给定 pid ⇒ 返回该映像名；否则"没这个进程"。
+
+    刻意在 **rc/text 这一层**注入（不是直接替换 `_pid_is_game` 的结论）——
+    这样被考验的仍是**真的解析逻辑 + 真的 verdict 分支**，而不是我喂进去的结论。
+    照 `jsontest` 的"应报 / 不应报"样本对纪律。
+    """
+    def _q(pid):
+        try:
+            n = int(pid)
+        except (TypeError, ValueError):
+            return 0, "INFO: No tasks are running which match the specified criteria.\r\n"
+        if n in image_by_pid:
+            return 0, '"%s","%d","Console","1","12,345 K"\r\n' % (image_by_pid[n], n)
+        return 0, "INFO: No tasks are running which match the specified criteria.\r\n"
+    return _q
+
+
+def _fake_tasklist_denied(rc=1):
+    """造一个"**探测不可用**"的假实现：非 0 退出 + 空输出（= 本沙箱里 tasklist 的真实形态）。"""
+    def _q(pid):  # noqa: ARG001
+        return rc, ""
+    return _q
+
+
 # ── A5 判据（部署一致性）用的小夹具：只在临时目录里造合成清单/源码 ──────
 #
 # 刻意写成**独立函数**而不是内联：让"注入了什么"一眼可见，
@@ -1418,6 +1460,72 @@ def test_menu_state_gate():
               "open_ui 闸门走 MainMenuStates（不再自己写\"空串 = 主菜单\"）", "")
 
 
+def test_crashguard_immediate_persist():
+    """v0.8.58：崩溃守卫的**决定性事件必须立即落盘**（源码级契约）。
+
+    ## 为什么立这条（真机踩到的缺口，2026-10-10）
+
+    删掉 RBM 后读档，`CraftingOrder.InitializeCraftingOrderOnLoad()` 抛 NRE：
+      · 崩溃栈顶有 `ApplicationTick_Patch1`（= 我们的 Harmony patch 帧）
+      · `ApplicationTick` 确实在守卫的 3 个挂载目标里
+      · NRE 也不在致命白名单里 ⇒ **设计上应该被吞**
+      · 但账本 `crashguard.jsonl` 里 **swallowed = 0**，只有 install 那条
+
+    ⇒ 真相是**两段式记账的盲区**：回调只入队，写盘由 `Drain()` 在下一帧做；
+      而那个异常被吞后**同一 tick 内进程就终止了** ⇒ `Drain()` 没轮到 ⇒ 记录消失。
+      **看起来像"守卫没干活"，实际可能是"干完了没来得及记"。**
+      这直接违背本模块自己的纪律：绝不静默失败。
+
+    ## 判据（读 C# 源码当数据源，与 ⑮ 的 C#↔Python 对账同一套做法）
+
+      1. `CrashGuard.WriteEvent` 里**必须**调用 `Jw.TryWriteGuardLog`（立即落盘路径）；
+      2. **不许**只靠 `Pending.Enqueue` 兜底（那就是原来那个会丢账的形态）；
+      3. 必须用 `TryWriteGuardLog` 而**不是** `WriteGuardLog` ——
+         后者是 void 且内部吞掉写失败 ⇒ 调用方无法判断"到底写下去了没有"，
+         写失败时会误以为成功、不再退回队列 ⇒ 记录真丢；
+      4. `JsonlWriter` 必须真的提供 `TryWriteGuardLog` 且**返回 bool**；
+      5. 失败时要能**退回队列**（不丢），即源码里 Enqueue 仍在（作为兜底）。
+    """
+    import re
+
+    guard_cs = os.path.join(HERE, os.pardir, "src", "CrashGuard.cs")
+    jw_cs = os.path.join(HERE, os.pardir, "src", "JsonlWriter.cs")
+
+    if not os.path.isfile(guard_cs):
+        check(True, "CrashGuard.cs 存在（部署副本可能没有 src/）",
+              "src/ 不在（部署副本）⇒ 跳过源码契约检查")
+        return
+
+    src = io.open(guard_cs, encoding="utf-8", errors="replace").read()
+
+    # 抽出 WriteEvent 方法体（从 `private static void WriteEvent` 到"主线程排空"注释之间）
+    i = src.find("private static void WriteEvent(")
+    j = src.find("主线程排空", i) if i >= 0 else -1
+    body = src[i:j] if (i >= 0 and j > i) else ""
+
+    # ⚠️ `check(cond, label, extra)` —— 参数**顺序**是 cond 在前（本项目既有约定）
+    check(bool(body), "1. WriteEvent 方法体已定位", "len=%d" % len(body))
+    check("TryWriteGuardLog" in body, "2. 调用 TryWriteGuardLog（立即落盘）",
+          str([l.strip() for l in body.splitlines() if "GuardLog" in l]))
+    check("Jw.WriteGuardLog(" not in body,
+          "3. 不再只用 WriteGuardLog（void 且吞失败 ⇒ 无法判断是否写下去）",
+          str([l.strip() for l in body.splitlines() if "Jw.WriteGuardLog" in l]))
+    check("Pending.Enqueue" in body,
+          "4. 保留 Pending.Enqueue 作为失败兜底（立即落盘失败时不丢）",
+          "Enqueue 是兜底路径")
+
+    jw = io.open(jw_cs, encoding="utf-8", errors="replace").read()
+    check("TryWriteGuardLog" in jw, "5. JsonlWriter 提供 TryWriteGuardLog", "")
+    # 必须返回 bool（不是 void）—— 否则调用方仍无法判断
+    tm = re.search(r"public static bool TryWriteGuardLog", jw)
+    check(tm is not None, "6. TryWriteGuardLog 返回 bool（失败可被调用方看见）",
+          "找到: %r" % (tm.group(0) if tm else None))
+    # 真实写成功后才 return true（AutoFlush=true ⇒ 已落盘）
+    k = jw.find("public static bool TryWriteGuardLog")
+    seg = jw[k:k + 900] if k >= 0 else ""
+    check("return true" in seg, "7. 写成功后 return true（AutoFlush 保证已落盘）", "")
+
+
 def main():
     import bl_common
     bl_common.safe_streams()      # 输出统一 UTF-8（见其 docstring：消费端是 UTF-8 管道）
@@ -2638,28 +2746,90 @@ def main():
     pend_dir = os.path.join(logdir, "commands", "pending")
     status_file = os.path.join(logdir, "bridge_status.json")
 
-    # 5.1 进程已退出：必须立即返回 process_exited，而不是傻等到 deadline
-    with io.open(status_file, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"runToken": "selftest-token-abc", "pid": 999999, "state": "idle"}))
-    t0 = time.time()
-    r5, e5 = bl_mcp.send_command("ping", {}, timeout=10)
-    dt = time.time() - t0
-    check(r5 is None and (e5 or "").startswith("process_exited"), "进程已退出 → process_exited", e5)
-    check(dt < 5.0, "进程死亡时立即返回（不傻等 10s）", "%.1fs" % dt)
+    # ★ 5.1/5.2 也要"进程已退出"这一支**确定地**成立（B11，2026-10-08）：
+    #   原来靠真 `tasklist` 去查 pid 999999 并期望 False。在 tasklist 被拦的环境里，
+    #   探测会正确地变成 None（未知）⇒ 早退**不该**发生 ⇒ 断言变成"傻等满 10s"而变红。
+    #   那**不是**缺陷，是测试没声明自己的环境前置。⇒ 这里注入"该 pid 上没有进程"，
+    #   让这一支在任何机器上都确定可达（考验的仍是真的早退逻辑）。
+    _saved_q_52 = bl_mcp._tasklist_query
+    try:
+        bl_mcp._tasklist_query = _fake_tasklist({})     # 任何 pid 都"没有这个进程"
+        # 5.1 进程已退出：必须立即返回 process_exited，而不是傻等到 deadline
+        with io.open(status_file, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"runToken": "selftest-token-abc", "pid": 999999, "state": "idle"}))
+        t0 = time.time()
+        r5, e5 = bl_mcp.send_command("ping", {}, timeout=10)
+        dt = time.time() - t0
+        check(r5 is None and (e5 or "").startswith("process_exited"),
+              "进程已退出 → process_exited（注入'该 pid 无进程'）", e5)
+        check(dt < 5.0, "进程死亡时立即返回（不傻等 10s）", "%.1fs" % dt)
 
-    # 5.2 请求必须被作废：pending 里不能留东西，否则游戏下次启动会把它执行掉
-    leftover = [f for f in os.listdir(pend_dir) if f.endswith(".json")] if os.path.isdir(pend_dir) else []
-    check(len(leftover) == 0, "超时后 pending 已清空（不会变成幽灵战斗）", leftover)
+        # 5.2 请求必须被作废：pending 里不能留东西，否则游戏下次启动会把它执行掉
+        leftover = [f for f in os.listdir(pend_dir) if f.endswith(".json")] if os.path.isdir(pend_dir) else []
+        check(len(leftover) == 0, "超时后 pending 已清空（不会变成幽灵战斗）", leftover)
+
+        # 5.2b ★★ B11 反向对照（"探测失败"不得被当成"已退出"）：
+        #     同一个状态文件、同一个调用，只把 tasklist 换成"被拦"⇒ 早退**必须不发生**，
+        #     归因码必须是 `probe_unknown`（未知）而不是 `process_exited`（已死）。
+        #     若哪天有人把 `_pid_alive` 退回"非 0 也返回 False"，这一条立刻变红。
+        bl_mcp._tasklist_query = _fake_tasklist_denied(1)
+        os.makedirs(pend_dir, exist_ok=True)
+        code_u, msg_u = bl_mcp._diag_no_response(1.0)
+        check(code_u == "probe_unknown",
+              "★★ B11 反向对照：tasklist 被拦 ⇒ 归因码为 `probe_unknown`（未知），"
+              "**不得**为 `process_exited`（否则'探不到'被当成'游戏死了'）",
+              "%s / %s" % (code_u, (msg_u or "")[:60]))
+    finally:
+        bl_mcp._tasklist_query = _saved_q_52
 
     # 5.3 桥未加载：归因码要能区分
     os.remove(status_file)
     code, _msg = bl_mcp._diag_no_response(1.0)
     check(code == "bridge_not_loaded", "无状态文件 → bridge_not_loaded", code)
 
-    # 5.4 存活探测：本进程 pid 必须被判为存活（否则上面的早退会误杀正常等待）
-    check(bl_mcp._pid_alive(os.getpid()) is True, "存活探测对现行进程返回 True")
-    check(bl_mcp._pid_alive(999999) is False, "存活探测对不存在的 pid 返回 False")
-    check(bl_mcp._pid_alive(None) is None, "无法探测时返回 None（未知，不当作失败）")
+    # 5.4 存活探测：★ B11（2026-10-08）—— 改用**确定性注入**，不再依赖"本机 tasklist 恰好可用"
+    #
+    # 原来这里直接调 `_pid_alive(os.getpid())` 并期望 True。问题是：这等于把
+    # **"本机 tasklist 可用"** 变成一条**没写出来的前置条件** —— 受限环境（安全策略拦
+    # `Access denied`）里它整片变红，而**变红的样子**恰好是"把活着的进程报成已死"，
+    # 也就是 B11 本身。⇒ 拆成两组：
+    #   ① **解析层**（注入 rc/text）：真实地考验 `_pid_alive` / `_pid_image_name` 怎么判；
+    #   ② **环境层**：如实报告本机 tasklist 能不能用（**不是**判据失败，是环境事实）。
+    # 这样无论在哪台机器上，①都在真的判定；②只说明环境，不冒充缺陷。
+    _saved_q = bl_mcp._tasklist_query
+    _denied_rc = 1
+    try:
+        # ①-a 正常探测：本进程 pid 应判为存活；不存在的 pid 应判 False
+        bl_mcp._tasklist_query = _fake_tasklist({os.getpid(): "python.exe"})
+        check(bl_mcp._pid_alive(os.getpid()) is True,
+              "存活探测对现行进程返回 True（注入确定性响应）", bl_mcp._pid_alive(os.getpid()))
+        check(bl_mcp._pid_alive(999999) is False,
+              "存活探测对不存在的 pid 返回 False（★ 与'探测失败'区分开）",
+              bl_mcp._pid_alive(999999))
+        check(bl_mcp._pid_alive(None) is None, "无法探测时返回 None（未知，不当作失败）")
+
+        # ①-b ★★ B11 的**反向对照**（这一条就是本轮缺陷的判据）：
+        #     "tasklist 被拦（非 0 + 空输出）" 必须报**未知**，**绝不能**报 False（已死）。
+        bl_mcp._tasklist_query = _fake_tasklist_denied(_denied_rc)
+        _alive_denied = bl_mcp._pid_alive(os.getpid())
+        check(_alive_denied is None,
+              "★★ B11 反向对照：tasklist 非 0 退出（被拦）⇒ 存活探测返回 **None（未知）**，"
+              "**不得**返回 False（否则会把跑着的游戏报成'已退出'）",
+              "实得 %r（False = 旧缺陷复现）" % (_alive_denied,))
+        check(bl_mcp._pid_is_game(os.getpid()) is None,
+              "★★ B11：探测失败时 `_pid_is_game` 也必须是 None（未知），不冒充'不是游戏'",
+              bl_mcp._pid_is_game(os.getpid()))
+        check(bl_mcp._pid_image_name(os.getpid()) is None,
+              "★★ B11：探测失败时 `_pid_image_name` 返回 None（不编造映像名）")
+    finally:
+        bl_mcp._tasklist_query = _saved_q
+
+    # ② 环境层（如实报告，不计入缺陷）：本机 tasklist 能否真的用上
+    _env_ok = _tasklist_env_ok()
+    print("  [%s] 环境：本机 `tasklist` %s" % ("OK" if _env_ok else "ENV",
+          "可用 —— 上面的注入与真实路径一致" if _env_ok
+          else "**不可用**（被安全策略拦截/不在 PATH）—— 这正是 B11 的真实触发环境；"
+               "上面的注入已证明该情形下返回的是'未知'而不是'已死'"))
 
     # ── ⑥ 构建一致性判定（源码 → 构建产物 → 部署文件 → 进程内 DLL）──────
     print()
@@ -2705,7 +2875,12 @@ def main():
     os.environ["BLBRIDGE_LOG_DIR"] = saved_log
 
     # 上一局遗留的状态文件（进程已退出）：不得据此下"进程内是旧 DLL"的结论
+    # ★ B11（2026-10-08）：注入"该 pid 上没有进程"，让"已退出"这一支**确定地**成立
+    #   （受限环境里真 tasklist 被拦 ⇒ 探测会正确地变 None，那是"未知"而不是"已退出"，
+    #    两条断言测的是**不同**的情形，必须分开注入才都能被确定地考验）。
     saved_log2 = os.environ.get("BLBRIDGE_LOG_DIR")
+    _saved_q_6 = bl_mcp._tasklist_query
+    bl_mcp._tasklist_query = _fake_tasklist({})          # 任何 pid 都"没有这个进程" = 已退出
     with io.open(status_file, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"runToken": "x", "pid": 999999,
                              "build": {"version": "old", "loadedSha256": "deadbeefdeadbeef",
@@ -2713,6 +2888,22 @@ def main():
     r = bl_mcp.build_check(src_dir, mod_dir)
     check(r["code"] == "game_offline", "进程已退出的遗留状态 → game_offline（不误报）", r["code"])
     check("上次会话" in (r.get("detail") or ""), "并在 detail 里说明那是上次会话", r.get("detail"))
+
+    # ★★ B11 连带面（2026-10-08）：**探测失败**（未知）也必须走 game_offline，
+    #    不得继续往下比、更不得报 `game_running_other_build`（"进程内 DLL 与磁盘不同"）——
+    #    对一个**根本没在跑**的游戏下"必须重启/部署存疑"的结论，是与事实相反。
+    #    这一支在 `_pid_alive` 修好前近乎不可达 ⇒ 修好它**打开了这条以前锁着的路**，
+    #    正是 B8 记过的那条教训（放宽闸门 ⇒ 回头看那条路上有没有旧洞）。
+    bl_mcp._tasklist_query = _fake_tasklist_denied(1)
+    r_unknown_bc = bl_mcp.build_check(src_dir, mod_dir)
+    check(r_unknown_bc["code"] == "game_offline",
+          "★★ B11 连带面：探测失败（未知）⇒ `game_offline`，**不得**报 "
+          "`game_running_other_build`（凭'不知道'断定'进程内是别的构建'）",
+          r_unknown_bc["code"])
+    check(r_unknown_bc.get("probeUnknown") is True,
+          "★★ B11 连带面：探测失败时带 `probeUnknown:true` 标记（调用方可知这是'未知'而非'已退出'）",
+          r_unknown_bc.get("probeUnknown"))
+    bl_mcp._tasklist_query = _saved_q_6
 
     # 下面两条要的是"进程活着"这一支。本机没有真的游戏进程，而 `_pid_is_game` 自 2026-09-27 起
     # **要验映像名**（python.exe 不算游戏）⇒ 这里显式替换判定函数，而不是放宽判据：
@@ -2790,34 +2981,68 @@ def main():
     # ── 进程身份判据（2026-09-27 实测立的项）───────────────────────────
     # pid 会被系统回收再用：状态文件里的 pid 6040 实测已变成 `MSI_Central_Service.exe`，
     # 只查"这个 pid 上有进程吗"就会报 `verdict: running / 游戏进程存活`，把调用方直接带偏。
-    check(bl_mcp._pid_is_game(os.getpid()) is False,
-          "本机 python 进程不是游戏（pid 身份校验成立）", bl_mcp._pid_image_name(os.getpid()))
-    check(bl_mcp._pid_is_game(999999) is False, "不存在的 pid → False（不是未知）")
-    check(bl_mcp._pid_is_game(None) is None, "pid 无法探测 → None（未知，绝不冒充 False）")
+    #
+    # ★ B11（2026-10-08）：本组也改为**确定性注入**。原来直接调 `_pid_is_game(os.getpid())`
+    #   并期望 False —— 那是把"本机 tasklist 可用"当成隐式前置；tasklist 被拦时正确地
+    #   返回 None（未知），断言就变红，而红色看起来像"缺陷"。注入后与真实路径同构：
+    #   本机 python 进程的映像名是 python.exe ⇒ 不含 bannerlord/mountandblade/taleworlds ⇒ False。
+    _saved_q_8 = bl_mcp._tasklist_query
+    try:
+        bl_mcp._tasklist_query = _fake_tasklist({os.getpid(): "python.exe"})
+        check(bl_mcp._pid_is_game(os.getpid()) is False,
+              "本机 python 进程不是游戏（pid 身份校验成立）", bl_mcp._pid_image_name(os.getpid()))
+        check(bl_mcp._pid_is_game(999999) is False, "不存在的 pid → False（不是未知）")
+        check(bl_mcp._pid_is_game(None) is None, "pid 无法探测 → None（未知，绝不冒充 False）")
+
+        # ★★ B11 反向对照：**"探测失败"绝不能被读成"不是游戏"**
+        bl_mcp._tasklist_query = _fake_tasklist_denied(1)
+        check(bl_mcp._pid_is_game(os.getpid()) is None,
+              "★★ B11 反向对照：tasklist 被拦 ⇒ `_pid_is_game` 返回 None（未知），"
+              "**不得**返回 False（'探不到' ≠ '不是游戏'）",
+              "实得 %r" % (bl_mcp._pid_is_game(os.getpid()),))
+
+        # pid 复用回归（用**真的**解析逻辑 + 注入的映像名）
+        bl_mcp._tasklist_query = _fake_tasklist({os.getpid(): "MSI_Central_Service.exe"})
+        write_diag({"pid": os.getpid(), "state": "battle", "cleanExit": False, "missionInProgress": True})
+        r_reuse = bl_mcp.run_state_diagnosis(diag_logs)
+        check(r_reuse["verdict"] != "running" and r_reuse.get("pidImageName") == "MSI_Central_Service.exe",
+              "同一个 pid 上不是游戏进程（pid 被复用）→ **不许报 running**，并给出实际映像名", r_reuse)
+
+        # 同一份状态文件，换成"该 pid 上没有进程" ⇒ 才应给出 process_exited 那一支
+        bl_mcp._tasklist_query = _fake_tasklist({})
+        write_diag({"pid": 999999, "state": "idle", "cleanExit": True, "missionInProgress": False})
+        r = bl_mcp.run_state_diagnosis(diag_logs)
+        check(r["verdict"] == "clean_exit", "进程退出 + 正常卸载 → clean_exit", r["detail"])
+
+        write_diag({"pid": 999999, "state": "battle", "cleanExit": False, "missionInProgress": True,
+                    "lastBattle": "battle_x.jsonl"})
+        r = bl_mcp.run_state_diagnosis(diag_logs)
+        check(r["verdict"] == "crashed_in_battle", "战斗中被杀 → crashed_in_battle", r["detail"])
+        check("battle_x.jsonl" in (r["detail"] or ""), "崩溃现场给出战斗文件")
+
+        write_diag({"pid": 999999, "state": "loaded", "cleanExit": False})
+        check(bl_mcp.run_state_diagnosis(diag_logs)["verdict"] == "crashed", "非战斗态被强杀 → crashed")
+
+        write_diag({"pid": 999999, "state": "idle"})
+        check(bl_mcp.run_state_diagnosis(diag_logs)["verdict"] == "undetermined",
+              "旧版状态文件 → undetermined（不瞎猜）")
+    finally:
+        bl_mcp._tasklist_query = _saved_q_8
 
     write_diag({"pid": os.getpid(), "state": "battle", "cleanExit": False, "missionInProgress": True})
     check(bl_mcp.run_state_diagnosis(diag_logs, pid_probe=lambda p: True)["verdict"] == "running",
           "pid 上确实是游戏进程 → running（注入判定，绕开真机依赖）")
-    r_reuse = bl_mcp.run_state_diagnosis(diag_logs)
-    check(r_reuse["verdict"] != "running" and bool(r_reuse.get("pidImageName")),
-          "同一个 pid 上不是游戏进程（pid 被复用）→ **不许报 running**，并给出实际映像名", r_reuse)
 
-    write_diag({"pid": 999999, "state": "idle", "cleanExit": True, "missionInProgress": False})
-    r = bl_mcp.run_state_diagnosis(diag_logs)
-    check(r["verdict"] == "clean_exit", "进程退出 + 正常卸载 → clean_exit", r["detail"])
-
-    write_diag({"pid": 999999, "state": "battle", "cleanExit": False, "missionInProgress": True,
-                "lastBattle": "battle_x.jsonl"})
-    r = bl_mcp.run_state_diagnosis(diag_logs)
-    check(r["verdict"] == "crashed_in_battle", "战斗中被杀 → crashed_in_battle", r["detail"])
-    check("battle_x.jsonl" in (r["detail"] or ""), "崩溃现场给出战斗文件")
-
-    write_diag({"pid": 999999, "state": "loaded", "cleanExit": False})
-    check(bl_mcp.run_state_diagnosis(diag_logs)["verdict"] == "crashed", "非战斗态被强杀 → crashed")
-
-    write_diag({"pid": 999999, "state": "idle"})
-    check(bl_mcp.run_state_diagnosis(diag_logs)["verdict"] == "undetermined",
-          "旧版状态文件 → undetermined（不瞎猜）")
+    # ★★ B11 反向对照（"未知"绝不冒充结论）：探测失败 ⇒ verdict 必须是 unknown，不是 crashed/clean_exit
+    _saved_q_8b = bl_mcp._tasklist_query
+    try:
+        bl_mcp._tasklist_query = _fake_tasklist_denied(1)
+        r_unknown = bl_mcp.run_state_diagnosis(diag_logs)
+        check(r_unknown["verdict"] == "unknown" and r_unknown.get("alive") is None,
+              "★★ B11 反向对照：进程探测失败 ⇒ verdict=`unknown`（不做判断），"
+              "**不得**报 crashed/clean_exit（那会把'不知道'说成'已崩'）", r_unknown.get("verdict"))
+    finally:
+        bl_mcp._tasklist_query = _saved_q_8b
 
     stop["v"] = True
 
@@ -2902,6 +3127,13 @@ def main():
     print("⑮ 动作账本 bl_common.load_actions + src/ActionLedger.cs 字段对账")
     print("=" * 90)
     test_action_ledger()
+
+    # ── ⑯ 崩溃守卫：决定性事件必须立即落盘（v0.8.58）────────────────────
+    print()
+    print("=" * 90)
+    print("⑯ 崩溃守卫 src/CrashGuard.cs：swallow 记录必须立即落盘（防'吞完就崩'丢账）")
+    print("=" * 90)
+    test_crashguard_immediate_persist()
 
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))

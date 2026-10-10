@@ -532,6 +532,50 @@ namespace BlBridge
             e.TargetMethod = target;
             e.StackFrames = frames;
             e.Count = count;
+
+            // ── ★ v0.8.58：「决定性事件」**立即落盘**，不进队列 ──────────────
+            //
+            // ## 为什么必须这样（实机踩到的真缺口）
+            //
+            // 原设计是两段式（照 `ExceptionProbe` 的做法）：回调只入队，
+            // 写盘由 `Drain()` 在 `OnApplicationTick` 里做。
+            // 对**高频**事件（每帧几百条）那是对的 —— I/O 不能压在 tick 路径上。
+            //
+            // 但 **`swallowed` 是低频且决定性的**：它代表"我们刚刚替游戏挡了一次崩溃"。
+            // 实测（2026-10-10，删掉 RBM 后读档）正好撞上它的盲区：
+            //   `CraftingOrder.InitializeCraftingOrderOnLoad()` 抛 NRE
+            //   → finalizer 吞掉（或放行）→ 紧接着**同一 tick 内进程终止**
+            //   → `Drain()` **还没轮到** → 账本里查不到任何 swallow 记录
+            //   ⇒ 结果看起来像"守卫没干活"，而真相可能是"干完了没来得及记"。
+            //   这直接违背本模块自己的纪律：**绝不静默失败 / 宁可显式说"没测到"**。
+            //
+            // ## 为什么这样安全（不会把 I/O 压回 tick 路径）
+            //   · `swallowed` / `fatal_passthrough` / `breaker_open` / `quota_exhausted`
+            //     都是**每次异常才一条**，而异常本身不是每帧发生的；
+            //   · 真正的"每帧"路径是 `Finalizer` **开头就 return null 的正常情形**
+            //     （`__exception == null`）—— 那条**根本不进本函数**；
+            //   · 且配额（默认 200）+ 熔断已把总量封顶 ⇒ 最坏也就几百次写盘。
+            //   ⇒ 为"崩溃前最后一条记录不丢"付这点代价是值得的。
+            //
+            // ⚠️ 仍然全程 try/catch：**记账失败绝不能影响 Finalizer 的返回值**
+            //   （否则就成了"守卫自己把游戏搞崩"）。
+            //
+            // ★ 必须用 `TryWriteGuardLog`（而非 `WriteGuardLog`）：
+            //   后者是 `void` 且内部吞掉写失败 ⇒ 我们**无法知道是否真写下去了**，
+            //   写失败时就会误以为成功、不再退回队列 ⇒ 记录真丢（正是要修的缺口）。
+            try
+            {
+                if (Jw.TryWriteGuardLog(FormatEvent(e)))
+                {
+                    Interlocked.Decrement(ref _queued);
+                    return;
+                }
+            }
+            catch
+            {
+                // 立即落盘抛了 ⇒ 走下面的队列兜底（不丢）
+            }
+
             Pending.Enqueue(e);
         }
 

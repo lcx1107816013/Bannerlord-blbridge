@@ -92,6 +92,25 @@ def _game_session(path=None):
         return None
 
 
+def _tasklist_query(pid):
+    """向 `tasklist` 查一个 pid，返回 `(returncode, text)`；起不来进程时返回 `(None, "")`。
+
+    ★★ 刻意抽成单独一层（2026-10-08，B11）：把「**能不能真的调到 tasklist**」与
+    「**拿到输出后怎么判**」分开 —— 后者因此可以在任何环境里被**确定性地测**
+    （见 `bl_selftest.py` 的 B11 组：注入 `(rc, text)` 三态）。
+    否则这两件事被 subprocess 绑死，测试就只能依赖"本机 tasklist 恰好可用"，
+    在受限环境（安全策略拦 `Access denied`、PATH 里没有、精简镜像）里整片判据失灵 ——
+    而**失灵的样子**恰好是"冒充已死"，正是 B11 要防的。
+    """
+    try:
+        proc = subprocess.run(["tasklist", "/FI", "PID eq %d" % int(pid), "/NH", "/FO", "CSV"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=8)
+    except Exception:  # noqa: BLE001
+        return None, ""
+    return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+
 def _pid_alive(pid):
     """判断进程是否存活。返回 True / False / None。
 
@@ -104,11 +123,14 @@ def _pid_alive(pid):
         return None
     if n <= 0:
         return None
-    try:
-        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % n, "/NH", "/FO", "CSV"],
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             timeout=8).stdout.decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
+    # ★★ 必须看 returncode（2026-10-08 修，B11）：tasklist **非 0 退出**时 stdout 是**空的**，
+    #   而被安全策略/EDR 拦、不在 PATH、`Access denied` 都是这种形态。
+    #   只看 stdout 会把"探不到"读成"这个 pid 上没有进程" ⇒ 返回 False（=已死），
+    #   而消费点（等待循环）见到 False 就**立刻 `_drop_pending()` 并报 `process_exited`**
+    #   ⇒ **游戏明明在跑，控制通道却把每个请求当"进程已退出"作废**。
+    #   ⇒ "没有输出" ≠ "没有这个进程"：非 0 一律按**未知**回 None，让归因码走 `probe_unknown`。
+    rc, out = _tasklist_query(n)
+    if rc is None or rc != 0:
         return None
     return ('"%d"' % n) in out
 
@@ -124,11 +146,11 @@ def _pid_image_name(pid):
         return None
     if n <= 0:
         return None
-    try:
-        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % n, "/NH", "/FO", "CSV"],
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             timeout=8).stdout.decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001
+    # 与 `_pid_alive` 同一个洞：非 0 退出 ⇒ 探测失败（未知），不是"没有名字"。
+    # 若这里不判，`_pid_is_game` 会把"探测失败"读成"名字认不出" ⇒ 同样落进 None，
+    # 但更危险的是它让"探测不可用"看起来像"这不是游戏"（两句语义完全不同）。
+    rc, out = _tasklist_query(n)
+    if rc is None or rc != 0:
         return None
     for line in out.splitlines():
         line = line.strip()
@@ -636,6 +658,13 @@ def build_check(src_dir=None, mod_dir=None):
       game_not_restarted        进程内是更早的 DLL（磁盘已更新）→ 必须重启游戏
       game_running_other_build  进程内 DLL 与磁盘上的不同 → 部署路径存疑
       game_offline              游戏没在运行，无法核对进程内身份（文件链条可能仍然一致）
+                                ★ 若同时带 `probeUnknown: true`，含义是**探测失败 = 未知**
+                                （不是"已退出"）—— 例如 `tasklist` 被安全策略拦截。
+                                两种情形都**不**核对进程内 DLL：不知道进程在不在，
+                                就无法确立"进程内是哪份 DLL"这一环（见 B11）。
+
+    ★ 判据必须**三值**：True / False / **None（未知）**。把"未知"并入任何一侧都会产出
+    与事实相反的结论（`None` 曾被当成"可以继续比" ⇒ 对没在跑的游戏报"进程内是别的构建"）。
 
     v0.8.12：本函数从**部署副本**（<游戏根>\\Modules\\BlBridge\\mcp\\bl_mcp.py）跑时，
     旁边没有 src/，源码段会跳过并在 `sourceCheck` 里如实标注（不再报一个不存在的 srcDir）。
@@ -756,13 +785,28 @@ def build_check(src_dir=None, mod_dir=None):
     alive = _pid_is_game(sess.get("pid"))
     loaded = (b.get("loadedSha256") or "").lower()
     mismatch = bool(b.get("fileChangedSinceLoad")) or (loaded and not deployed.lower().startswith(loaded))
-    if alive is False:
+    # ★★ `None` 必须与 `False` 一样**早退**（2026-10-08 修，B11 的连带面）。
+    #
+    # 这里曾写成：False ⇒ game_offline 早退；**None ⇒ 只加一条 note 然后继续往下比**。
+    # 当时 `None` 近乎不可达（`tasklist` 几乎总能返回 0），所以没暴露。而 `_pid_alive`
+    # 修好"探测失败 ⇒ None"之后，这一支**第一次真的可达** —— 于是"探测不可用"会一路走到
+    # 下面的 `mismatch` 判定，对一个**根本没在跑**的游戏报出 `game_running_other_build`
+    # （"进程内 DLL 与磁盘不同"）⇒ 又是一条**与事实相反**的结论。
+    # 这正是本项目记录过的那条教训：**放宽/修正一处闸门 = 打开一条以前锁着的路 ⇒
+    # 必须回头看那条路上有没有旧洞**（B8 的归因）。
+    #
+    # 语义上两者本就该同级：**"进程不在"与"不知道进程在不在"，都无法确立"进程内 DLL"这一环**
+    # ⇒ 一律 game_offline（文件链条照常给出；不硬比、不臆断"必须重启"）。
+    if alive is False or alive is None:
         out["code"] = "game_offline"
         out["detail"] = ("游戏没在运行（状态文件是上次会话留下的）—— 文件链条一致；重启游戏后再核对进程内 DLL"
                          + ("；注意上次会话进程内是 %s（与当时的磁盘不一致）" % b.get("loadedSha256") if mismatch else ""))
+        if alive is None:
+            out["detail"] = ("**无法确认游戏是否在运行**（进程存活探测失败 = 未知，例如 tasklist 被安全策略拦截）"
+                             "—— 文件链条一致，但『进程内 DLL』这一环无法核对；"
+                             "启动游戏后重跑，或修好取样环境再核")
+            out["probeUnknown"] = True
         return out
-    if alive is None:
-        out["note"] = "进程存活探测失败（未知），下面的进程内比对仅供参考"
 
     if b.get("fileChangedSinceLoad"):
         out["code"] = "game_not_restarted"
@@ -2055,6 +2099,14 @@ TOOLS = [
         "description": ("只读：战役全局概览（控制面 A 阶段）。"
                         "返回 inCampaign / clans / kingdoms / settlements / mobileParties 计数，"
                         "以及玩家 gold / influence / playerClan / playerKingdom / campaignDays / timeControlMode。"
+                        "★ **`isSandbox` / `isStoryMode` / `campaignType`（v0.8.55）**："
+                        "**一眼区分这是沙盒还是剧情战役** —— 此前没有这个字段，"
+                        "只能靠翻存档元数据猜，极易搞错档。"
+                        "判据是 `Campaign.Current` 的**运行时类型**"
+                        "（沙盒 = `TaleWorlds.CampaignSystem.Campaign`；"
+                        "剧情 = 子类 `StoryMode.CampaignStoryMode`），"
+                        "**不是** `CampaignGameMode`（那个枚举只有 None/Campaign/Tutorial，不区分二者）。"
+                        "另附 `activeSaveSlot`（当前活动存档位）。"
                         "⚠️ 前置：战役内（Campaign 上下文）；主菜单 / 自定义战斗如实报 no_campaign，不猜。"
                         "需要 v0.8.40+ DLL（含 campaign_overview）。"),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -2107,6 +2159,146 @@ TOOLS = [
             "count": {"type": "integer", "description": "返回的日志条数，默认 20，上限 200"}},
             "additionalProperties": False},
     },
+    # ── 战役观察者（v0.8.50，observer 层）────────────────────────────────
+    #
+    # ★ 这四个补的是**结构性缺口**：此前所有 bl_campaign_* / bl_list_* 都是**轮询快照**，
+    #   "快进 5 天 → 看一眼"两次采样之间的**所有事件都丢了**。而 mod 测试要回答的
+    #   "某位领主下令之后命令生效了没有"、"哪两支队伍打起来了"恰恰是**事件**。
+    #   ⇒ C# 侧订阅 9 个 CampaignEvents，写 campaign_events.jsonl；这里读它。
+    #
+    # ⚠️ 需要 v0.8.50+ DLL（含 CampaignObserver）。老 DLL 调它会得到 unknown_method。
+    {
+        "name": "bl_observer_status",
+        "description": ("观察者状态：是否启用 / 已记录条数 / 缓冲占用 / **丢弃计数** / "
+                        "写手路径与错误 / 各事件类型计数 / **已订阅的事件名清单**。"
+                        "★ `droppedFromBuffer` 必须看：它 >0 表示环形缓冲丢过数据，"
+                        "此时 `bl_observer_events` 返回的**不是全量** —— 别把『丢了』读成『没发生』。"
+                        "★ `writerOpen=false` 且 recorded=0 说明**写手没开**（而非没事件）—— 两者必须分清。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_observer_events",
+        "description": ("读最近战役事件（**事件驱动，不是快照**）。返回原始 JSON 行，不转述、不裁剪字段。\n"
+                        "事件类型：`map_event_started`（哪两支队伍开打/什么类型/双方实力）、"
+                        "`map_event_ended`（结果/退却方/双方兵力）、`siege_started`、"
+                        "`settlement_owner_changed`（聚落易主）、`war_declared` / `make_peace`（外交）、"
+                        "`party_destroyed`、**`ai_behavior_changed`**（★ 领主意图变了 —— "
+                        "`was`→`now` 就是『命令是否生效』的直接读数）、`ai_tick`（仅 verboseAi=true）、"
+                        "`observer_start`。\n"
+                        "每条都带 `seq` / `utc` / `day`（战役天数）⇒ 可与 `bl_campaign_time` 对账。\n"
+                        "增量拉取：传 `sinceSeq` 只看更新的（配 `bl_observer_status` 的 recorded）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "type": {"type": "string",
+                     "description": "按类型过滤，逗号分隔多个（如 'map_event_started,ai_behavior_changed'）；不传=全部"},
+            "limit": {"type": "integer", "description": "最多返回多少条（默认 50，上限 500）"},
+            "sinceSeq": {"type": "integer", "description": "只看 seq 大于它的（增量拉取用）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_observer_config",
+        "description": ("运行时调观察者：`enabled`（总开关，默认 true）/ `verboseAi`"
+                        "（是否连『未变化』的 AI 决策也记 —— 默认 false，因为 AI tick 每支队伍每 "
+                        "1/3/6 小时触发一次，全记会淹没信号并冲爆缓冲）/ `maxEvents`（环形缓冲容量，默认 2000）。"
+                        "三个字段都可选，**只改给了的那些**（缺省=保持现状，不会猜成 false）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "enabled": {"type": "boolean"},
+            "verboseAi": {"type": "boolean"},
+            "maxEvents": {"type": "integer"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_observer_clear",
+        "description": ("清空观察者内存缓冲（**累计计数与 dropped 保留** —— 它们是本次会话的事实，"
+                        "不能因为清屏而消失）。用于『跑一段 → 清空 → 再跑一段』的干净对照。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    # ── 战役刺激器（v0.8.50）：**会改存档**，与上面的只读 observer 相反 ──
+    #
+    # ★ 为什么必须有：`war_declared` / `make_peace` / `siege_started` /
+    #   `settlement_owner_changed` 这 4 个观察者处理器，在**平静存档里永远等不到** ——
+    #   沙盒开局所有王国互相和平，不宣战就不会有围攻、不会有聚落易主。
+    #   ⇒ 那不是代码坏，是**条件不存在**。这三个工具负责**造出条件**。
+    #
+    # ⚠️ 这三个是**写操作**（与 bl_observer_* 的只读性质相反）：
+    #   走官方 `DeclareWarAction` / `MakePeaceAction` ⇒ 事件正常派发。
+    #   全部"写完回读"确认，verify 为 false 时**当作失败**处理。
+    {
+        "name": "bl_war_status",
+        "description": ("**造刺激前先看现状**：列出现在哪几对王国在交战（`wars[]` 带 name/stringId/fiefs）"
+                        "+ 每个王国的交战数 `warCountByKingdom`。\n"
+                        "为什么需要它：`bl_declare_war` 若挑到一对**本来就在交战**的势力，"
+                        "会返回 `already_at_war` 而**不触发** `WarDeclared` 事件 —— 先查这个能避免白跑。"
+                        "`warCount == 0` 说明这是平静档，战斗类事件观察者收不到。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_declare_war",
+        "description": ("★ **让两个王国开战**（会真实改存档）。用来**确定性地**造出 `WarDeclared` 事件，"
+                        "从而验证观察者与后续连锁（围攻 / 野战 / 聚落易主）。\n"
+                        "走官方 `DeclareWarAction.ApplyByDefault` ⇒ 关系表 + PoliticalStagnation + "
+                        "可见实体刷新 + **`OnWarDeclared` 事件**全部按官方路径发生。\n"
+                        "参数 `faction1` / `faction2` 用 **StringId**（如 `empire_w` / `vlandia`，"
+                        "不受本地化影响）或名字（含中文名）匹配；**不传 `faction2` 会自动挑一个"
+                        "还没和 faction1 交战、封地最多的王国**（省得先查名字）。\n"
+                        "★ **写完回读**：返回 `verifiedAtWar` —— 为 false 时**当作失败**处理，"
+                        "别假设宣战成功了。\n"
+                        "⚠️ 本来就在交战 ⇒ 返回 `already_at_war` 且**不做改动**（事件不会再触发）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "faction1": {"type": "string", "description": "StringId（如 empire_w）或名字；必填"},
+            "faction2": {"type": "string",
+                         "description": "StringId 或名字；**不传则自动挑一个还没交战的王国**"},
+            "detail": {"type": "string",
+                       "description": ("宣战原因（默认 Default）。可选：CausedByPlayerHostility / "
+                                       "CausedByKingdomDecision / CausedByRebellion / "
+                                       "CausedByCrimeRatingChange / CausedByKingdomCreation / "
+                                       "CausedByClaimOnThrone / CausedByCallToWarAgreement")}},
+            "required": ["faction1"], "additionalProperties": False},
+    },
+    {
+        "name": "bl_make_peace",
+        "description": ("让两个交战的王国**议和**（会真实改存档）。走官方 `MakePeaceAction.Apply` ⇒ "
+                        "`MakePeace` 事件正常派发。\n"
+                        "用途：造「一打一和」的对照（同一对势力，先看开战事件、再看议和事件）。\n"
+                        "不传 `faction2` 会自动挑一个**当前正与 faction1 交战**的王国。\n"
+                        "★ 写完回读：`verifiedPeace` 为 false 时**当作失败**。\n"
+                        "⚠️ 本来就没交战 ⇒ 返回 `not_at_war` 且不做改动。\n"
+                        "⚠️ **同文化永久战议和不了**（引擎的 `IsAtConstantWar`：帝国三分之间、"
+                        "以及同文化的小阵营 vs 王国），此时 `verifiedPeace=false` 属**预期行为**，"
+                        "不是工具坏了 —— 换一对不同文化的王国测。"),
+        "inputSchema": {"type": "object", "properties": {
+            "faction1": {"type": "string", "description": "StringId 或名字；必填"},
+            "faction2": {"type": "string", "description": "StringId 或名字；不传则自动挑当前交战方"}},
+            "required": ["faction1"], "additionalProperties": False},
+    },
+    {
+        "name": "bl_campaign_time_speed",
+        "description": ("★ **让战役时间前进**（等价于点屏幕中间那个「继续 / 倍速」键）。\n"
+                        "**这是整套观察者的前提** —— 读档后战役默认处于 `Stop`，不推时间就"
+                        "一条 AI / 战斗 / 围攻事件都不会产生（观察者只会记到 `observer_start`）。\n"
+                        "参数 `speed`：`0`=停 / `1`=正常 / `2`=加速 / `3`=最快。"
+                        "**推荐用 2 或 3** —— 它们映射到 `Unstoppable*` 档，**无条件推进时间**；"
+                        "`1` 也映射到 Unstoppable（保证无人值守时确定性流动）。\n"
+                        "也可用 `mode` 直接指定：Stop / Play / FastForward / UnstoppablePlay / "
+                        "UnstoppableFastForward。\n"
+                        "★ `multiplier`（可选，正数，原版上限非开发 15 / 开发 30）：设置"
+                        "`SpeedUpMultiplier` —— 等价于控制台 `campaign.set_campaign_speed_multiplier N`，"
+                        "**不依赖开控制台**。⚠️ 倍率**只在 FastForward 两档生效**；"
+                        "只给 multiplier 不给 speed/mode 时会自动配 `UnstoppableFastForward` 档。"
+                        "返回里 `multiplierInEffect` 说明倍率本档是否真的生效。\n"
+                        "★ **写完回读**：返回 `before` / `after` / `effective` / `multiplierBefore` / "
+                        "`multiplierAfter` —— `effective=false` 说明没设上（多半是 `TimeControlModeLock`）。\n"
+                        "⚠️ 与 `bl_fast_forward` 的区别：那个是**战斗内**的 10x（Mission 通道，"
+                        "对大地图无效）；这个是**战役大地图**的时间流速。两者互不相干。"),
+        "inputSchema": {"type": "object", "properties": {
+            "speed": {"type": "integer", "enum": [0, 1, 2, 3],
+                      "description": "0=停 / 1=正常 / 2=加速 / 3=最快（推荐 2 或 3）"},
+            "mode": {"type": "string",
+                     "description": "直接指定模式（与 speed 二选一）：Stop/Play/FastForward/UnstoppablePlay/UnstoppableFastForward"},
+            "multiplier": {"type": "number",
+                           "description": ("可选：设 SpeedUpMultiplier（正数；上限 15，开发模式 30）。"
+                                           "只在 FastForward 档生效；只给它会自动配 UnstoppableFastForward")}},
+            "additionalProperties": False},
+    },
     {
         "name": "bl_fast_forward",
         "description": ("开关战斗加速（10 倍速，引擎官方 Mission.IsFastForward 通道，由 BlBridge 每帧重申）。"
@@ -2115,6 +2307,122 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {
             "enabled": {"type": "boolean", "description": "true=开启加速，false=关闭"}},
             "required": ["enabled"], "additionalProperties": False},
+    },
+    # ── 存档（v0.8.53）：**只存不退** ─────────────────────────────────────
+    #
+    # ★ 为什么不提供"保存并退出到主菜单"：
+    #   官方那条路径是 `QuickSave` + `MBGameManager.EndGame()`（`Module.cs:529`）。
+    #   但 `EndGame()` 会**卸载整个战役** ⇒ 我们的观察者与命令泵一并关停
+    #   ⇒ **MCP 通道本身断了**，后续任何测试都要先重启游戏。
+    #   对测试夹具来说那是自杀式操作 ⇒ 只做"存"，把"退"留给用户/进程层。
+    #
+    # ★ 异步纪律：引擎存盘是**跨帧状态机**（`SaveHandler.SaveTick`：
+    #   PreSave → Saving → AwaitingCompletion → 完成），发起后必须**轮询**。
+    #   `bl_save_game` 返回的 `queued=true` **只代表入队，不代表存完**。
+    {
+        "name": "bl_save_game",
+        "description": ("**保存当前战役（只存不退）**。`mode=quick`（默认，等价按 F5）或 "
+                        "`mode=as` + `name`（另存为新档）。\n"
+                        "★ **这是异步的**：引擎存盘是跨帧状态机，本工具返回的 `queued=true` "
+                        "**只表示已入队，不表示存完了**。请接着用 `bl_save_status` 轮询到 "
+                        "`isSaving=false`，并核对 `newestSave.utc` **晚于** 本工具返回的 "
+                        "`issuedUtc` —— 两条同时成立才算真落盘。\n"
+                        "⚠️ 正在存盘时再调会被拒绝（`save_in_progress`）—— 引擎的状态机是单条的，"
+                        "重复排队会把两次都搞坏。\n"
+                        "⚠️ **不提供『保存并退出』**：官方 `EndGame()` 会卸载战役、连带切断 MCP 通道，"
+                        "对测试流程是自杀式操作。要退出请用进程层（或让它正常关闭）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "mode": {"type": "string", "enum": ["quick", "as"],
+                     "description": "quick=快存（等价 F5，默认）/ as=另存为（需配 name）"},
+            "name": {"type": "string", "description": "mode=as 时的档名（不能用引擎保留名）"}},
+            "additionalProperties": False},
+    },
+    {
+        "name": "bl_save_status",
+        "description": ("存档状态：**是否正在存盘**（`isSaving`）+ 硬盘上最新那份档的时间戳与大小 "
+                        "（`newestSave`）+ 全部存档清单（按时间倒序）。\n"
+                        "★ 与 `bl_save_game` 配对使用：只有 `isSaving=false` **且** "
+                        "`newestSave.utc` 晚于发起时刻，才能判定『真的存上了』。\n"
+                        "⚠️ 只看 `isSaving` 不够 —— 若发起时引擎恰好刚存完一帧，它可能瞬间就是 false。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_return_to_menu",
+        "description": ("**回主菜单**（卸载当前战役，**不关游戏进程**）—— 对应游戏里那个"
+                        "『保存并退出到主菜单』。\n"
+                        "默认 `saveFirst=true`：**先存档、等存完再退**（跨帧待办，见下）。\n"
+                        "★ **通道不会断**（实测 + 源码证据）：`Module.OnApplicationTick` 每帧"
+                        "**无条件**遍历所有 submodule，而 `MBGameManager.EndGame()` 只 "
+                        "`CleanStates()`、不调 `OnSubModuleUnloaded` ⇒ 退回主菜单后 "
+                        "`bl_status` / `bl_list_saves` / `bl_load_save` **仍然可用**，可以换档再进。\n"
+                        "⚠️ **这是跨帧操作**：返回 `ok` 只表示『已发起/已登记待办』，"
+                        "**不代表已经退出**。请轮询 `bl_campaign_time` 的 `inCampaign` 变 false 确认。\n"
+                        "⚠️ `saveFirst=true` 时若存盘进行中会被拒绝（`save_in_progress`）——"
+                        "存盘状态机是单条的，抢它会坏档。\n"
+                        "可选 `name`：给了则**另存为**该档名后再退（不给则用快存位）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "saveFirst": {"type": "boolean",
+                          "description": "true（默认）=先存档再退；false=直接退（不保存）"},
+            "name": {"type": "string",
+                     "description": "可选：另存为的档名（不给则走快存位）"}},
+            "additionalProperties": False},
+    },
+    # ── 遭遇/对话（v0.8.57）──────────────────────────────────────────────
+    #
+    # ★ 为什么需要：15x 快进时主角**必然**撞到强盗/领主遭遇，游戏弹
+    #   "给钱 or 战斗"二选一并把时间锁成 `Stop` ⇒ **无人值守快进就此中断**
+    #   （实测现场：`inMenuContext=True`、`MapConversation` 层 `isActive=true`、
+    #     `CharacterNameIdParent="湖鼠资深勇士"`、两个 `OptionButton`）。
+    #
+    # ★ 为什么不用 `bl_desktop_click` 点坐标：实测那两个 `OptionButton` 的 `text`
+    #   都是**空的**（文案在子控件里）⇒ 按坐标点 = **盲操作**，点错可能直接开战。
+    #   走官方 `ConversationManager.CurOptions` + `ProcessSentence()` ——
+    #   与玩家点该选项**同一入口**。
+    {
+        "name": "bl_conversation",
+        "description": ("**读当前遭遇/对话的可选项（只读）**。用于 15x 快进被遭遇弹窗中断时"
+                        "看清『现在卡在什么选择上』。\n"
+                        "返回 `inConversation` / `currentSentence` / "
+                        "`options[]`（每项带 `index` / `text` / `sentenceNo` / `isClickable` / `isSpecial`）。\n"
+                        "★ **本工具只列选项，不替你选** —— 选哪个是**玩家的决定**"
+                        "（掉钱 / 开战 / 损失兵力，**不可逆**且会污染测试基线）。\n"
+                        "要选请用 `bl_conversation_choose index=N`（**必须显式给编号**）。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "bl_conversation_choose",
+        "description": ("**选中遭遇/对话里的某个选项**（⚠️ **会改变游戏状态，不可逆**）。\n"
+                        "走官方 `ConversationManager.ProcessSentence(option)` —— 与玩家点该选项"
+                        "**同一入口**。\n"
+                        "★ 必须显式给 `index`（先用 `bl_conversation` 看列表）："
+                        "**刻意不提供『自动挑一个』**，因为选项后果不可逆"
+                        "（给钱会掉钱、战斗会开战/损兵），而且**污染的基线不可恢复**"
+                        "（除非事先存过档）。\n"
+                        "返回 `stillInConversation` / `remainingOptions`（多步对话要接着选）"
+                        "与 `timeControlMode` —— 对话结束后时间常仍是 `Stop`，"
+                        "需用 `bl_campaign_time_speed` 重新推起来。\n"
+                        "⚠️ `isClickable=false` 的选项会被**拒绝执行**（否则『点了没反应』"
+                        "会被误读成『操作成功』）。"),
+        "inputSchema": {"type": "object", "properties": {
+            "index": {"type": "integer",
+                      "description": "选项编号（从 0 起），来自 bl_conversation 的 options[].index"}},
+            "required": ["index"], "additionalProperties": False},
+    },
+    {
+        "name": "bl_conversation_continue",
+        "description": ("**推进对话**（对应玩家在 NPC 台词上按『继续』）。\n"
+                        "★ 多步对话有**两个不同入口**，必须交替用：\n"
+                        "  · **有选项**（`optionCount > 0`）⇒ `bl_conversation_choose index=N`\n"
+                        "  · **无选项、只有 NPC 台词**（`optionCount == 0`）⇒ **本工具**\n"
+                        "实机踩点：选了『够胆就过来动手吧！』后，对话推进到 NPC 回话"
+                        "（『你在挑衅吗？…』），此时 `CurOptions == 0` —— 玩家在 UI 上这时"
+                        "按的是**继续**键，而不是选选项。\n"
+                        "返回 `progressed`（句子是否真的变了）与 `stillInConversation` / "
+                        "`remainingOptions` ⇒ 依此决定下一步调哪个。\n"
+                        "⚠️ 当前**有 >1 个选项**时会返回 `error:\"has_options\"` 而**不执行** ——"
+                        "因为引擎的 `ContinueConversation()` 在 `CurOptions.Count > 1` 时"
+                        "**静默不干活**（直接 return），静默返回成功会让人误以为推进了。"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "bl_patches",
@@ -2739,6 +3047,24 @@ TOOL_GROUPS = {
         "bl_campaign_overview", "bl_list_kingdoms", "bl_list_clans",
         "bl_list_settlements", "bl_list_parties", "bl_campaign_log",
         "bl_get_hero", "bl_scan_bad_data", "bl_get_perk",
+        # v0.8.50：战役观察者（事件流，非快照）。放 core 的理由：它是"读战役正在发生什么"
+        # 的**首选入口**，而 core 正是"只读读数据/记录日志/分析现状"那一档的落点。
+        "bl_observer_status", "bl_observer_events",
+        "bl_observer_config", "bl_observer_clear",
+    ],
+    # ── v0.8.50：战役刺激器（**写操作**）────────────────────────────────
+    # 放 config 而不是 core：这一组的定位就是"改游戏状态"（config 现有成员
+    # bl_apply_config / bl_apply_rts_config / bl_cheat_mode 同类）。
+    # ⚠️ 尤其 `bl_declare_war` 会**真实改变外交关系**——归到只读的 core 组会误导。
+    "stimulus": [
+        "bl_war_status", "bl_declare_war", "bl_make_peace", "bl_campaign_time_speed",
+        # v0.8.53：存档（只存不退）。归 stimulus 的理由：它和上面同属
+        # "改游戏状态/持久化"那一档；**不是**只读的观察类工具。
+        "bl_save_game", "bl_save_status",
+        # v0.8.54：回主菜单（卸载战役，不关进程）。同属"改状态"档。
+        "bl_return_to_menu",
+        # v0.8.57：遭遇/对话（读选项 + 显式选择）。拦住 15x 快进的那个"必经弹窗"。
+        "bl_conversation", "bl_conversation_choose", "bl_conversation_continue",
     ],
     "config": [
         "bl_read_config", "bl_apply_config", "bl_rts_config", "bl_apply_rts_config",
@@ -3282,6 +3608,23 @@ def _enter_custom_battle(ui_id="CustomBattle", menu_timeout=120.0, entry_timeout
                        "带 NavalDLC 时官方入口会落 NavalCustomBattleState，判据已含它）"
                        % (entry_timeout, _CUSTOM_BATTLE_STATE_SUFFIX)),
             "escSent": esc, "seconds": round(_time.time() - t0, 1), "timeline": timeline}
+
+
+def _observer_dll_hint(code):
+    """观察者工具专用的错误补注。
+
+    ★ 为什么必须有它：老 DLL（< v0.8.50）收到 `observer_*` 会回 `unknown_method`。
+    若只把这句话原样透传，调用方极容易把它读成**"观察者跑了，只是没有事件"** ——
+    而真相是**工具本身不存在**。这两件事的后果完全不同：
+      · "没有事件" ⇒ 结论"这段时间战役很平静"（**可能完全错误**）；
+      · "工具不存在" ⇒ 结论"我什么都没测到，得先部署"。
+    ⇒ 本项目一贯纪律：**宁可显式说"没测到"，也不让失败伪装成"没问题"**。
+    """
+    if code == "unknown_method":
+        return {"hint": ("当前部署的 BlBridge.dll **不含观察者**（需 v0.8.50+）。"
+                         "这不是「没有事件」，而是工具本身不存在 —— "
+                         "请先 `build.ps1 -Deploy` 并重启游戏。")}
+    return {}
 
 
 def call_tool(name, args):
@@ -4431,6 +4774,241 @@ def call_tool(name, args):
             e = resp.get("error") or {}
             return {"ok": False, "error": e.get("message") or "campaign_log 失败",
                     "code": e.get("code"), "response": resp}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    # ── 战役观察者（v0.8.50，observer 层）──────────────────────────────
+    #
+    # ★ 这四个与上面所有 bl_campaign_* 的**本质区别**：上面是轮询快照，
+    #   这四个读的是 C# 侧**事件订阅**攒下来的流。
+    # ⚠️ 老 DLL（< v0.8.50）会回 unknown_method —— 此时如实转述该错误码，
+    #   并明确提示"需要新 DLL"，**不要**伪装成"没有事件"（那是最坏的一种误导）。
+    if name == "bl_observer_status":
+        resp, err = send_command("observer_status", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "observer_status 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_observer_events":
+        params = {}
+        if args.get("type"):
+            params["type"] = str(args["type"])
+        if args.get("limit") is not None:
+            params["limit"] = int(args["limit"])
+        if args.get("sinceSeq") is not None:
+            params["sinceSeq"] = int(args["sinceSeq"])
+        resp, err = send_command("observer_events", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "observer_events 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_observer_config":
+        params = {}
+        # ★ 只透传**显式给了**的字段（`is not None` 判据）：
+        #   若把缺省 False 也发过去，会把 verboseAi/enabled 意外关掉 ——
+        #   "只改我要改的"是配置类工具的硬纪律。
+        for k in ("enabled", "verboseAi", "maxEvents"):
+            if args.get(k) is not None:
+                params[k] = args[k]
+        if not params:
+            return {"ok": False,
+                    "error": "至少给一个字段：enabled / verboseAi / maxEvents"}
+        resp, err = send_command("observer_config", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "observer_config 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_observer_clear":
+        resp, err = send_command("observer_clear", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "observer_clear 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    # ── 战役刺激器（v0.8.50）：**会改存档**，与上面的只读 observer 相反 ──
+    #
+    # ⚠️ 这三个的返回体里 `result.ok` 是**业务结论**（例如 already_at_war 时
+    #   result.ok=false 但**信封 ok=true**）—— 这是刻意区分的（参见 Protocol.ReadResponseOutcome
+    #   对 `resultOk` 的说明）：请求被正常处理 ≠ 操作达成目的。
+    if name == "bl_war_status":
+        resp, err = send_command("war_status", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "war_status 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_declare_war":
+        params = {}
+        if args.get("faction1") is not None:
+            params["faction1"] = str(args["faction1"])
+        if args.get("faction2") is not None:
+            params["faction2"] = str(args["faction2"])
+        if args.get("detail") is not None:
+            params["detail"] = str(args["detail"])
+        if not params.get("faction1"):
+            return {"ok": False, "error": "faction1 必填（StringId 如 empire_w，或名字）"}
+        resp, err = send_command("campaign_declare_war", params, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "declare_war 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_make_peace":
+        params = {}
+        if args.get("faction1") is not None:
+            params["faction1"] = str(args["faction1"])
+        if args.get("faction2") is not None:
+            params["faction2"] = str(args["faction2"])
+        if not params.get("faction1"):
+            return {"ok": False, "error": "faction1 必填（StringId 如 empire_w，或名字）"}
+        resp, err = send_command("campaign_make_peace", params, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "make_peace 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_campaign_time_speed":
+        params = {}
+        if args.get("speed") is not None:
+            params["speed"] = str(int(args["speed"]))
+        if args.get("mode") is not None:
+            params["mode"] = str(args["mode"])
+        if args.get("multiplier") is not None:
+            # ★ 必须发**裸数字**，不能发字符串。
+            #   踩过（v0.8.52 实测）：写成 `repr(float(x))` 会得到 '15.0' 这个**字符串**，
+            #   序列化后是 `"multiplier":"15.0"`（带引号），而 C# 侧 `Jmini.Num` 只扫
+            #   **裸数字** ⇒ 读成 NaN ⇒ 报 "multiplier 不是数字：15.0"（消息本身看着
+            #   像"值是 15.0 却说不是数字"，极具误导性）。这里改成 float 类型。
+            params["multiplier"] = float(args["multiplier"])
+        if not params:
+            return {"ok": False,
+                    "error": ("要给 speed（0..3，推荐 2/3）或 mode（如 UnstoppablePlay），"
+                              "或 multiplier（正数，会自动配 UnstoppableFastForward）")}
+        resp, err = send_command("campaign_time_speed", params, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "campaign_time_speed 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    # ── 存档（v0.8.53）：只存不退 + 状态轮询 ────────────────────────────
+    if name == "bl_save_game":
+        params = {}
+        if args.get("mode") is not None:
+            params["mode"] = str(args["mode"])
+        if args.get("name") is not None:
+            params["name"] = str(args["name"])
+        # ⚠️ 超时给足：发起本身很快，但引擎可能在同帧忙（如正在存档）。
+        resp, err = send_command("save_game", params, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "save_game 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_save_status":
+        resp, err = send_command("save_status", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "save_status 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_return_to_menu":
+        params = {}
+        if args.get("saveFirst") is not None:
+            params["saveFirst"] = "true" if args["saveFirst"] else "false"
+        if args.get("name") is not None:
+            params["name"] = str(args["name"])
+        resp, err = send_command("return_to_menu", params, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "return_to_menu 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    # ── 遭遇/对话（v0.8.57）──────────────────────────────────────────
+    if name == "bl_conversation":
+        resp, err = send_command("conversation", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "conversation 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_conversation_choose":
+        if args.get("index") is None:
+            return {"ok": False,
+                    "error": ("必须显式给 index（先用 bl_conversation 看选项）—— "
+                              "本工具刻意不提供『自动挑一个』，因为选项后果不可逆")}
+        # ⚠️ 必须发**裸数字**，不能发字符串 —— 与 `multiplier` 同一类坑（v0.8.52 踩过）：
+        #   `Jmini.Num` 只扫裸数字；发成 `"index":"0"` 会读成 NaN ⇒ 报
+        #   "index 必须 >= 0"（消息看着像"我明明给了 0"，极具误导性）。
+        params = {"index": int(args["index"])}
+        resp, err = send_command("conversation_choose", params, timeout=30)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "conversation_choose 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
+        return {"ok": True, "result": resp.get("result"), "response": resp}
+
+    if name == "bl_conversation_continue":
+        resp, err = send_command("conversation_continue", {}, timeout=20)
+        if err:
+            return {"ok": False, "error": err, "sessionDiagnosis": run_state_diagnosis()}
+        if not resp.get("ok"):
+            e = resp.get("error") or {}
+            return {"ok": False, "error": e.get("message") or "conversation_continue 失败",
+                    "code": e.get("code"), "response": resp,
+                    **(_observer_dll_hint(e.get("code")))}
         return {"ok": True, "result": resp.get("result"), "response": resp}
 
     # ── 阶段 2④：批量跑批 + A/B 对比报告 ────────────────────────────────

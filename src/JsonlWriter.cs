@@ -354,6 +354,34 @@ namespace BlBridge
             }
         }
 
+        /// <summary>
+        /// 写守卫账本一行，**并如实返回是否成功**。
+        ///
+        /// ★ 为什么需要它（v0.8.58）：`WriteGuardLog` 是 `void` 且**内部吞掉写失败**
+        ///   ⇒ 调用方**无法区分**"写成功了"与"writer 为空/写盘失败"。
+        ///   而 `CrashGuard` 的"立即落盘"路径需要一个**真实**的成功判据 ——
+        ///   否则写失败时它会以为成功、**不再退回队列**，那条记录就真丢了
+        ///   （恰好是这次要修的那个缺口）。
+        ///   ⇒ 本方法把失败**显式暴露**出来，让调用方能安全回退。
+        /// </summary>
+        public static bool TryWriteGuardLog(string line)
+        {
+            lock (_guardLock)
+            {
+                if (_guardWriter == null) return false;
+                try
+                {
+                    _guardWriter.WriteLine(line);
+                    return true;            // AutoFlush=true ⇒ 到这里已经落盘
+                }
+                catch (Exception ex)
+                {
+                    _guardLastError = "TryWriteGuardLog: " + ex.GetType().Name + ": " + ex.Message;
+                    return false;
+                }
+            }
+        }
+
         /// <summary>关守卫账本（模块卸载）。</summary>
         public static void CloseGuardLog()
         {
@@ -367,6 +395,104 @@ namespace BlBridge
                 }
                 catch { }
                 _guardWriter = null;
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────
+        // 战役事件账本（v0.8.50）：**第四个**独立写手
+        // ─────────────────────────────────────────────────────────────────
+        //
+        // 为什么又要独立一个（而不是复用上面三个）：
+        //   • 战斗日志 `_writer` 只在 mission 期间打开 —— 而战役事件发生在**地图上**，
+        //     那一刻它是 null ⇒ 复用它会静默丢弃全部战役事件（正是侧信道当初的教训）；
+        //   • 侧信道是异常探针的、守卫账本是 CrashGuard 的，两者生命周期各不相同；
+        //     共用会互相 `Close` 掉对方（`Open*` 第一件事都是关旧的）。
+        //   ⇒ 第四个，独立持有，生命周期 = 战役会话。
+        //
+        // 追加模式（跨会话累积比"每次新建"更有用：可以横跨多次读档看同一批 NPC 的
+        // 行为漂移）；**强制逐行 flush**：观察者记录的常是"即将出事/正在涌现"的时刻。
+        private static readonly object _obsLock = new object();
+        private static StreamWriter _obsWriter;
+        private static string _obsFile;
+        private static string _obsLastError;
+
+        /// <summary>战役事件账本路径（未打开时为空）。</summary>
+        public static string ObserverFile
+        {
+            get { lock (_obsLock) { return _obsFile; } }
+        }
+
+        /// <summary>战役事件账本最近一次错误（为空表示正常）。</summary>
+        public static string ObserverLastError
+        {
+            get { lock (_obsLock) { return _obsLastError; } }
+        }
+
+        /// <summary>账本是否已打开（区分"没事件"与"写手没开"—— 这两件事必须能分开）。</summary>
+        public static bool ObserverOpen
+        {
+            get { lock (_obsLock) { return _obsWriter != null; } }
+        }
+
+        /// <summary>打开战役事件账本（追加模式）。返回实际路径；失败返回 null 并记错误（**不抛**）。</summary>
+        public static string OpenObserver(string path, bool append)
+        {
+            lock (_obsLock)
+            {
+                try
+                {
+                    if (_obsWriter != null && _obsFile == path) return _obsFile;
+                    string dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    FileStream fs = new FileStream(path,
+                        append ? FileMode.Append : FileMode.Create,
+                        FileAccess.Write, FileShare.ReadWrite);
+                    _obsWriter = new StreamWriter(fs, new UTF8Encoding(false));
+                    _obsWriter.AutoFlush = true;
+                    _obsFile = path;
+                    _obsLastError = null;
+                    return path;
+                }
+                catch (Exception ex)
+                {
+                    _obsWriter = null;
+                    _obsFile = null;
+                    _obsLastError = "OpenObserver: " + ex.GetType().Name + ": " + ex.Message;
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>写战役事件账本一行（**无 writer 时静默返回**，与 `Write` 同语义）。</summary>
+        public static void WriteObserver(string line)
+        {
+            lock (_obsLock)
+            {
+                if (_obsWriter == null) return;
+                try
+                {
+                    _obsWriter.WriteLine(line);
+                }
+                catch (Exception ex)
+                {
+                    _obsLastError = "WriteObserver: " + ex.GetType().Name + ": " + ex.Message;
+                }
+            }
+        }
+
+        /// <summary>关战役事件账本（模块卸载）。</summary>
+        public static void CloseObserver()
+        {
+            lock (_obsLock)
+            {
+                if (_obsWriter == null) return;
+                try
+                {
+                    _obsWriter.Flush();
+                    _obsWriter.Dispose();
+                }
+                catch { }
+                _obsWriter = null;
             }
         }
     }

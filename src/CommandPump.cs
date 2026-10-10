@@ -537,6 +537,116 @@ namespace BlBridge
             {
                 return CampaignReadProbe.HandleGetPerk(id, raw);
             }
+            // ── 战役观察者（v0.8.50，observer 层）────────────────────────────
+            // 事件驱动，**不是轮询快照**：补的是"两次采样之间发生了什么"这个结构性缺口。
+            // 全部只读；见 src/CampaignObserver.cs 的类注释（含信噪比与观测者效应的取舍）。
+            if (method == "observer_status")
+            {
+                return Protocol.Success(id, CampaignObserver.StatusJson());
+            }
+            if (method == "observer_events")
+            {
+                // type 支持逗号分隔多个；limit 默认 50（上限 500）；sinceSeq 增量拉取
+                return Protocol.Success(id, CampaignObserver.EventsJson(
+                    Jmini.Str(raw, "type", null),
+                    Jmini.Int(raw, "limit", 50),
+                    (long)Jmini.Num(raw, "sinceSeq", 0)));
+            }
+            if (method == "observer_clear")
+            {
+                return Protocol.Success(id, CampaignObserver.Clear());
+            }
+            if (method == "observer_config")
+            {
+                // 三个字段都可选；只改给了的那些（缺省 = 保持现状，不猜成 false）
+                bool? en = Jmini.Has(raw, "enabled") ? (bool?)Jmini.Bool(raw, "enabled", true) : null;
+                bool? vb = Jmini.Has(raw, "verboseAi") ? (bool?)Jmini.Bool(raw, "verboseAi", false) : null;
+                int? mx = Jmini.Has(raw, "maxEvents") ? (int?)Jmini.Int(raw, "maxEvents", 2000) : null;
+                return Protocol.Success(id, CampaignObserver.Configure(en, vb, mx));
+            }
+            // ── 战役刺激器（v0.8.50）：**会改存档**，与上面的只读 observer 相反 ──
+            //
+            // ⚠️ 存在理由：`WarDeclared` 这类事件在平静存档里**永远等不到**
+            //   ⇒ 那 4 个处理器（war_declared / make_peace / siege_started /
+            //     settlement_owner_changed）无法验证。造出条件 = 把"等运气"变成确定触发。
+            //   全部走官方 Action（`DeclareWarAction` / `MakePeaceAction`）⇒
+            //   事件正常派发、后续 AI 行为正常响应；绕过它们直接改关系表就等于
+            //   "数据变了但没人被通知"，对测 mod 毫无价值。
+            if (method == "war_status")
+            {
+                return CampaignStimulus.HandleWarStatus(id, raw);
+            }
+            if (method == "campaign_declare_war")
+            {
+                return CampaignStimulus.HandleDeclareWar(id, raw);
+            }
+            if (method == "campaign_make_peace")
+            {
+                return CampaignStimulus.HandleMakePeace(id, raw);
+            }
+            // ── 时间流速（v0.8.51）：等价于点屏幕中间那个「继续/倍速」键 ──
+            //
+            // ★ 存在理由：这是"让时间前进"的**唯一正门**，也是整套观察者能产生
+            //   数据的前提 —— 读档后默认是 `Stop`，不推时间就一条事件都没有。
+            //   直接设 `Campaign.Current.TimeControlMode`（与玩家按键同一属性，
+            //   唯一的守卫是 `TimeControlModeLock`）。
+            if (method == "campaign_time_speed")
+            {
+                return CampaignStimulus.HandleTimeSpeed(id, raw);
+            }
+            // ── 存档（v0.8.53）：**只存不退** ─────────────────────────────
+            //
+            // ★ 为什么不做"保存并退出"：`MBGameManager.EndGame()` 会卸载整个战役
+            //   ⇒ 观察者/命令泵全部关停 ⇒ **MCP 通道本身断了**，之后再要通讯就得重启游戏。
+            //   对一个"测试夹具"来说那是自杀式操作。存盘才是可反复调用的那个。
+            // ★ 为什么发起后立刻返回、用 `save_status` 轮询：
+            //   存盘是**跨帧状态机**（`SaveHandler.SaveTick`），而本处理器就跑在
+            //   那个主线程上 ⇒ 在这里阻塞等待会**死锁**（详见 HandleSaveGame 注释）。
+            if (method == "save_game")
+            {
+                return CampaignStimulus.HandleSaveGame(id, raw);
+            }
+            if (method == "save_status")
+            {
+                return CampaignStimulus.HandleSaveStatus(id, raw);
+            }
+            // ── 回主菜单（v0.8.54）────────────────────────────────────────
+            //
+            // ★ 纠正我早前的错误结论：回主菜单**不会**切断 MCP 通道。
+            //   证据：`Module.OnApplicationTick`（Module.cs:502-524）**无条件**每帧遍历
+            //   所有 submodule；而 `MBGameManager.EndGame()` 只 `CleanStates()`，
+            //   **不调 `OnSubModuleUnloaded`**（那个只在 FinalizeSubModulesBases 里）。
+            //   ⇒ 退到主菜单后命令泵照常跑，还能 bl_list_saves / bl_load_save 再进来。
+            //
+            // `saveFirst=true`（默认）时登记**跨帧待办**（等 IsSaving 落下再退），
+            // 由 `CampaignStimulus.Tick()` 每帧推进 —— 在主线程里阻塞等待会死锁。
+            if (method == "return_to_menu")
+            {
+                return CampaignStimulus.HandleReturnToMenu(id, raw);
+            }
+            // ── 遭遇/对话（v0.8.57）──────────────────────────────────────
+            //
+            // ★ 存在理由（实机）：15x 快进时主角**必然**撞到强盗/领主遭遇，
+            //   游戏弹"给钱 or 战斗"并把 `TimeControlMode` 锁成 `Stop`
+            //   ⇒ 无人值守的快进就此中断。这两个工具用于**读出选项**与**显式选择**。
+            // ★ 为什么不用 `bl_desktop_click` 点坐标：实测 `MapConversation` 的两个
+            //   `OptionButton` 的 `text` 都是空的（文案在子控件）⇒ 按坐标点 = 盲操作，
+            //   点错可能直接开战。走官方 `ConversationManager.CurOptions` +
+            //   `ProcessSentence()` —— 与玩家点该选项**同一入口**。
+            if (method == "conversation")
+            {
+                return CampaignStimulus.HandleConversation(id, raw);
+            }
+            if (method == "conversation_choose")
+            {
+                return CampaignStimulus.HandleConversationChoose(id, raw);
+            }
+            // 推进对话（NPC 台词上按"继续"）—— 与"选选项"是**两个不同入口**，
+            // 见 HandleConversationContinue 的类注释（实测多步对话必须两者交替用）。
+            if (method == "conversation_continue")
+            {
+                return CampaignStimulus.HandleConversationContinue(id, raw);
+            }
             return Protocol.Failure(id, "unknown_method", "未知方法: " + method, false);
         }
 

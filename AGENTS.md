@@ -142,9 +142,27 @@ python tools\bl_check_deploy_consistency.py --strict-drift  # ★ 把"部署副�
                                                     #   （默认只作 note：现场走仓库 tools/、漂移不阻塞当前工作。
                                                     #    发布前 / 交给别人之前建议开 —— 已知代价是"会误导从 Modules\\
                                                     #    跑工具的人"：旧副本跑 build_check 只有 UTF-16 逻辑、对类型名假阴性）
-python tools\baddataspec\run_selftest.py             # 坏数据判据离线对照（49 项，含"合法 0 数量/匪帮"不许报）
+python tools\baddataspec\run_selftest.py             # 坏数据判据离线对照（52 项，含"合法 0 数量/匪帮"不许报）
+python tools\baddataspec\check_a3_coverage.py        # ★ A3 真机判据：coverage 是否真的扫到"全队伍+全聚落"
+                                                     #   （游戏须在跑；`--json <path>` 可吃已存下的返回；
+                                                     #    退出码 2 = 环境不足，**不算通过**）
 python tools\bl_check_envelope.py --inject           # **真实响应**的信封不变式（游戏须跑过；含注入对照组）
 ```
+
+> **三值判据纪律（2026-10-08 立，B11 逼出来）**：凡"探测/询问外部世界"的判据
+> （进程在不在、名字是什么、文件在不在），返回值必须是 **True / False / None（未知）**，
+> 且三者**消费点各不相同**。
+> - **"没有输出" ≠ "没有这个进程"**：`tasklist` 非 0 退出（被安全策略/EDR 拦、不在 PATH）
+>   时 stdout 是空的；只看 stdout 会把"探不到"读成"已死"。
+> - 实测后果（B11）：等待循环见到"已死"就**立刻作废请求**并报 `process_exited`
+>   ⇒ **游戏明明在跑，控制通道却把每个请求判为"进程已退出"**。
+> - ⇒ 修一处判据后**必须回头看它打开的旧路径**：`_pid_alive` 修好"失败 ⇒ None"后，
+>   `build_check` 里那条"`None` 就继续往下比"的分支**第一次可达**，会对**没在跑**的游戏
+>   报 `game_running_other_build`（"进程内是别的构建"）⇒ 已一并改成与"已退出"同级早退。
+>   这就是 B8 记过的那条：**放宽/修正一处闸门 = 打开一条以前锁着的路，必须回头查那条路**。
+> - ⇒ 测试**不得**依赖"本机 `tasklist` 恰好可用"：`bl_selftest.py` 里存活/身份那几组
+>   改为**注入 `_tasklist_query` 的 `(rc, text)` 三态**，从而在任何机器上都能确定地判定；
+>   本机能否用真 `tasklist` 只作 `[ENV]` 事实**如实报告**，不算判据失败。
 
 > **`bl_check_deploy_consistency.py` 补的洞（2026-10-08 增）**：本轮出现过一个**假阻塞** ——
 > "部署的 DLL 不含 `get_hero` ⇒ 必须先重新部署"。它由两个错因叠加，两个都是本项目反复防的那类：

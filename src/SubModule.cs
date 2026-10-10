@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Text;
+using TaleWorlds.CampaignSystem;        // Campaign / CampaignGameStarter（观察者挂载用）
+using TaleWorlds.Core;                  // Game / IGameStarter
 using TaleWorlds.MountAndBlade;
 
 namespace BlBridge
@@ -138,6 +140,52 @@ namespace BlBridge
         }
 
         /// <summary>
+        /// v0.8.50：把**战役观察者**挂进战役（observer 层）。
+        ///
+        /// ## 为什么用 `InitializeGameStarter` 而不是 `OnGameStart`
+        ///
+        /// 官方自己的做法（`NavalDLCSubModule.cs:69-77`）就是在 `InitializeGameStarter` 里
+        /// `if (game.GameType is Campaign)` 再 `gameStarterObject as CampaignGameStarter` 然后
+        /// `AddBehavior(...)`。照抄它 = 走官方已验证的装配顺序，不自创时机。
+        ///
+        /// ## 为什么用 `AddBehavior` 而不是自己 tick
+        ///
+        /// `CampaignBehaviorBase` 的 `RegisterEvents()` 会被引擎在**战役装配期**调用，
+        /// 那时 `CampaignEvents.Instance` 已就绪 ⇒ 订阅一定挂得上。
+        /// 自己找时机订阅要处理"战役还没起来"的竞态，没有必要。
+        ///
+        /// ## 绝不参与的边界
+        ///
+        /// 观察者**只订阅、只读**：不 AddModel、不改任何 game model、
+        /// 不 patch 任何方法 ⇒ 与本项目"零 Harmony / 删模块即完全回退"一致。
+        /// 想关随时 `observer_config enabled=false`（运行时）或改配置。
+        /// </summary>
+        protected override void InitializeGameStarter(Game game, IGameStarter gameStarterObject)
+        {
+            base.InitializeGameStarter(game, gameStarterObject);
+            try
+            {
+                if (!BridgeConfig.Enabled) return;
+                if (!(game.GameType is Campaign)) return;
+                CampaignGameStarter starter = gameStarterObject as CampaignGameStarter;
+                if (starter == null) return;
+                starter.AddBehavior(new CampaignObserver());
+                UiEntry.Log("campaign observer: 已挂载（订阅 9 个 CampaignEvents，只读不干预）");
+            }
+            catch (Exception ex)
+            {
+                // 观察者挂不上绝不能影响战役启动 —— 它不是必需品。
+                try
+                {
+                    ActionLedger.ExceptionToRgl("SubModule.InitializeGameStarter", ex);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        /// <summary>
         /// B2 的 dump 落盘目录：`&lt;LogDir&gt;\crashes`。
         ///
         /// 为什么**另开目录**而不混进 `%LOCALAPPDATA%\CrashDumps`：
@@ -237,6 +285,11 @@ namespace BlBridge
                 // ⚠️ 这里**必须撤**：Finalizer 是**改别人方法 IL**的补丁（与 ExceptionProbe
                 //   只是订阅事件不同），不撤的话模块卸载后钩子仍指向我们的方法 ⇒ 悬空引用。
                 CrashGuard.Uninstall();
+                // v0.8.50：关掉战役观察者的事件账本并做最后一次排空 —— 同理，
+                // ★ 订阅要撤得干净：观察者只 `AddNonSerializedListener`（订阅 .NET 事件），
+                //   撤订阅由引擎在战役结束/卸载时按 owner 做（`ClearListeners`），
+                //   这里只负责收尾写盘与关文件，不留半开的句柄。
+                CampaignObserver.Shutdown();
                 // 传最近一场的真实事件数：第一版这里写死 0，把 lastBattleEvents 抹成了 0
                 WriteStatus("exited", _currentBattleFile, _lastBattleEventCount);
             }
@@ -294,6 +347,32 @@ namespace BlBridge
             try
             {
                 CrashGuard.Drain(64);
+            }
+            catch
+            {
+            }
+            // v0.8.50：排空**战役观察者**事件账本（I/O 只在主线程做）。
+            //
+            // ★ 为什么必须在这里排空、而不能在事件处理器里直接写文件：
+            //   事件处理器跑在**战役主线程**，而快进时 AI 决策每秒可触发数百次。
+            //   在处理器里写盘会拖慢游戏本身 ⇒ **改变被测系统的行为**（观测者效应），
+            //   而我们建这套东西的目的正是"如实观察"。⇒ 处理器只入队，这里批量写。
+            // ★ 独立 try：观察者出问题绝不能影响命令泵/看门狗/异常探针。
+            try
+            {
+                CampaignObserver.DrainPending();
+            }
+            catch
+            {
+            }
+            // v0.8.54：推进战役刺激器的**跨帧待办**（目前是"存档完成后回主菜单"）。
+            // ★ 为什么必须在每帧这里做、而不是在命令处理器里等：
+            //   处理器跑在主线程，而存盘（`SaveTick`）与 `EndGame`（`async void`）
+            //   都依赖后续帧才能推进 ⇒ 在处理器里等会**死锁**。
+            // ★ 独立 try：待办失败绝不能影响其它每帧段。
+            try
+            {
+                CampaignStimulus.Tick();
             }
             catch
             {

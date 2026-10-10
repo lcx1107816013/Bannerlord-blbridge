@@ -110,6 +110,35 @@ namespace BlBridge
                 StringBuilder sb = new StringBuilder();
                 sb.Append("{\"ok\":true");
                 sb.Append(",\"inCampaign\":true");
+
+                // ── ★ 战役模式判定（v0.8.55 补）────────────────────────────
+                //
+                // ⚠️ 为什么必须补（实机教训）：此前 `campaign_overview` 报了玩家/金钱/
+                //   影响力，**却没报"这是哪个模式"** ⇒ 测试时无法一眼区分
+                //   「沙盒战役」与「剧情战役」，只能靠翻存档元数据，极易搞错档。
+                //
+                // 判据（有源码依据，**不能靠 `CampaignGameMode`**）：
+                //   `CampaignGameMode` 只有 `None / Campaign / Tutorial`
+                //   （`CampaignGameMode.cs`）—— **它不区分沙盒与剧情**。
+                //   真正的区别在**运行时类型**：
+                //     · 沙盒 ⇒ `Campaign.Current` 是 `TaleWorlds.CampaignSystem.Campaign`
+                //     · 剧情 ⇒ 是子类 `StoryMode.CampaignStoryMode : Campaign`
+                //   ⇒ 判据 = `Campaign.Current.GetType()`。
+                sb.Append(",\"gameMode\":").Append(Protocol.Q(Campaign.Current.GameMode.ToString()));
+                string typeName = Campaign.Current.GetType().FullName ?? "";
+                sb.Append(",\"campaignType\":").Append(Protocol.Q(typeName));
+                bool isStory = typeName.IndexOf("CampaignStoryMode", StringComparison.OrdinalIgnoreCase) >= 0;
+                sb.Append(",\"isStoryMode\":").Append(isStory ? "true" : "false");
+                sb.Append(",\"isSandbox\":").Append(
+                    (!isStory && Campaign.Current.GameMode == TaleWorlds.CampaignSystem.CampaignGameMode.Campaign)
+                    ? "true" : "false");
+                // 剧情模式专属管理器（沙盒里为 null）—— 第二判据，防类型名判错
+                sb.Append(",\"hasStoryModeManager\":").Append(
+                    P(Campaign.Current, "StoryMode") != null ? "true" : "false");
+                // 当前存档名（唯一活动存档位 / 上次读的档）
+                sb.Append(",\"activeSaveSlot\":").Append(
+                    Protocol.Q(TaleWorlds.Core.MBSaveLoad.ActiveSaveSlotName ?? ""));
+
                 sb.Append(",\"clans\":").Append(Campaign.Current.Clans.Count);
                 sb.Append(",\"kingdoms\":").Append(Campaign.Current.Kingdoms.Count);
                 sb.Append(",\"settlements\":").Append(Campaign.Current.Settlements.Count);

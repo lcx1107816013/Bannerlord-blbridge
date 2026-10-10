@@ -288,17 +288,37 @@ if ($Deploy) {
     if (Test-Path $dllTarget) {
         $backup = $dllTarget + '.bak_' + $stamp
         Copy-Item $dllTarget $backup -Force
-        # keep only the 3 newest backups (they accumulate otherwise; each is ~40 KB).
-        # Explicit loop + report: a silent pipeline delete is exactly the kind of
-        # "looks fine but did nothing" failure this project keeps hunting.
+        # Keep only the 3 newest backups *beside the DLL* (they accumulate otherwise; each is ~40 KB).
+        # But do NOT delete the older ones: ARCHIVE them instead.
+        #
+        # Why (2026-10-08, found while auditing evidence): the previous version deleted them, and the
+        # pruning sorts by LastWriteTime -- while the FILENAME stamp is the DEPLOY time, not the BUILD
+        # time. The two differ, so one deploy silently removed the two `.bak` files that a written
+        # conclusion had cited as its only counter-example ("that DLL lacks scan_bad_data").
+        # The claim became impossible to re-check on disk: the evidence had been auto-recycled.
+        # Lesson: a cited artifact must be retained, not pruned by a build script.
+        #
+        # Keeping them in place is not an option (the bin dir should stay tidy and the count unbounded),
+        # so they move to a sibling archive dir. Nothing resolves a DLL by listing that directory --
+        # every consumer uses the exact `BlBridge.dll` path -- and the game loads only the assembly
+        # named in SubModule.xml, so extra non-.dll files there are inert.
+        $bakArchive = Join-Path $target 'bak_archive'
         $stale = @(Get-ChildItem (Split-Path $dllTarget -Parent) -Filter ((Split-Path $dllTarget -Leaf) + '.bak_*') |
             Sort-Object LastWriteTime -Descending | Select-Object -Skip 3)
-        foreach ($old in $stale) {
-            try {
-                Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop
-                Write-Host ("      pruned old backup: {0}" -f $old.Name)
-            } catch {
-                Write-Warning ("could not prune {0}: {1}" -f $old.Name, $_.Exception.Message)
+        if ($stale.Count -gt 0) {
+            if (-not (Test-Path $bakArchive)) { New-Item -ItemType Directory -Path $bakArchive -Force | Out-Null }
+            foreach ($old in $stale) {
+                $dest = Join-Path $bakArchive $old.Name
+                # Never overwrite an archived copy: same-second stamps are possible, and losing one
+                # is exactly the failure this block exists to prevent.
+                if (Test-Path $dest) { $dest = $dest + '.' + (Get-Date -Format 'fff') }
+                try {
+                    Move-Item -LiteralPath $old.FullName -Destination $dest -Force -ErrorAction Stop
+                    $h = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+                    Write-Host ("      archived old backup: {0} -> bak_archive (sha256 {1})" -f $old.Name, $h.Substring(0, 16))
+                } catch {
+                    Write-Warning ("could not archive {0}: {1}" -f $old.Name, $_.Exception.Message)
+                }
             }
         }
     }
