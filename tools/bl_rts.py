@@ -27,7 +27,23 @@ import shutil
 import time
 import xml.etree.ElementTree as ET
 
+import bl_common
+
 CONFIG_REL = os.path.join("Mount and Blade II Bannerlord", "Configs", "RTSCamera", "RTSCameraConfig.xml")
+
+
+def _boundary(path, verb):
+    """路径边界锁（PBS）—— RTSCamera 真档在**文档目录**，已在默认允许根之内。
+
+    ★ 为什么这里也要锁：审计发现写路径有**两条独立入口**
+      （`bl_mcp.apply_config` 与 `bl_rts.apply`），只锁一条等于没锁。
+      复用的 `bl_common.path_allowed` 是同一实现，口径一致。
+    ★ 为什么不传 game_dir：本模块的合法目标只有文档目录下的 RTSCameraConfig.xml，
+      传 game_dir 反而把"允许写游戏目录"这条**不必要**的路也打开了。
+    """
+    return bl_common.path_allowed(
+        path, verb=verb,
+        project_dir=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 官方/社区文档都没写全的枚举，只标"已知值"，未知值只警告不拒绝（宁可放行 + 提醒，也不假装知道）
 ENUM_HINTS = {
@@ -77,6 +93,10 @@ def _read_text(path):
 def read(paths=None, path=None):
     """读全部键（或只读指定键）。返回 dict；缺失的键值为 None。"""
     path = path or config_path()
+    # ★ PBS：读也要锁（任意路径读 = 文件存在性探测面）
+    _okb, _payb = _boundary(path, "读取")
+    if not _okb:
+        raise IOError(_payb["message"])
     if not os.path.isfile(path):
         raise IOError("找不到 RTSCamera 配置: %s" % path)
     text, _bom = _read_text(path)
@@ -95,6 +115,15 @@ def apply(edits, dry_run=False, allow_missing=False, path=None):
     纪律与 Warbandlord 的 apply_config 一致（见模块 docstring）。`path` 只为离线自测而存在。
     """
     path = path or config_path()
+    # ★ PBS：写路径**必须**过边界锁 + 扩展名白名单（与 bl_mcp.apply_config 同口径）。
+    #   ★ 放在 isfile 之前：越界是更严重的问题，应先报它。
+    #   ★ 与本文件既有的"形状校验在前"纪律一致 —— 都拒绝时给明确原因。
+    _okb, _payb = _boundary(path, "写入")
+    if not _okb:
+        raise IOError(_payb["message"])
+    _oke, _paye = bl_common.ext_allowed(path)
+    if not _oke:
+        raise IOError(_paye["message"])
     if not os.path.isfile(path):
         raise IOError("找不到 RTSCamera 配置: %s" % path)
 

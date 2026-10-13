@@ -12,7 +12,357 @@ bl_analyze.py、bl_metrics.py、bl_death_compare.py 里各写一份
 import io
 import json
 import os
+import re
 import sys
+import tempfile
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 路径边界锁（PBS, Path Boundary Seal）—— 2026-10-13 安全审计后新增
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ## 为什么放在 bl_common
+#
+# 写路径有**两条独立入口**：`bl_mcp.apply_config`（Warbandlord / RBM）与
+# `bl_rts.apply`（RTSCamera）。两者都要边界锁。
+# 放 `bl_mcp` 会让 `bl_rts` 反向依赖它（且 bl_mcp 已 import bl_rts ⇒ 循环）；
+# 而 `bl_common` 只依赖标准库、两边都已依赖 ⇒ 放这里，**单一实现**。
+#
+# ## 为什么需要（实测，非推测）
+#
+# 审计实测 `bl_apply_config(path=...)` 能改**任意绝对路径**的文件：
+#     C:\Windows\Temp\*.xml   → 被改（SHA256 变化）
+#     C:\Users\LCGX\*.xml     → 被改
+#     notes.txt（非 .xml）     → 被改
+# 且 `expandvars` 会把 `%WINDIR%\win.ini` 展开成真路径。
+#
+# ## 为什么这是"设计权衡的边界"而非"忘了校验"
+#
+# `bl_mcp` 的注释写明：A4 的**有意设计**是"显式给 path 就跳过 Warbandlord 闸门"。
+# 问题不在跳闸门，而在**跳完之后没有补上"路径边界"这一层** ——
+# 正好命中本项目已确立的教训（CONCURRENCY.md B8 段）：
+#     **加参数/放宽闸门，等于打开一条以前锁着的路 —— 要检查那条路上有没有旧洞。**
+#
+# ## 设计纪律（与 docs/config-tool-safety.md 对齐）
+#
+# 1. ★ **默认放行 = 全部既有合法用法**（游戏目录 / 文档目录 / 临时目录 / 项目目录）
+#    ⇒ 正常使用**一字不变**；只有"越界"这一**新情形**被拒。
+# 2. ★ **拒绝方式结构化**（返回 `{"ok": False, "error": ...}`），
+#    与本项目既有错误同一形状 —— 对齐"派发路径必须给出可读错误"的纪律。
+# 3. ★ **可显式放开**：`BLBRIDGE_ALLOW_WRITE_ROOTS`（os.pathsep 分隔）追加；
+#    `BLBRIDGE_ALLOW_ANY_PATH=1` 完全关闭（需显式，便于审计"谁关的")。
+# 4. ★ **错误信息回显全部允许根** —— 让调用方知道"该往哪儿写"，而不是只被拒。
+
+ALLOWED_WRITE_EXTS = (".xml", ".json", ".jsonl", ".txt", ".cfg", ".ini", ".log")
+
+
+def allowed_roots(game_dir=None, project_dir=None):
+    """允许写入/读取的根目录（realpath 后）。
+
+    ★ 默认集合是**实测得出**的，覆盖本项目全部既有合法目标：
+         · 游戏目录        —— Warbandlord config.xml
+         · 文档目录        —— RBM config.xml / RTSCameraConfig.xml / BlBridge 日志
+         · 系统临时目录    —— 自测的 tempfile.mkdtemp()
+         · 项目目录        —— blbridge.json
+    """
+    roots = []
+    cands = [
+        game_dir or os.environ.get("BANNERLORD_DIR"),
+    ]
+    # 文档目录：与 default_log_dir 同口径（Personal/Mount and Blade II Bannerlord）
+    cands.append(os.path.join(os.path.expanduser("~"), "Documents"))
+    cands.append(tempfile.gettempdir())
+    if project_dir:
+        cands.append(project_dir)
+    for v in cands:
+        if not v:
+            continue
+        try:
+            roots.append(os.path.realpath(os.path.abspath(v)))
+        except Exception:  # noqa: BLE001
+            pass
+    raw = (os.environ.get("BLBRIDGE_ALLOW_WRITE_ROOTS") or "").strip()
+    if raw:
+        for x in raw.split(os.pathsep):
+            x = x.strip()
+            if not x:
+                continue
+            try:
+                roots.append(os.path.realpath(
+                    os.path.abspath(os.path.expanduser(os.path.expandvars(x)))))
+            except Exception:  # noqa: BLE001
+                pass
+    seen, out = set(), []
+    for r in roots:
+        k = os.path.normcase(r)
+        if k not in seen:
+            seen.add(k)
+            out.append(r)
+    return out
+
+
+def within(root, path):
+    """path 是否位于 root 之内（两者 realpath；符号链接也被挡住）。
+
+    ★ 用 os.path.commonpath 而非字符串 startswith ——
+      否则 `C:\\a` 会误判 `C:\\ab` 为"在其内"（经典边界 bug）。
+    """
+    try:
+        r, p = os.path.realpath(root), os.path.realpath(path)
+        return os.path.commonpath([r, p]) == r
+    except ValueError:
+        return False          # 跨盘符 ⇒ 必然不在其内
+
+
+def path_allowed(path, verb="写入", game_dir=None, project_dir=None):
+    """路径边界锁。返回 (ok, payload)；ok=False 时 payload 是**结构化错误**。
+
+    ★ 这是**唯一的边界判定入口** —— 所有写/读路径都过它，
+      这样"哪条路开了边界"在代码里一眼可查（而非散落的 startswith）。
+    """
+    if os.environ.get("BLBRIDGE_ALLOW_ANY_PATH") == "1":
+        return True, {"path": path, "boundaryLock": "disabled_by_env"}
+    roots = allowed_roots(game_dir=game_dir, project_dir=project_dir)
+    for r in roots:
+        if within(r, path):
+            return True, {"path": path, "boundaryRoot": r,
+                          "boundaryLock": "within_allowed_roots"}
+    return False, {
+        "ok": False,
+        "error": "path_out_of_allowed_roots",
+        "path": path,
+        "verb": verb,
+        "allowedRoots": roots,
+        "message": (
+            "%s被路径边界锁拒绝：%s\n"
+            "允许的根：%s\n"
+            "如需放开，设 BLBRIDGE_ALLOW_WRITE_ROOTS（%s 分隔）追加目录；"
+            "或 BLBRIDGE_ALLOW_ANY_PATH=1 完全关闭边界锁（不推荐）。"
+            % (verb, path, "; ".join(roots), os.pathsep)),
+    }
+
+
+def ext_allowed(path):
+    """扩展名白名单（写入用）。返回 (ok, payload)。
+
+    ★ 单独一条的理由：审计实测"`.txt` 被改"能成功，
+      而"改配置文件"的语义落到 `.txt` 上是**明确越界**。
+    """
+    ext = os.path.splitext(str(path))[1].lower()
+    if not ext or ext in ALLOWED_WRITE_EXTS:
+        return True, {"ext": ext or "(无)"}
+    return False, {
+        "ok": False,
+        "error": "ext_not_allowed",
+        "path": path,
+        "ext": ext,
+        "allowedExts": list(ALLOWED_WRITE_EXTS),
+        "message": ("拒绝写入该扩展名：%s（白名单：%s）"
+                    % (ext, ", ".join(ALLOWED_WRITE_EXTS))),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# L3：合成输入的输入闸门（ITG, Input Triage Gate）—— 2026-10-13 安全审计后新增
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ## 为什么需要
+#
+# `bl_desktop_key` 把 `keys` / `text` 原样交给外部 `gridhand` 做**合成输入**，
+# 而 gridhand 会把它发到**当前活动窗口**。参数以列表传（**无 shell 注入**），
+# 但那不等于无风险 —— 它是**完整键盘权限**：
+#   · `keys="win+r"` ⇒ 打开运行框 ⇒ 可接着输入任意命令
+#   · `keys="ctrl+shift+esc"` ⇒ 任务管理器
+#   · `keys="alt+f4"` ⇒ 关掉**任意**前台窗口（不一定是游戏）
+#   · `text` 无长度上限 ⇒ 可灌入任意长文本
+#
+# ## 设计纪律：**白名单为主 + 高危组合否决**（双层，缺一不可）
+#
+# ### 第一层：白名单（拦"没记录过的键"）
+#
+# ★ 为什么不只用黑名单：攻击面是"全部组合键"，枚举拦不完
+#   （`win+x`、`win+l`、`ctrl+alt+del`… 列不尽）。
+#   本项目一贯纪律是"**宁可明确拒绝并给出可行路径，也不要假装知道**"
+#   （见 ENUM_HINTS 的注释）⇒ 用白名单，只放行**在代码/文档里真实出现过**的用途。
+#
+# ### 第二层：高危组合否决（拦"白名单组件拼出来的危险组合"）
+#
+# ★★ 为什么必须有第二层 —— 这是**实测发现的**，不是推测：
+#   第一版只有白名单，而 `ctrl+shift+esc` 的每个组件都合法
+#   （`ctrl`/`shift` 是允许的修饰键、`esc` 是允许的键）⇒ **放行了**。
+#   可它的语义是**打开任务管理器** —— 与"点掉对话框"毫无关系。
+#   ⇒ 教训：**白名单只保证"组件是被认识的"，不保证"组合是要的那个意思"。**
+#   同理 `alt+f4`（关前台窗口）、`alt+tab`（换焦点到别的应用再注入）
+#   也能用合法组件拼出来。
+#
+# ⇒ 两层叠加：**先挡不认识的，再挡认识但危险的**。
+
+# 允许按下的单键（小写；与 gridhand 的按键名口径一致）
+ALLOWED_KEYS = frozenset([
+    "enter", "return", "space", "tab", "esc", "escape",
+    "up", "down", "left", "right",
+    "home", "end", "pageup", "pagedown",
+    "backspace", "delete", "insert",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+])
+
+# 允许的修饰键（**只有 ctrl / shift / alt** —— 刻意不含 win/meta/cmd）
+ALLOWED_MODIFIERS = frozenset(["ctrl", "control", "shift", "alt"])
+
+# 明确点名的高危键（拒绝时给出**可读原因**，而不是笼统"不允许"）
+DANGEROUS_KEYS = {
+    "win": "系统键（可打开运行框/开始菜单，等效于拿到任意命令入口）",
+    "meta": "系统键（同 win）",
+    "cmd": "系统键（同 win）",
+    "super": "系统键（同 win）",
+    "lwin": "系统键（左 Win）",
+    "rwin": "系统键（右 Win）",
+    "printscreen": "截屏键（可外带屏幕内容）",
+    "prtsc": "截屏键",
+}
+
+# ── 第二层：高危组合（键 = (修饰键 frozenset, 主键)，值 = 为什么危险）──
+#   键里只写规范化后的 "ctrl"（不写 "control"）
+_DENY_COMBOS = {
+    (frozenset(["ctrl", "shift"]), "esc"): "打开任务管理器",
+    (frozenset(["ctrl"]), "esc"):          "打开开始菜单",
+    (frozenset(["alt"]), "f4"):            "关闭**当前前台窗口**（不一定是游戏；想关对话框请用 esc）",
+    (frozenset(["alt"]), "tab"):           "切换前台窗口（可把焦点移到别的应用再注入）",
+    (frozenset(["alt"]), "esc"):           "窗口/菜单循环切换",
+    (frozenset(["ctrl", "alt"]), "del"):   "安全屏",
+    (frozenset(["ctrl", "shift"]), "enter"): "以管理员身份运行",
+    (frozenset(["ctrl", "alt"]), "delete"): "安全屏",
+}
+
+MAX_KEY_SPEC_LEN = 64          # 单个组合键串的总长上限
+MAX_TEXT_LEN = 512             # 合成文本长度上限（够输入中文按钮/短串，挡灌入）
+
+
+def _norm_mods(parts):
+    """把修饰键规范化：control -> ctrl，去重，返回 frozenset。"""
+    out = set()
+    for p in parts:
+        out.add("ctrl" if p == "control" else p)
+    return frozenset(out)
+
+
+def key_allowed(spec):
+    """校验 `keys` 组合键串。返回 (ok, payload)。"""
+    if not isinstance(spec, str) or not spec.strip():
+        return False, {"ok": False, "error": "keys_empty",
+                       "message": "keys 不能为空"}
+    s = spec.strip()
+    if len(s) > MAX_KEY_SPEC_LEN:
+        return False, {"ok": False, "error": "keys_too_long", "len": len(s),
+                       "maxLen": MAX_KEY_SPEC_LEN,
+                       "message": "keys 过长（%d > %d）" % (len(s), MAX_KEY_SPEC_LEN)}
+
+    # 允许 "ctrl+a" 这种一式多键（+ 分隔）；逐段校验
+    parts = [p.strip().lower() for p in re.split(r"\s*\+\s*", s) if p.strip()]
+    if not parts:
+        return False, {"ok": False, "error": "keys_empty", "message": "keys 解析后为空"}
+
+    # ── 第一层 ①：修饰键必须在白名单 ──
+    bad_mods = []
+    for p in parts[:-1]:                      # 除最后一段外都应是修饰键
+        if p not in ALLOWED_MODIFIERS:
+            bad_mods.append(p)
+    if bad_mods:
+        why = []
+        for p in bad_mods:
+            if p in DANGEROUS_KEYS:
+                why.append("%s（%s）" % (p, DANGEROUS_KEYS[p]))
+            else:
+                why.append(p)
+        return False, {
+            "ok": False,
+            "error": "modifier_not_allowed",
+            "keys": s,
+            "offending": bad_mods,
+            "allowedModifiers": sorted(ALLOWED_MODIFIERS),
+            "message": ("修饰键不在白名单：%s\n"
+                        "只允许 ctrl / shift / alt（**刻意不含 win/meta** —— "
+                        "它们等效于拿到任意命令入口）。\n"
+                        "如确需放开，设 BLBRIDGE_ALLOW_ANY_KEY=1。"
+                        % "; ".join(why)),
+        }
+
+    # ── 第一层 ②：主键必须在白名单 ──
+    last = parts[-1]
+    if last in DANGEROUS_KEYS:
+        return False, {
+            "ok": False,
+            "error": "key_not_allowed",
+            "keys": s,
+            "offending": last,
+            "message": ("该键被拒：%s（%s）\n如确需放开，设 BLBRIDGE_ALLOW_ANY_KEY=1。"
+                        % (last, DANGEROUS_KEYS[last])),
+        }
+    if last not in ALLOWED_KEYS:
+        return False, {
+            "ok": False,
+            "error": "key_not_allowed",
+            "keys": s,
+            "offending": last,
+            "message": ("按键不在白名单：%r\n"
+                        "白名单是**本项目记录的合法用途**那批（enter/tab/esc/方向键/字母数字等）。\n"
+                        "如确需放开，设 BLBRIDGE_ALLOW_ANY_KEY=1。" % (last,)),
+        }
+
+    # ── ★ 第二层：高危组合否决（组件全合法、但语义危险）──
+    mods = _norm_mods(parts[:-1])
+    key_norm = "esc" if last == "escape" else ("enter" if last == "return" else last)
+    why = _DENY_COMBOS.get((mods, key_norm))
+    if why:
+        return False, {
+            "ok": False,
+            "error": "dangerous_combo",
+            "keys": s,
+            "combo": "+".join(sorted(mods) + [key_norm]),
+            "reason": why,
+            "message": ("组合键被高危否决：%s ⇒ %s\n"
+                        "（它的每个组件都在白名单里，但组合起来的语义与本工具的用途无关。）\n"
+                        "如确需放开，设 BLBRIDGE_ALLOW_ANY_KEY=1。" % (s, why)),
+        }
+
+    return True, {"keys": s, "parts": parts}
+
+
+def text_allowed(s):
+    """校验 `text` 合成输入。返回 (ok, payload)。
+
+    ★ 拦三类：
+      ① 超长（`MAX_TEXT_LEN`）—— 挡"灌入任意长文本"；
+      ② 控制字符（`\\x00-\\x1f`，含 `\\r`/`\\n`/`\\t`）—— 换行在对话框上等效于"按下回车"，
+         会是**隐式按键**（调用方以为是"输文本"，结果触发了按钮）；
+      ③ 非字符串类型。
+    """
+    if not isinstance(s, str):
+        return False, {"ok": False, "error": "text_not_string",
+                       "message": "text 必须是字符串，收到 %s" % type(s).__name__}
+    if len(s) > MAX_TEXT_LEN:
+        return False, {"ok": False, "error": "text_too_long", "len": len(s),
+                       "maxLen": MAX_TEXT_LEN,
+                       "message": ("text 过长（%d > %d）—— 合成输入不该用来灌长文本。"
+                                   "如确需放开，设 BLBRIDGE_ALLOW_ANY_KEY=1。"
+                                   % (len(s), MAX_TEXT_LEN))}
+    ctrl = [(i, c) for i, c in enumerate(s)
+            if ord(c) < 0x20 or ord(c) == 0x7f]
+    if ctrl:
+        i, c = ctrl[0]
+        return False, {
+            "ok": False,
+            "error": "text_has_control_char",
+            "index": i,
+            "codepoint": "U+%04X" % ord(c),
+            "message": ("text 含控制字符 U+%04X（第 %d 个字符）—— "
+                        "换行/回车在对话框上等效于**按下回车**，会隐式触发按钮。\n"
+                        "想按键请用 keys 参数（显式、在白名单内）。" % (ord(c), i)),
+        }
+    return True, {"text": s, "len": len(s)}
 
 
 def default_log_dir():

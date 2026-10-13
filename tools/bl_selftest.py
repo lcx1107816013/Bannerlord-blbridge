@@ -3135,6 +3135,27 @@ def main():
     print("=" * 90)
     test_crashguard_immediate_persist()
 
+    # ── ⑰ 路径边界锁（PBS，2026-10-13 安全审计）──────────────────────────
+    #
+    # ★ 为什么并进来：它守的是**写/读路径的边界**，与 ⑮⑯ 同属"安全底线"，
+    #   而"跑一次 bl_selftest 就看到全部底线"是本项目一直保持的性质。
+    #   ⚠️ 断言本体在 `pbs_selftest.py` —— 独立成文件是为了能**单独跑**
+    #     （定位越界问题时不必等整套自测）。
+    print()
+    print("=" * 90)
+    print("⑰ 路径边界锁 PBS：越界必须拒、既有合法目标必须放行（含反向对照）")
+    print("=" * 90)
+    try:
+        import pbs_selftest as _pbs
+        _rc_pbs = _pbs.main()
+    except Exception as _e_pbs:                                  # noqa: BLE001
+        print("  [!!] PBS 断言无法运行: %r" % (_e_pbs,))
+        _rc_pbs = 1
+    if _rc_pbs != 0:
+        # ★ 把 PBS 的失败项**并入 FAIL**（而不是各报各的）——
+        #   否则 `main()` 末尾的汇总会漏报，出现"⑰ 红了但总结果说全通过"。
+        FAIL.append("⑰ PBS 路径边界锁断言失败（详见上方输出）")
+
     if FAIL:
         print("结果: 失败 %d 项 -> %s" % (len(FAIL), FAIL))
         return 1

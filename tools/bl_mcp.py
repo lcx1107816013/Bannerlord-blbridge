@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1139,11 +1140,39 @@ def _scan(text):
 #    静默回退会让"我指定了 A 却改了 B"，正是第 2 条要防的。
 # ─────────────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════
+# 路径边界锁（PBS）—— 见 bl_common 里的完整说明
+# ══════════════════════════════════════════════════════════════════════════
+#
+# ★ 实现放在 `bl_common`（而非本文件），因为写路径有**两条独立入口**：
+#   `bl_mcp.apply_config`（Warbandlord / RBM）与 `bl_rts.apply`（RTSCamera）。
+#   放本文件会让 bl_rts 反向依赖 bl_mcp（且 bl_mcp 已 import bl_rts ⇒ 循环）。
+#   本文件只做**薄包装**，把 game_dir/_PROJECT_DIR 这两个"本模块才知道的上下文"传下去。
+
+def _allowed_roots():
+    return bl_common.allowed_roots(game_dir=game_dir(), project_dir=_PROJECT_DIR)
+
+
+def check_path_allowed(path, verb="写入"):
+    """路径边界锁（薄包装 bl_common.path_allowed，补上本模块的路径上下文）。"""
+    return bl_common.path_allowed(path, verb=verb,
+                                  game_dir=game_dir(), project_dir=_PROJECT_DIR)
+
+
+def check_extension(path):
+    """扩展名白名单（薄包装）。"""
+    return bl_common.ext_allowed(path)
+
+
 def _resolve_config_path(path):
     """把调用方给的 `path` 规范化成**绝对路径**（用于回显与操作）。
 
     ⚠️ 刻意**不做**"不存在就回退默认"：回退会造成"指定了 A 却动了 B"。
     存在问题一律由调用方（read_config / apply_config）显式报错。
+
+    ⚠️ 同样刻意**不在这里**判边界 —— 边界判定必须是**显式的一步**
+    （`check_path_allowed`），这样它在调用链上可见、可被断言、可被审计。
+    把两件事塞进一个函数会让"到底哪条路开了边界"变得不可查。
     """
     if path is None:
         return None
@@ -1167,6 +1196,14 @@ def read_config(paths=None, _structured=False, path=None):
     """
     explicit = _resolve_config_path(path)
     if explicit is not None:
+        # ★ PBS（2026-10-13）：显式 path 走**读**边界锁。
+        #   为什么读也要锁：审计实测 `read_config(path="C:\Windows\win.ini")`
+        #   会真的打开它（`ok:true`），可用于**任意文件存在性/可读性探测**。
+        _ok_b, _pay_b = check_path_allowed(explicit, verb="读取")
+        if not _ok_b:
+            if _structured:
+                return False, _pay_b
+            raise IOError(_pay_b["message"])
         # 显式指定目标 ⇒ 跳过 Warbandlord 闸门（闸门只管"没说目标"的情形）。
         if not os.path.isfile(explicit):
             err = {"ok": False, "error": "config_not_found",
@@ -1292,6 +1329,7 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False, p
         path_use, source = warbandlord_config(), "default"
 
     path = path_use
+
     if not os.path.isfile(path):
         raise IOError("找不到配置: %s" % path)
 
@@ -1300,6 +1338,22 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False, p
     #   手写 4 处就有 4 次漏掉的机会，而这里漏一次就是"改完报失败"。
     def _ret(payload, ok=True):
         return (ok, payload) if _structured else payload
+
+    # ★ PBS（2026-10-13）：写路径**必须**过边界锁 + 扩展名白名单。
+    #   审计实测：不过锁时能改 C:\Windows\Temp\*.xml、C:\Users\LCGX\*.xml、notes.txt。
+    #   ★ 顺序刻意是"边界 → 扩展名"：越界是更严重的问题，应先报它。
+    #   ★ 放在 `_ret` **之后**：必须走 _ret 出口返回（而不是抛异常），
+    #     以符合 apply_config 既有的"_structured 恒返回 (ok,payload) 元组"契约 ——
+    #     否则会重犯 B8 那类"写完再抛 ⇒ 调用方以为失败"的事故。
+    #   ★ 也放在 `os.path.isfile` 之后：这样"路径不存在"仍报 config_not_found，
+    #     与既有行为**逐字一致**（基线里就有这条断言）。
+    _ok_b, _pay_b = check_path_allowed(path, verb="写入")
+    if not _ok_b:
+        return _ret(_pay_b, ok=False)
+    _ok_e, _pay_e = check_extension(path)
+    if not _ok_e:
+        return _ret(_pay_e, ok=False)
+
     raw = io.open(path, "rb").read()
     bom = raw.startswith(b"\xef\xbb\xbf")
     text = _read_text(path)
@@ -3627,8 +3681,51 @@ def _observer_dll_hint(code):
     return {}
 
 
+# ── L4 前置闸门（2026-10-13 安全审计）────────────────────────────────────
+#
+# ## 为什么放在 `call_tool` 入口而不是逐工具改
+#
+# `logDir` / `out` / `dir` / `battlesDir` / `launcher` 这些"路径类参数"
+# 分散在 **9 处消费点**（bl_report / bl_run_batch / bl_batch_report / bl_blockade /
+# bl_desktop_screenshot / bl_json_health / bl_lexicon / bl_ipc_replay / bl_save_diag…）。
+# 逐个改 ⇒ 漏一个就是漏一条路（本项目对"漏一处"的教训已经很多）。
+# ⇒ 在**唯一入口**统一拦：**覆盖面由构造保证**，不依赖"我记得改全了"。
+#
+# ## 纪律
+#
+# ★ **只校验"调用方显式传了值"的那些** —— 不传时保持既有默认行为（逐字不变）。
+#   这是"无损"的关键：默认路径本来就落在允许根内，校验它等于白做还可能误伤。
+# ★ 拒绝时返回**结构化错误**（与既有错误同形状），且**回显允许根**。
+
+_PATH_ARGS = ("logDir", "out", "dir", "battlesDir", "launcher")
+
+
+def _precheck_path_args(name, args):
+    """L4 前置闸门：返回 None（放行）或结构化错误 dict（拒绝）。"""
+    for key in _PATH_ARGS:
+        v = args.get(key)
+        if v is None or v == "":
+            continue
+        if not isinstance(v, str):
+            return {"ok": False, "error": "path_arg_not_string", "arg": key,
+                    "tool": name, "got": type(v).__name__,
+                    "message": "%s 必须是字符串，收到 %s" % (key, type(v).__name__)}
+        # 目录型参数（logDir/out/dir/battlesDir）判"是否在允许根内"；
+        # 文件型（launcher）判同样口径（它就在文档目录下）
+        ok, pay = check_path_allowed(v, verb="%s（%s）" % (key, name))
+        if not ok:
+            pay["tool"] = name
+            pay["arg"] = key
+            return pay
+    return None
+
+
 def call_tool(name, args):
     args = args or {}
+    # ★ 唯一入口的前置闸门（覆盖全部路径类参数）
+    _bad = _precheck_path_args(name, args)
+    if _bad is not None:
+        return _bad
     if name == "bl_status":
         p = status_path()
         if not os.path.isfile(p):
@@ -5265,9 +5362,25 @@ def call_tool(name, args):
         if not gridhand_path():
             return {"ok": False, "available": False, "error": "gridhand 未安装",
                     "hint": "cargo install gridhand"}
+        # ★ ITG（2026-10-13 安全审计）：合成输入闸门。
+        #   为什么需要：gridhand 把按键发到**当前活动窗口** —— 参数是列表传（无 shell 注入），
+        #   但那不等于无风险：`keys="win+r"` 等效于拿到任意命令入口，
+        #   `alt+f4` 能关掉**任意**前台窗口，`text` 无上限可灌长串。
+        #   ★ 用**白名单**（不是黑名单）：攻击面是"全部组合键"，枚举拦不完。
+        #     白名单来自工具描述里记录的合法用途（对话框回车/键盘导航/中文按钮替代输入）。
+        #   ★ 逃生门：BLBRIDGE_ALLOW_ANY_KEY=1（需显式，便于审计"谁关的"）。
+        _any_key = os.environ.get("BLBRIDGE_ALLOW_ANY_KEY") == "1"
         if args.get("text") is not None:
+            if not _any_key:
+                _ok_t, _pay_t = bl_common.text_allowed(args.get("text"))
+                if not _ok_t:
+                    return _pay_t
             sub = ["key", "type", str(args.get("text"))]
         elif args.get("keys"):
+            if not _any_key:
+                _ok_k, _pay_k = bl_common.key_allowed(args.get("keys"))
+                if not _ok_k:
+                    return _pay_k
             sub = ["key", "press", str(args.get("keys"))]
         else:
             return {"ok": False, "error": "需要 keys（组合键）或 text（文本）之一"}
@@ -5276,7 +5389,8 @@ def call_tool(name, args):
             sub += ["--window-id", str(int(wid))]
         rc, data, clean, err = _gridhand_json(sub)
         return {"ok": rc == 0, "exitCode": rc, "result": data,
-                "raw": clean[:400], "stderr": err[:300]}
+                "raw": clean[:400], "stderr": err[:300],
+                "inputTriage": "off" if _any_key else "on"}
 
     return {"ok": False, "error": "unknown tool: %s" % name}
 
