@@ -64,10 +64,20 @@ namespace EditorProbeTest
             };
         }
 
-        private static int Main()
+        private static int Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
             HookAssemblyResolve();
+
+            // "serve" mode: run the probe's server against the real session file and
+            // keep draining on a stand-in main thread until stdin closes. This exists
+            // so the ARCHIVE CLIENT (real TypeScript) can be pointed at the REAL C#
+            // server — the only way to prove the two sides interoperate without
+            // launching the game.
+            if (args != null && args.Length > 0 && args[0] == "serve")
+            {
+                return ServeForever();
+            }
 
             Console.WriteLine("== EditorProbe 离线断言 ==\n");
 
@@ -82,6 +92,51 @@ namespace EditorProbeTest
             Console.WriteLine();
             Console.WriteLine("== " + (_fail == 0 ? "全部通过" : "有失败") + "（" + (_pass + _fail) + " 项，失败 " + _fail + "）==");
             return _fail == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// Hosts the probe for an external client. Prints the port and session path
+        /// on stdout so a caller can pick them up, then drains the queue on a
+        /// stand-in main thread until EOF on stdin.
+        /// </summary>
+        private static int ServeForever()
+        {
+            _gameDir = FindGameDir();
+            if (_gameDir == null)
+            {
+                Console.WriteLine("NO_GAME_DIR");
+                return 2;
+            }
+            if (!EditorProbeConfig.Initialize(_gameDir, 47321))
+            {
+                Console.WriteLine("NOT_READY: " + EditorProbeConfig.NotReadyReason);
+                return 3;
+            }
+            if (!EditorProbeServer.Start(EditorProbeConfig.Token, EditorProbeConfig.Port))
+            {
+                Console.WriteLine("LISTEN_FAILED");
+                return 4;
+            }
+
+            ManualResetEvent stop = new ManualResetEvent(false);
+            Thread mainThread = new Thread(() => RunMainThread(stop));
+            mainThread.IsBackground = true;
+            mainThread.Start();
+
+            Thread.Sleep(100);
+            Console.WriteLine("READY");
+            Console.WriteLine("PORT=" + EditorProbeServer.BoundPort);
+            Console.WriteLine("SESSION=" + EditorProbeConfig.SessionPath);
+            Console.Out.Flush();
+
+            // Wait for EOF rather than a fixed sleep, so the caller controls lifetime.
+            try { Console.In.ReadToEnd(); }
+            catch { }
+
+            stop.Set();
+            mainThread.Join(2000);
+            EditorProbeServer.Stop();
+            return 0;
         }
 
         // ── helpers ─────────────────────────────────────────────────────────────
@@ -268,13 +323,18 @@ namespace EditorProbeTest
             Ok("session 文件存在", File.Exists(EditorProbeConfig.SessionPath));
             Dictionary<string, object> session = EditorProbeJson.ParseObject(
                 File.ReadAllText(EditorProbeConfig.SessionPath, Encoding.UTF8));
-            OkEq("session.gameDir", EditorProbeJson.GetString(session, "gameDir"), _gameDir);
+            OkEq("session.gameDir 已规范化", EditorProbeJson.GetString(session, "gameDir"),
+                EditorProbeConfig.NormalizePath(_gameDir));
+            Ok("session 里不含正斜杠（单一分隔符风格）",
+                !(EditorProbeJson.GetString(session, "gameDir") ?? "").Contains("/")
+                && !(EditorProbeJson.GetString(session, "sceneDir") ?? "").Contains("/"));
             Ok("session.token >= 8 字符", (EditorProbeJson.GetString(session, "token") ?? "").Length >= 8);
             int port;
             Ok("session.port 在 1..65535", EditorProbeJson.TryGetInt(session, "port", out port) && port >= 1 && port <= 65535);
 
             string sceneDir = EditorProbeJson.GetString(session, "sceneDir");
-            string expectedSceneDir = Path.Combine(_gameDir, "Modules", "BannerlordSage.EditorProbe", "SceneObj", "ProbeScene");
+            string expectedSceneDir = EditorProbeConfig.NormalizePath(
+                Path.Combine(_gameDir, "Modules", "BannerlordSage.EditorProbe", "SceneObj", "ProbeScene"));
             OkEq("sceneDir 落在模块 SceneObj 下（客户端会 realpath 校验）", sceneDir, expectedSceneDir);
             Ok("scene.xscene 存在", File.Exists(Path.Combine(sceneDir, "scene.xscene")));
             Ok("场景名符合客户端正则 ^[a-zA-Z][a-zA-Z0-9_]{0,79}$",

@@ -42,11 +42,32 @@ namespace BlBridge.EditorProbe
         /// <summary>Matches the client's 80-character scene name limit.</summary>
         private const int MaxSceneNameLength = 80;
 
-        internal static string Token { get; private set; }
-        internal static string GameDir { get; private set; }
-        internal static string ModuleDir { get; private set; }
-        internal static string OutputDir { get; private set; }
-        internal static string SceneDir { get; private set; }
+        /// <summary>
+    /// Normalizes an absolute path to a single separator style.
+    ///
+    /// Why this matters: the archived client resolves its own module directory with
+    /// Node's `realpath`, which on Windows returns backslashes, and then compares that
+    /// against the path this probe reports. The comparison is a plain lowercase string
+    /// equality, so a value assembled with Path.Combine over a gameDir that arrived with
+    /// forward slashes (as it does from an environment variable) yields
+    /// "G:/.../Bannerlord\Modules\BannerlordSage.EditorProbe" — mixed separators.
+    /// Node happens to realpath our value before comparing, so that particular path
+    /// survives, but relying on the client to repair our output is fragile: any future
+    /// direct comparison, or any other client, would see a mismatch.
+    /// </summary>
+    internal static string NormalizePath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+        string full = Path.GetFullPath(path);
+        return full.Replace('/', Path.DirectorySeparatorChar)
+                   .Replace('\\', Path.DirectorySeparatorChar);
+    }
+
+    internal static string Token { get; private set; }
+    internal static string GameDir { get; private set; }
+    internal static string ModuleDir { get; private set; }
+    internal static string OutputDir { get; private set; }
+    internal static string SceneDir { get; private set; }
         internal static string SceneName { get; private set; }
         internal static int Port { get; private set; }
 
@@ -82,8 +103,8 @@ namespace BlBridge.EditorProbe
                     return false;
                 }
 
-                GameDir = gameDir;
-                ModuleDir = Path.Combine(gameDir, "Modules", ModuleId);
+                GameDir = NormalizePath(gameDir);
+                ModuleDir = NormalizePath(Path.Combine(GameDir, "Modules", ModuleId));
                 SceneName = "ProbeScene";
 
                 if (!Directory.Exists(ModuleDir))
@@ -96,8 +117,8 @@ namespace BlBridge.EditorProbe
                 // client resolves the scene directory and then requires its basename
                 // to equal the session's scene name.
                 string sceneObj = Path.Combine(ModuleDir, "SceneObj");
-                SceneDir = Path.Combine(sceneObj, SceneName);
-                OutputDir = Path.Combine(ModuleDir, "output");
+                SceneDir = NormalizePath(Path.Combine(sceneObj, SceneName));
+                OutputDir = NormalizePath(Path.Combine(ModuleDir, "output"));
 
                 try
                 {
