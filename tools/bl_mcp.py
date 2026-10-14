@@ -1553,6 +1553,11 @@ TOOLS = [
                         "而那正是最需要它的时刻。"
                         "★ 为什么需要它（实测）：客户端对 Kit 缺失只报一个笼统的 "
                         "`version_mismatch` / `invalid_session`，看不出到底缺什么。"
+                        "★ 本探测**同时回答「编辑器探针模组装没装」** —— 装好之后 "
+                        "`editorReady` 会变成 `yes`、`blockers` 变空，**不用改一行代码**。"
+                        "★ 编辑器工具**不在本服务里**：那 6 个 `ba_editor_*` 属于 Archive，"
+                        "本探针是它们此前缺失的**游戏端后端**（loopback TCP + token）。"
+                        "刻意不在 Bridge 里再注册一份 —— 双份工具面比任一份都糟。"
                         "**只读，不写、不改、不装任何东西。**"),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },

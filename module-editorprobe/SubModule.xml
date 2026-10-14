@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Module xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/BUTR/Bannerlord.XmlSchemas/master/SubModule.xsd">
+  <Id value="BannerlordSage.EditorProbe" />
+  <Name value="BannerlordSage Editor Probe" />
+  <Version value="v0.1.0" />
+  <DefaultModule value="false" />
+  <ModuleCategory value="Singleplayer" />
+  <ModuleType value="Community" />
+  <!--
+    ★ 本模块与 BlBridge 是**同仓的两个独立模块**，刻意不合并。
+
+    为什么：
+      - BlBridge 是**客户端运行时**、**零依赖**（只依赖 Native/SandBoxCore/Sandbox/CustomBattle），
+        跑在 bin/Win64_Shipping_Client；
+      - 本模块只能对 bin/Win64_Shipping_wEditor（**Modding Kit**）编译。
+    合成一个 DLL 会让零依赖的 BlBridge 反过来依赖 Kit —— 拿已能用的工具去赌一个打包观感。
+    分开的代价：用户装了 Kit 才用得上本模块；好处：没装 Kit 时 **BlBridge 完全不受影响**
+    （本模块加载失败不影响任何其它模块）。
+
+    ★ 为什么 DependedModules 里不写 BlBridge：
+      骑砍**不支持可选模块依赖**。写了就变成硬依赖 —— 没装 BlBridge 的人装本模块会直接报错。
+      "可被调用" 用**软依赖**表达，照抄 BlBridge 已有先例（tools/bl_sage.py）：
+      查到就用，查不到就如实报告 available=false，绝不阻断宿主。
+  -->
+  <DependedModules>
+    <DependedModule Id="Native" />
+    <DependedModule Id="SandBoxCore" />
+    <DependedModule Id="Sandbox" />
+  </DependedModules>
+
+  <SubModules>
+    <SubModule>
+      <Name value="BannerlordSageEditorProbe" />
+      <DLLName value="BannerlordSage.EditorProbe.dll" />
+      <SubModuleClassType value="BlBridge.EditorProbe.EditorProbeSubModule" />
+      <Tags>
+        <Tag key="DedicatedServerType" value="none" />
+        <Tag key="IsNoRenderModeElement" value="false" />
+      </Tags>
+    </SubModule>
+  </SubModules>
+</Module>
