@@ -2030,10 +2030,31 @@ def main():
                       io.open(fmt_path, "rb").read()).hexdigest(),
                   "A4b 反向对照: 真写确实改动了文件（证明上一组『sha 不变』不是恒真）",
                   "sha changed")
-            # (8) ★ 真机上形式①确有项、且与形式②无重名（用真档**只读**核对）
+            # (8) ★ 真机解析**自一致性**（用真档只读核对）
+            #
+            # ★★ 2026-10-14 实机复核后修（本机就是真机，实测数据如下）：
+            #
+            #   · 本机 RBM 真档 13,688 B / 253 行，是 `<Config>` + **嵌套裸标签**形式
+            #     （`<RBMAI><Enabled>1</Enabled></RBMAI>` …）：
+            #        `<Option id=".." value=".." />` 出现 **0 次**
+            #        裸标签                              **206 个**
+            #   · 扫描器**是对的**：`read_config` 返回
+            #         {'total': 206, 'option': 0, 'bare': 206}
+            #     与**独立正则**逐项吻合（option 0/0、bare 206/206、total 相加吻合）。
+            #
+            #   ⇒ 原来的断言之所以恒红，**不是扫描器错**，而是它多要求了
+            #      `_n_opt > 0` —— 那是"真档同时存在两种写法"的**格式分布假设**。
+            #      实测证伪该假设 ⇒ 属于**假红**（假红比红更糟：会训练人忽略退出码）。
+            #
+            #   ⇒ 判据改成**只验自一致性**（解析结果 == 同一文件的独立正则），
+            #      两种形式的个数**各自 >= 0 即可**。这样：
+            #        · 文件怎么长、用哪种写法写，都不会误报；
+            #        · 而"扫描器坏了"（计数与正则不符 / total 不等于两项之和）仍会红。
             rbm_cfg = os.path.join(os.path.expanduser("~"), "Documents",
                                    "Mount and Blade II Bannerlord", "Configs", "RBM", "config.xml")
-            if os.path.isfile(rbm_cfg):
+            if not os.path.isfile(rbm_cfg):
+                print("  [skip] A4b 真机断言：本机没有 RBM 真档（%s）" % rbm_cfg)
+            else:
                 okR, payR = bl_mcp.read_config(None, _structured=True, path=rbm_cfg)
                 kR = payR.get("keyCount") or {}
                 VR = payR.get("values") or {}
@@ -2047,19 +2068,42 @@ def main():
                 _n_bare = len(re.findall(
                     r'^\s*<([A-Za-z_][A-Za-z0-9_]*)(?:\s[^>]*)?>([^<]*)</\1>\s*$',
                     _raw_rbm, re.M))
+                # ★★ 判据（实机复核后）：**只验自一致性**
+                #    `_n_opt > 0 and _n_bare > 0` 这个要求已删除 ——
+                #    实测本机真档 `_n_opt == 0`（全是裸标签），那个要求是**格式分布
+                #    假设**，不是扫描器的正确性条件 ⇒ 它造成的是假红。
                 check(okR is True
-                      and kR.get("option") == _n_opt and _n_opt > 0
-                      and kR.get("bare") == _n_bare and _n_bare > 0
+                      and kR.get("option") == _n_opt
+                      and kR.get("bare") == _n_bare
                       and kR.get("total") == _n_opt + _n_bare,
                       "A4b ★真机: RBM 真档两种形式的计数与**独立正则**吻合（自一致，不写死快照）",
                       {"tool": kR, "regex_option": _n_opt, "regex_bare": _n_bare})
-                # 三个开关必须读得到（这是 A4 的实际用途；值随窗口初态变，故只断言"读得到"）
+                # 三个开关：实机实测它们在真档里出现 **0 次**（`grep -c` = 0/0/0），
+                # 真档是**玩家当前状态**，而这三个是「准备写入的目标」——
+                # 当时还没写进去。所以"必须读得到"验的是**一个未来的档**，必然假红。
+                #
+                # ⇒ 改成**结构性判据 + 证伪**：只有当键真的存在时，才断言能从 `values`
+                #    里读到；同时断言"真档的键总数与解析结果一致"，保证不是空跑。
+                #    这样：档里有了它就必须读得到（真判据），没有也不误报。
                 _switches = ["RBMCombat/UseWarbandlordPerkValues",
                              "RBMCampaign/BadDataCleanupEnabled",
                              "RBMCampaign/BadDataCleanupDryRun"]
-                check(all(VR.get(k) is not None for k in _switches),
-                      "A4b ★真机: 要改的三个 RBM 开关**读得到**（值不断言，随窗口初态变）",
-                      {k: VR.get(k) for k in _switches})
+                _present = [k for k in _switches if k in VR]
+                if _present:
+                    check(all(VR.get(k) is not None for k in _present),
+                          "A4b ★真机: 真档里**已存在**的 RBM 开关都读得到（存在 %d/%d 个）"
+                          % (len(_present), len(_switches)),
+                          {k: VR.get(k) for k in _switches})
+                else:
+                    # ★ 如实说明：这不是"通过"，是"这条路径**没被测到**"。
+                    print("  [skip] A4b 真机: 三个目标开关在真档里都**不存在**"
+                          "（实测 grep -c 均为 0）⇒ 本条未验证")
+                    print("         真档有 %d 个键，说明**档本身读到了**"
+                          "（解析链路是通的）；缺的只是这三个目标键。" % len(VR))
+                    # 至少验证"档读到了、不是空跑" —— 否则 [skip] 会掩盖读取失败
+                    check(len(VR) > 0,
+                          "A4b ★真机: 真档确实被解析出内容（%d 个键）—— 保证上面的 skip 不是空跑"
+                          % len(VR))
         finally:
             shutil.rmtree(fmt_dir, ignore_errors=True)
 
