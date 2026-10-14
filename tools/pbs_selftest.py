@@ -254,9 +254,99 @@ def main():
     import re as _re
     m = _re.search(r"_PATH_ARGS\s*=\s*\(([^)]*)\)", src_mcp)
     got = m.group(1) if m else ""
-    for k in ("logDir", "out", "dir", "battlesDir", "launcher"):
-        check(("'%s'" % k) in got or ('"%s"' % k) in got,
-              "闸门覆盖 %s" % k, got[:120])
+    # ★★ 2026-10-14 修一条**自证式断言**：原来这里手抄了一份 5 项名单，
+    #    与源码里的名单是同一份 ⇒ 把源码删一项、这里也删一项，**永远绿**。
+    #    实测证明它无效：`file` / `plan` / `manifest` 等参数从来没被覆盖，
+    #    而本断言一直报"覆盖面由构造保证"。
+    #
+    #    改成三条**会变红**的判据：
+    #      ① 名单必须包含实测确认过的"真·文件路径"参数（下面这份是**断言**，
+    #         不是从源码抓的 —— 它代表"我知道应该拦哪些"）
+    #      ② 源码里 `_PATH_ARGS_NEVER` 点名的参数**不得**出现在名单里
+    #         （反向对照：防"为了图省事把不该拦的也拦了"）
+    #      ③ 逐项**真调用** `_precheck_path_args`，验证"该拦的真的拦"
+    # ★★ 2026-10-14：**不要用正则抓源码文本**做断言 —— 那是"判据绑定形态"。
+    #    我第一版就是正则抓 `_PATH_ARGS_SCOPED` 再找 `'a'`，而源码用的是双引号
+    #    `"a"` ⇒ 断言**误红**（代码完全正确）。这正是本项目记过的坑：
+    #    判据一旦绑到"引号风格 / 换行 / 变量名写法"，改个排版就会假红或假绿。
+    #    ⇒ 改成**导入模块、直接读数据结构**。语义判据，不绑形态。
+    sys.path.insert(0, HERE)
+    import importlib
+    _mcp = importlib.import_module("bl_mcp")
+    _gate = _mcp._precheck_path_args
+    _generic = set(_mcp._PATH_ARGS)
+    _scoped = _mcp._PATH_ARGS_SCOPED
+    _never = set(_mcp._PATH_ARGS_NEVER)
+
+    # ① 通用名单必须含全部"真·文件路径"参数
+    for k in ("logDir", "out", "dir", "battlesDir", "launcher",
+              "file", "plan", "manifest", "cdb"):
+        check(k in _generic, "通用闸门名单覆盖 %s" % k)
+
+    # ② 反向对照 A：语义不定的单字母**不得**进通用名单
+    for k in ("a", "b"):
+        check(k not in _generic,
+              "通用名单里**不得**出现语义不定的单字母 %r（必须按工具限定）" % k)
+
+    # ③ 按工具限定：bl_batch_report 的 a/b 必须在 _PATH_ARGS_SCOPED 下
+    check("bl_batch_report" in _scoped
+          and set(_scoped["bl_batch_report"]) >= {"a", "b"},
+          "按工具限定：bl_batch_report 的 a/b 被限定在该工具下", repr(_scoped))
+
+    # ④ 反向对照 B：名字像路径但**不是**路径的，不得出现在任何名单里
+    for k in ("target", "paths"):
+        check(k in _never, "反向对照：%r 已被显式标为**非路径**" % k)
+        check(k not in _generic and not any(k in v for v in _scoped.values()),
+              "反向对照：%r **没有**被塞进任何闸门名单" % k)
+
+    # ⑤ 真调用：该拦的拦、该放的放（**不读源码，直接打闸门**）
+    for tool, arg in (("bl_read_events", "file"), ("bl_analyze", "file"),
+                      ("bl_run_batch", "plan"), ("bl_batch_report", "manifest"),
+                      ("bl_batch_report", "a"), ("bl_batch_report", "b"),
+                      ("bl_crash", "path"), ("bl_crash", "cdb")):
+        r = _gate(tool, {arg: r"C:\Windows\win.ini"})
+        check(r is not None, "真调用：%s.%s 指向系统文件时**被拒**" % (tool, arg))
+    for tool, arg, val in (("bl_order", "target", "Infantry"),
+                           ("bl_read_config", "paths", ["DamageCalc/ArmorEffect"]),
+                           ("bl_launch_game", "minStartupSec", 20),
+                           # ★ 关键反向对照：**别的工具**传 a=非路径 不得被拦
+                           #   （这正是"按工具限定"与"进通用名单"的差别所在）
+                           ("bl_status", "a", "someValue")):
+        r = _gate(tool, {arg: val})
+        check(r is None, "真调用：%s.%s **未被误拦**（值=%r）" % (tool, arg, val))
+
+    # ⑥（2026-10-14 补，第二意见指出）**没进显式名单、靠内部校验**的那几个工具，
+    #   也必须被证明"真的会被拒"。为什么单独立一条：
+    #     · ⑤ 只覆盖了 _PATH_ARGS / _PATH_ARGS_SCOPED 里点名的参数；
+    #     · `bl_read_config` / `bl_apply_config` / `bl_rts_config` / `bl_apply_rts_config`
+    #       的 `path` **刻意没进闸门**（它们内部自己调 check_path_allowed）——
+    #       这是我们主动做的取舍，但**取舍本身必须被断言锁住**，
+    #       否则哪天有人重构把那行校验删掉，闸门不会红、⑤ 也不会红。
+    #   ⚠️ 必须用 `call_tool`（端到端）而不是 `_gate`（只看前置闸门）：
+    #      这四个的校验在**函数内部**，前置闸门对它们的 `path` 本来就返回 None。
+    #
+    #   ⚠️ 形态很关键（我实测过，写错就假绿）：
+    #      `bl_apply_config` / `bl_apply_rts_config` 若**只传 path**，会先撞
+    #      "edits 不能为空" / "需要 preset" 而**在到达边界校验之前就返回** ——
+    #      那时断言看到"报错了"就通过，其实**根本没测到边界**。
+    #      ⇒ 必须传够参数，让流程真的走到边界校验那一步。
+    _needs = {"bl_read_config": {}, "bl_apply_config": {"edits": [{"key": "k", "value": "1"}]},
+              "bl_rts_config": {}, "bl_apply_rts_config": {"edits": [{"key": "k", "value": "1"}]}}
+    for tool, extra in _needs.items():
+        args = {"path": r"C:\Windows\win.ini"}
+        args.update(extra)
+        r = _mcp.call_tool(tool, args)
+        blob = repr(r)          # ★ 判据打**语义**（"被拒了"），不打**形状**（error 字段叫什么）
+        #   实测：这几个工具拒绝时的**形状不一致** ——
+        #     bl_read_config / bl_apply_config  -> {"error": "path_out_of_allowed_roots", ...}
+        #     bl_rts_config / bl_apply_rts_config -> {"error": "<路径边界锁的整段 message>"}
+        #   （后者是跨仓复用的 `bl_rts` 直接把 message 当 error 用）
+        #   ⇒ 第一版我断言 `err == "path_out_of_allowed_roots"`，那两个**误红**了。
+        #     这正是"判据绑定形态"——所以改成：**必须出现边界锁的判据文字**，
+        #     而不是它被装在哪个字段里。
+        check("path_out_of_allowed_roots" in blob
+              or "路径边界锁拒绝" in blob,
+              "靠内部校验的工具也被拒：%s(path=系统文件%s)" % (tool, "+必要参数" if extra else ""))
     # ★ 反向对照：闸门必须在 call_tool 的**入口**（第一件事），
     #   否则"某条分支先返回了"就绕过闸门。
     i_fn = src_mcp.find("def call_tool(")

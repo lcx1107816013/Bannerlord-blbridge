@@ -3697,12 +3697,61 @@ def _observer_dll_hint(code):
 #   这是"无损"的关键：默认路径本来就落在允许根内，校验它等于白做还可能误伤。
 # ★ 拒绝时返回**结构化错误**（与既有错误同形状），且**回显允许根**。
 
-_PATH_ARGS = ("logDir", "out", "dir", "battlesDir", "launcher")
+# ★★ 2026-10-14：补全「真·文件路径」参数。原来的 5 项自称"覆盖面由构造保证"，
+#    但实测漏了下面 5 类 —— 它们同样"调用方可控 + 真的开文件 / 真的喂子进程"：
+#
+#        file      bl_analyze / bl_read_events  ->  读任意文件（PoC: file=C:\Windows\win.ini 返回 ok:true）
+#        plan      bl_run_batch                ->  os.path.isfile() + 子进程 --plan
+#        manifest  bl_batch_report             ->  子进程 --manifest
+#        a / b     bl_batch_report             ->  子进程 --a / --b（文件或目录）
+#        cdb       bl_crash                    ->  启动该可执行文件（--cdb）
+#        path      bl_crash / bl_crashguard     ->  转储 / jsonl 路径
+#
+#    ⚠️ 为什么用**显式名单**而不是"从 TOOLS 的 schema 推导"（审计建议②）：
+#       推导会把 **名字像路径但其实不是**的参数一起拦掉，直接改坏功能。实测例子：
+#         · bl_order.target        = 敌方编队名（Infantry/Ranged/... 或下标 0~4）
+#         · bl_read_config.paths   = 配置**节**路径（DamageCalc/ArmorEffect）
+#       所以名单是**按消费点逐条核过**的（见本项上方注释与 tools/pbs_selftest.py ⑭ 段）。
+#
+#    ⚠️ 为什么 `path` 只加 bl_crash/bl_crashguard、不加 bl_read_config/bl_apply_config：
+#       后两者的 `path` **已经在函数内部自己调 check_path_allowed**（见 read_config 的
+#       "★ PBS（2026-10-13）：显式 path 走**读**边界锁"）。这里再拦一遍是冗余，
+#       而冗余的边界检查会在将来某次改动里变成"两条规则不一致"的新 bug 源。
+#       ⇒ 用下面的 `_PATH_ARGS_SCOPED` 表达"只对某几个工具生效"。
+_PATH_ARGS = ("logDir", "out", "dir", "battlesDir", "launcher",
+              "file", "plan", "manifest", "cdb")
+
+# 只在**指定工具**上生效的路径参数（避免与工具内部的边界检查重复/打架）。
+#
+# ★ 为什么 `a` / `b` 必须**限定在 bl_batch_report**而不是放进上面的通用名单：
+#   它们是**单字母名**，语义完全由工具决定 —— 在 `bl_batch_report` 里是
+#   「A/B 组：文件 / 目录 / 逗号分隔」，但另一个工具完全可能用 `a` 表示
+#   "alpha 阈值"之类**与路径无关**的东西。放通用名单 = 给未来埋一个
+#   "新工具加了个 a 参数，却被闸门无声拦掉"的陷阱。
+#   实测（2026-10-14）：当前全库只有 `bl_batch_report` 用 `a`/`b`，
+#   所以现在放通用名单**恰好**没坏 —— 但"恰好没坏"不是"对"。
+#   ⇒ 判据：**名字本身不足以判断是不是路径时，就必须按工具限定**。
+_PATH_ARGS_SCOPED = {
+    "bl_batch_report": ("a", "b"),
+    "bl_crash": ("path",),
+    "bl_crashguard": ("path",),
+}
+
+# ★ 反向守卫：这些参数**名字像路径但不是路径**，不得进闸门。
+#   把它写成数据而不是注释 —— pbs_selftest 会拿它做**负向对照**：
+#   "故意把 target 加进 _PATH_ARGS ⇒ 断言必须变红"，
+#   这样"该拦的拦了"与"不该拦的没拦"两边都被证明（本项目既有纪律）。
+_PATH_ARGS_NEVER = ("target", "paths", "keys", "edits", "check", "excludeModules")
 
 
 def _precheck_path_args(name, args):
-    """L4 前置闸门：返回 None（放行）或结构化错误 dict（拒绝）。"""
-    for key in _PATH_ARGS:
+    """L4 前置闸门：返回 None（放行）或结构化错误 dict（拒绝）。
+
+    ★ 2026-10-14 补全：名单从 5 项扩到"通用 11 项 + 按工具 2 项"，
+      并让**报错可操作**（用户明确要求：要说清为什么拦、怎么放行）。
+    """
+    keys = tuple(_PATH_ARGS) + tuple((_PATH_ARGS_SCOPED or {}).get(name, ()))
+    for key in keys:
         v = args.get(key)
         if v is None or v == "":
             continue
@@ -3716,6 +3765,19 @@ def _precheck_path_args(name, args):
         if not ok:
             pay["tool"] = name
             pay["arg"] = key
+            # ★ 可操作的报错（用户要求）：说清"为什么拦"+"怎么放行"。
+            #   path_allowed 的 message 已经给了允许根与 env 名，这里再补
+            #   ① 为什么这个参数要拦 ② 两条放行路径的具体写法 ③ 别用"改 cwd 绕过"。
+            pay["why"] = ("%s 是**调用方可控的文件路径**，闸门在**唯一入口**统一拦它，"
+                          "避免「改全了 N 个消费点却漏了第 N+1 个」。" % key)
+            pay["howToAllow"] = (
+                "两条放行路径：\n"
+                "  ① 只放开这一个目录（推荐）：设环境变量\n"
+                "       BLBRIDGE_ALLOW_WRITE_ROOTS=%s\n"
+                "     （多个目录用 %s 分隔；可运行 `bl_check_dispatch.py` 复核）\n"
+                "  ② 完全关闭边界锁（不推荐）：设 BLBRIDGE_ALLOW_ANY_PATH=1\n"
+                "⚠️ 不要指望「换个工作目录」绕过 —— 闸门比的是 realpath，与 cwd 无关。"
+                % (os.path.dirname(str(v)) or str(v), os.pathsep))
             return pay
     return None
 
