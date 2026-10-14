@@ -195,7 +195,7 @@ _pid_alive(一个明明活着的进程) = False     ← 应为 True
 - `bl_chain.py:160` `BLBRIDGE_DIR = ...\CodeBuddy\20260923171333\BlBridge`，
   `bl_chain.py:177` `args = [BLBRIDGE_DIR, "tools", "bl_mcp.py"]`
   ⇒ **现场层跑的是仓库 `tools/bl_mcp.py`（最新）**，不是部署副本。
-- 旁证：`chain_status` 的 `blbridge` 上游 = **64 个工具**，`connected: true`。
+- 旁证：`chain_status` 的 `blbridge` 上游 = **79 个工具**，`connected: true`。
 
 > ⇒ **两条链均不阻塞**：C# 侧（DLL）已最新且符号齐全；Python 侧走仓库 `tools/`，也是最新。
 > ⇒ **但部署副本的漂移是真的**，会误导"从 `Modules\` 跑 build_check"的人 —— 已知，暂不重新部署（改完前不 `-Deploy`）。
