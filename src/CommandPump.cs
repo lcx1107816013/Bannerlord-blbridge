@@ -45,6 +45,49 @@ namespace BlBridge
             get { return Path.Combine(CommandsRoot, DoneFolder); }
         }
 
+        /// <summary>
+        /// 游戏安装目录（游戏内运行时可用）。
+        ///
+        /// 为什么不用 `ModuleHelper.GetActiveModules()[0].FolderPath`：那要
+        /// `using TaleWorlds.ModuleManager`，会把 CapabilityProbe 从"纯 BCL、可离线编译断言"
+        /// 变成"依赖 TaleWorlds、只能真机测"。而这个探针最需要能跑的场景恰恰是
+        /// **没装 Modding Kit** 的机器 —— 它必须能被离线编译与断言。
+        ///
+        /// 这里的做法是**零依赖**的：从本模块自己的 `<c>Modules\BlBridge\SubModule.xml</c>`
+        /// 反推 `Modules\` 的父目录即可。找不到就返回空串，判定层会如实报"读不到"，
+        /// 而不是猜一个路径出来。
+        /// </summary>
+        private static string GameInstallDir()
+        {
+            try
+            {
+                // ModuleHelper 是 TaleWorlds 类型，不能用（见上）；用反射避免编译期依赖。
+                var t = Type.GetType("TaleWorlds.ModuleManager.ModuleHelper, TaleWorlds.Core");
+                if (t != null)
+                {
+                    var m = t.GetMethod("GetModuleFullPath",
+                                        System.Reflection.BindingFlags.Public |
+                                        System.Reflection.BindingFlags.Static);
+                    if (m != null)
+                    {
+                        var path = m.Invoke(null, new object[] { BridgeConfig.ModuleId }) as string;
+                        if (!string.IsNullOrEmpty(path))
+                        {
+                            // <game>\Modules\<id>\SubModule.xml -> <game>
+                            var dir = Path.GetDirectoryName(path);        // Modules\<id>
+                            dir = Path.GetDirectoryName(dir);             // Modules
+                            var game = Path.GetDirectoryName(dir);        // <game>
+                            if (!string.IsNullOrEmpty(game)) return game;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return "";
+        }
+
         public static void EnsureDirs()
         {
             try
@@ -279,6 +322,14 @@ namespace BlBridge
                     + ",\"note\":" + Protocol.Q(
                         "本 dump 带 MemoryInfoList（页保护）；bl_crash 可直接读，"
                         + "或用 dump_streams.py 核对 stream 16 是否存在") + "}");
+            }
+            if (method == "capability_probe")
+            {
+                // 游戏端能力探测（只读）：编辑器能不能跑、差什么。
+                // 放在 crash_test 旁边同理 —— 它也是**诊断**用途，且**零游戏依赖**
+                // （纯 BCL + 纯读文件 ⇒ 没装 Modding Kit 时也能跑，
+                //  而"没装 Kit"恰恰是它最需要能跑的时候）。
+                return Protocol.Success(id, CapabilityProbe.Json(GameInstallDir()));
             }
             if (method == "crash_test")
             {

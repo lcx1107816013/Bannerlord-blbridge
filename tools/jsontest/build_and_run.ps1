@@ -1,5 +1,5 @@
 param(
-    [string]$Root = 'c:\Users\LCGX\CodeBuddy\20260923171333\BlBridge'
+    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 )
 $ErrorActionPreference = 'Stop'
 $csc = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe'
@@ -24,6 +24,8 @@ $src = @(
     (Join-Path $Root 'src\MainMenuStates.cs'), # v0.8.22: main-menu state names (same set as bl_mcp.py)
     (Join-Path $Root 'src\OrderSpec.cs'),      # v0.8.23: order name table / validator (safety boundary)
     (Join-Path $Root 'src\HarmonyMessage.cs')  # v0.8.47: HarmonyException message parsing (pure BCL)
+    (Join-Path $Root 'src\CapabilityProbe.cs'),  # 2026-10-14: game-side capability probe (pure BCL)
+    (Join-Path $Root 'tools\jsontest\CapabilityProbeTest.cs')
 )
 Write-Output ("[1/2] compile offline unit tests -> " + $out)
 # /r:System.Web.Extensions.dll : EnvelopeTest uses the BCL's real JavaScriptSerializer as an

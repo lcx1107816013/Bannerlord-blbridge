@@ -1542,6 +1542,21 @@ def apply_config(edits, dry_run=False, allow_missing=False, _structured=False, p
 
 TOOLS = [
     {
+        "name": "bl_capability_probe",
+        "description": ("**游戏端能力探测（只读）**：回答「编辑器能不能用、差什么」，"
+                        "而不是让你从一次失败里猜。逐项返回："
+                        "① Modding Kit 是否安装（`bin/Win64_Shipping_wEditor` + 7 个必需装配）；"
+                        "② 编辑器探针模组是否安装（`Modules/BannerlordSage.EditorProbe` + 其 DLL）；"
+                        "③ 游戏版本是否满足编辑器客户端的**硬门禁 v1.4.8**；"
+                        "④ Kit 版本与客户端版本是否一致（不一致的症状是**进场景崩**，与「没装 Kit」完全不同）。"
+                        "★ 它**纯 BCL + 纯读文件**，不加载任何编辑器装配 —— 所以**没装 Kit 时照样能跑**，"
+                        "而那正是最需要它的时刻。"
+                        "★ 为什么需要它（实测）：客户端对 Kit 缺失只报一个笼统的 "
+                        "`version_mismatch` / `invalid_session`，看不出到底缺什么。"
+                        "**只读，不写、不改、不装任何东西。**"),
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "bl_status",
         "description": ("读取模块状态（是否加载、日志目录、会话内场次、最近一场战斗）"
                         "+ 构建一致性（源码/构建/部署/进程内）+ 会话诊断（游戏是否真的在跑）。"),
@@ -3130,7 +3145,7 @@ TOOL_GROUPS = {
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_lexicon",
         "bl_crashguard",
-        "bl_report", "bl_save_diag", "bl_source_map",
+        "bl_report", "bl_save_diag", "bl_source_map", "bl_capability_probe",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
         # B2（v0.8.48）：崩溃落盘 —— 诊断族，与 bl_crash 同类
         "bl_dump", "bl_crash_test",
@@ -4288,6 +4303,17 @@ def call_tool(name, args):
                            "其余时刻会明确报 not_video（附当前状态名 + via=状态机是从哪拿到的）；"
                            "拿不到状态机时报 no_state_manager")
         return out
+
+    if name == "bl_capability_probe":
+        # 并发纪律：走游戏通道的调用一律串行（见 CONCURRENCY.md）。
+        # 它是诊断类、零副作用，所以超时给短一点：拿不到就如实说"游戏没在跑"，
+        # 而不是让调用方等满 30 秒。
+        resp, err = send_command("capability_probe", {}, timeout=10)
+        if err:
+            return {"ok": False, "error": err,
+                    "hint": "能力探测走游戏通道 —— 需要游戏正在运行且 BlBridge 已加载"}
+        body = resp.get("result") or {}
+        return body if isinstance(body, dict) else {"ok": True, "result": body}
 
     if name == "bl_cheat_mode":
         mode = args.get("mode") or "status"
