@@ -107,21 +107,88 @@ Get-ChildItem (Join-Path $game 'bin\Win64_Shipping_Client') -Filter 'Bannerlord.
 
 ---
 
-## ⚠️ 会再次发生
+## ⚠️ 会再次发生 —— 所以有脚本
 
-**Vortex 每次「Deploy Mods」都会重新把链接建回来。** 判据是创建时间：
+**Vortex 每次「Deploy Mods」都会把链接建回来。** 手工修不可持续。
 
 ```powershell
-Get-ChildItem "<game>\bin\Win64_Shipping_Client" -Filter 'Bannerlord.BLSE*' -Force |
-  Select-Object Name, @{n='IsLink';e={[bool]($_.Attributes -band [IO.FileAttributes]::ReparsePoint)}}
+# 检查
+powershell -ExecutionPolicy Bypass -File tools\fix-blse-deploy.ps1 -Check
+# 修
+powershell -ExecutionPolicy Bypass -File tools\fix-blse-deploy.ps1
+# BLSE 升级前交还给 Vortex
+powershell -ExecutionPolicy Bypass -File tools\fix-blse-deploy.ps1 -Revert
 ```
 
-只要 `IsLink=True`，游戏就起不来。两条长期解法：
+退出码：`0` 健康/已修好，`1` 需要修，`3` 找不到路径。
 
-| 方案 | 代价 |
-|---|---|
-| 在 Vortex 里把 BLSE 的部署方式改成 **Hardlink Deployment**（Settings → Mods → Deployment Method） | 一次性；但改部署方式 Vortex 会重灌全部 mod |
-| 每次 Vortex 部署后重跑上面的修复脚本 | 需要记得 |
+### 为什么不能靠改 Vortex 设置一劳永逸
+
+**这是本机约束，不是偏好**：
+
+| 部署方式 | 能不能用 | 原因 |
+|---|---|---|
+| Symlink（当前） | ❌ | 跨卷可用，但 BLSE 推到错的根目录 —— 就是本问题 |
+| **Hardlink** | ❌ **不可能** | 硬链接要求**同一个卷**。暂存目录在 `C:`，游戏在 `G:` |
+| Copy | ⚠️ 能跑 | 但 Vortex 之后不知道游戏目录里是什么，改 mod 不同步 |
+
+实测：`staging volume = C`、`game volume = G`。**跨卷把硬部署钉死了。**
+
+所以唯一可行的形状就是本脚本做的事：**把真实副本放进游戏 bin**。
+
+### 代价（必须知道）
+
+**Vortex 之后不认为这 9 个文件归它管。** 因此：
+- 每次 Deploy Mods 后重跑本脚本
+- BLSE 升级前先 `-Revert`，让 Vortex 重新部署
+
+---
+
+## ★ 写这个脚本时踩的坑，值得单列
+
+### 坑 1：PowerShell 脚本里的中文会被解析器打断
+
+第一版脚本带中文注释，**无 BOM 的 UTF-8**。PowerShell 5.1 按 GBK 读它：
+
+```
+At fix-blse-deploy.ps1:231 char:1
++ }
++ ~
+Unexpected token '}' ...
+The string is missing the terminator: ".
+```
+
+乱码把一个引号吃掉了，于是**报错位置指向一个完全无关的 `}`**。
+
+**而仓库里其他 3 个 `.ps1` 的非 ASCII 字符数都是 0** —— 那不是巧合，是约定。
+已改为**纯 ASCII**（脚本内的说明也用英文），5.1 与 7 都能跑。
+
+> 与「heredoc 陷阱」同源：含引号/非 ASCII 的脚本，先确认**解释器用什么编码读它**。
+
+### 坑 2：判据只认一种故障形状
+
+第一版：
+
+```powershell
+$needsFix = ($standalone.State -eq 'link')
+```
+
+测试删掉 `Standalone.exe` 后，脚本输出：
+
+```
+links 0 / real 8 / missing 1
+OK: BLSE files are real copies. The game can start.
+```
+
+**文件都不在了，它说"可以启动"。**
+
+因为 `missing` 不是 `link`，所以 "不是链接" 成立 ⇒ 判定健康。
+**只认一种故障形状，对其它形状一律报健康** —— 这正是本项目反复出现的那个病。
+
+改成按**健康**判定（`State -ne 'real'`），并把修复分支从「遍历 links」
+改成「遍历所有非 real」，否则缺文件会被汇总但不会被修。
+
+已用缺失状态实测：`-Check` 报 `BROKEN`（exit 1）→ 修复分支补回 152,256 B。
 
 ---
 
@@ -133,9 +200,9 @@ Get-ChildItem "<game>\bin\Win64_Shipping_Client" -Filter 'Bannerlord.BLSE*' -For
 cmd /c mklink /J "<stage>\Modules" "<game>\Modules"
 ```
 
-它能消掉 `DirectoryNotFoundException`，但**是错的**：它让 BLSE 把暂存目录当成游戏根，
-于是 `Modules` 之外的一切（`Data`、`GUI`、`Shaders`、`XmlSchemas`…）仍然指向错误的位置。
-**它把一个"立刻失败"变成了"以后某处诡异失败"。** 已撤销。
+它确实消掉了 `DirectoryNotFoundException`。但**是错的**：它让 BLSE 把**暂存目录**
+当成游戏根，于是 `Modules` 之外的一切（`Data`、`GUI`、`Shaders`、`XmlSchemas`…）
+仍然指向错误的位置。**它把一个"立刻失败"变成了"以后某处诡异失败"。** 已撤销。
 
 > 教训与本项目那条纪律同源：**让错误消失 ≠ 让事情正确。**
 > 一个能跑过检查的假修复，比一个明确报错的失败更贵。
