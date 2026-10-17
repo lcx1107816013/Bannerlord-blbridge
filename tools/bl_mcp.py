@@ -2835,6 +2835,35 @@ TOOLS = [
         },
     },
     {
+        "name": "bl_archive_symbols",
+        "description": ("**崩溃栈 → C# 源码（Bridge→Archive 直连，宿主侧，只读）**："
+                        "把 `bl_crash --deep` / `bl_exceptions` 给出的**托管符号**"
+                        "（如 `TaleWorlds.CampaignSystem.Hero.AddSkillXp`）交给 Archive 的 C# 索引，"
+                        "取回**那个类型的真实反编译源码**。"
+                        "补的是符号栈**只有名字、没有代码**那一层 —— 知道崩在 `OnRemoveBehavior` 里，"
+                        "不等于知道它期望什么前提条件。"
+                        "★ 符号 → 类型名是**推导**（按最后一个 `.` 切），推不出来**如实报 unresolved**，"
+                        "不猜近似名；猜错会返回**别的类型**的源码，而读的人不会怀疑它。"
+                        "★ 类型不存在时 Archive 用**普通文本**报 `was not found`（**不是 isError**）"
+                        "⇒ 本工具**单独识别这句话**并报 `not_found`，**绝不**把它当源码正文返回。"
+                        "★ Archive 起不来时报 `archive_unavailable` —— 那**不代表**类型不存在。"
+                        "只调 `ba_read_csharp_type`（只读），不碰游戏、不需要游戏在跑。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbols": {"type": "array", "items": {"type": "string"},
+                            "description": "托管符号或类型名，可多个。也接受裸类型名（如 Hero）"},
+                "symbol": {"type": "string", "description": "单个符号（symbols 的简写）"},
+                "fromCrash": {"type": "boolean",
+                              "description": "从最近一份崩溃报告读取栈符号并逐帧解释"},
+                "maxSource": {"type": "integer",
+                              "description": "每个类型最多返回多少字符源码，默认 3000"},
+                "includeSource": {"type": "boolean",
+                                  "description": "是否返回源码正文，默认 true；false 时只给状态"},
+            },
+        },
+    },
+    {
         "name": "bl_concurrency_guide",
         "description": ("**并发纪律（宿主侧，只读，不碰游戏）**：告诉你**哪些工具能并发、最多几路**。"
                         "为什么需要：**所有走游戏通道的工具共用同一条串行泵**"
@@ -3149,6 +3178,10 @@ TOOL_GROUPS = {
         "bl_lookup_troop", "bl_blockade", "bl_build_check", "bl_config", "bl_crash", "bl_patches",
         "bl_json_health", "bl_ipc_replay", "bl_exception_detail", "bl_concurrency_guide",
         "bl_lexicon",
+        # Bridge→Archive 直连：诊断族（与 bl_crash / bl_exceptions / bl_lexicon 同类）。
+        # 归 lab 而不是 core 的理由：它**需要 Archive 在跑**、要起子进程、耗时可秒级，
+        # 和 core 那批"读本地 JSON 就返回"的轻工具不是一档。
+        "bl_archive_symbols",
         "bl_crashguard",
         "bl_report", "bl_save_diag", "bl_source_map", "bl_capability_probe",
         "bl_mcm_settings", "bl_ui_extensions", "bl_exceptions", "bl_patch_failures",
@@ -4078,6 +4111,39 @@ def call_tool(name, args):
             path=args.get("path"),
             limit=int(args.get("limit") or 20),
         )
+
+    if name == "bl_archive_symbols":
+        # 宿主侧工具：Bridge→Archive 直连。把崩溃栈的托管符号交给 Archive 的 C# 索引，
+        # 取回那个类型的真实反编译源码。**不碰游戏、不需要游戏在跑**
+        # （与 bl_lexicon / bl_crash / bl_exception_detail 同类）。
+        #
+        # ★ 它与 bl_lexicon 是互补的两层，不重复：
+        #   bl_lexicon 答「这个异常**意味着什么、该怎么办**」（词条库，短语匹配）；
+        #   本工具答「这段代码**到底写了什么**」（真实源码）。
+        #   前者数据不随仓库分发；后者用的是我们自己的索引，随时可查。
+        import bl_archive_symbols as _asym
+
+        wanted = list(args.get("symbols") or [])
+        if args.get("symbol"):
+            wanted.append(args["symbol"])
+        note = None
+        if args.get("fromCrash"):
+            more, crash_note = _asym.symbols_from_latest_crash()
+            wanted.extend(more)
+            if crash_note:
+                note = crash_note
+        if not wanted:
+            return {"ok": False, "reason": "no_symbols",
+                    "detail": note or "没有提供 symbols/symbol，也没有可读的崩溃栈"}
+
+        out = _asym.explain_symbols(
+            wanted,
+            max_source=int(args.get("maxSource") or 3000),
+            include_source=args.get("includeSource") is not False,
+        )
+        if note:
+            out.setdefault("notes", []).append(note)
+        return out
 
     if name == "bl_lexicon":
         # 宿主侧工具：崩溃词典（人话 + 修复建议）。**词条数据不随本仓库分发**
